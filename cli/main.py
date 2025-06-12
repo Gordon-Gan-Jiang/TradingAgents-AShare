@@ -1,6 +1,7 @@
 from typing import Optional
 import datetime
 import typer
+from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 from rich.spinner import Spinner
@@ -700,6 +701,10 @@ def run_analysis():
         [analyst.value for analyst in selections["analysts"]], config=config, debug=True
     )
 
+    # Create result directory
+    results_dir = Path(config["results_dir"]) / selections["ticker"] / datetime.datetime.now().strftime("%Y-%m-%d")
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     # Now start the display layout
     layout = create_layout()
 
@@ -993,6 +998,23 @@ def run_analysis():
         for section in message_buffer.report_sections.keys():
             if section in final_state:
                 message_buffer.update_report_section(section, final_state[section])
+
+        # Save results to file
+        report_dir = results_dir / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        for section, content in message_buffer.report_sections.items():
+            if content:
+                with open(report_dir / f"{section}.md", "w") as f:
+                    f.write(content)
+        
+        for (timestamp, msg_type, content) in message_buffer.messages:
+            with open(results_dir / "messages.log", "a") as f:
+                f.write(f"{timestamp} [{msg_type}]: {content}\n")
+        
+        for (timestamp, tool_name, args) in message_buffer.tool_calls:
+            with open(results_dir / "tool_calls.log", "a") as f:
+                f.write(f"{timestamp} [Tool: {tool_name}]: {args}\n")
 
         # Display the complete final report
         display_complete_report(final_state)
