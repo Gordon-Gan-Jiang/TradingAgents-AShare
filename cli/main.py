@@ -2,6 +2,7 @@ from typing import Optional
 import datetime
 import typer
 from pathlib import Path
+from functools import wraps
 from rich.console import Console
 from rich.panel import Panel
 from rich.spinner import Spinner
@@ -702,8 +703,51 @@ def run_analysis():
     )
 
     # Create result directory
-    results_dir = Path(config["results_dir"]) / selections["ticker"] / datetime.datetime.now().strftime("%Y-%m-%d")
+    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
     results_dir.mkdir(parents=True, exist_ok=True)
+    report_dir = results_dir / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    log_file = results_dir / "message_tool.log"
+    log_file.touch(exist_ok=True)
+
+    def save_message_decorator(obj, func_name):
+        func = getattr(obj, func_name)
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            func(*args, **kwargs)
+            timestamp, message_type, content = obj.messages[-1]
+            content = content.replace("\n", " ")  # Replace newlines with spaces
+            with open(log_file, "a") as f:
+                f.write(f"{timestamp} [{message_type}] {content}\n")
+        return wrapper
+    
+    def save_tool_call_decorator(obj, func_name):
+        func = getattr(obj, func_name)
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            func(*args, **kwargs)
+            timestamp, tool_name, args = obj.tool_calls[-1]
+            args_str = ", ".join(f"{k}={v}" for k, v in args.items())
+            with open(log_file, "a") as f:
+                f.write(f"{timestamp} [Tool Call] {tool_name}({args_str})\n")
+        return wrapper
+
+    def save_report_section_decorator(obj, func_name):
+        func = getattr(obj, func_name)
+        @wraps(func)
+        def wrapper(section_name, content):
+            func(section_name, content)
+            if section_name in obj.report_sections and obj.report_sections[section_name] is not None:
+                content = obj.report_sections[section_name]
+                if content:
+                    file_name = f"{section_name}.md"
+                    with open(report_dir / file_name, "w") as f:
+                        f.write(content)
+        return wrapper
+
+    message_buffer.add_message = save_message_decorator(message_buffer, "add_message")
+    message_buffer.add_tool_call = save_tool_call_decorator(message_buffer, "add_tool_call")
+    message_buffer.update_report_section = save_report_section_decorator(message_buffer, "update_report_section")
 
     # Now start the display layout
     layout = create_layout()
@@ -998,23 +1042,6 @@ def run_analysis():
         for section in message_buffer.report_sections.keys():
             if section in final_state:
                 message_buffer.update_report_section(section, final_state[section])
-
-        # Save results to file
-        report_dir = results_dir / "reports"
-        report_dir.mkdir(parents=True, exist_ok=True)
-
-        for section, content in message_buffer.report_sections.items():
-            if content:
-                with open(report_dir / f"{section}.md", "w") as f:
-                    f.write(content)
-        
-        for (timestamp, msg_type, content) in message_buffer.messages:
-            with open(results_dir / "messages.log", "a") as f:
-                f.write(f"{timestamp} [{msg_type}]: {content}\n")
-        
-        for (timestamp, tool_name, args) in message_buffer.tool_calls:
-            with open(results_dir / "tool_calls.log", "a") as f:
-                f.write(f"{timestamp} [Tool: {tool_name}]: {args}\n")
 
         # Display the complete final report
         display_complete_report(final_state)
