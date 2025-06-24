@@ -703,6 +703,7 @@ def get_YFin_data(
 
 
 def get_stock_news_openai(ticker, curr_date):
+    config = get_config()
     client = OpenAI()
 
     response = client.responses.create(
@@ -713,7 +714,7 @@ def get_stock_news_openai(ticker, curr_date):
                 "content": [
                     {
                         "type": "input_text",
-                        "text": f"Can you search Social Media for {ticker} on TSLA from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period.",
+                        "text": f"Can you search Social Media for {ticker} from 7 days before {curr_date} to {curr_date}? Make sure you only get the data posted during that period.",
                     }
                 ],
             }
@@ -737,6 +738,7 @@ def get_stock_news_openai(ticker, curr_date):
 
 
 def get_global_news_openai(curr_date):
+    config = get_config()
     client = OpenAI()
 
     response = client.responses.create(
@@ -771,6 +773,7 @@ def get_global_news_openai(curr_date):
 
 
 def get_fundamentals_openai(ticker, curr_date):
+    config = get_config()
     client = OpenAI()
 
     response = client.responses.create(
