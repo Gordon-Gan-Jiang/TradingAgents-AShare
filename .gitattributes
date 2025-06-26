@@ -1,0 +1,2 @@
+init-ollama.sh text eol=lf
+build.sh text eol=lf
