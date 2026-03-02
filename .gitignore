@@ -222,3 +222,7 @@ __marimo__/
 eval_results/
 reports/
 results/
+
+# Private dirs (not open-source for now)
+docs/
+frontend/
