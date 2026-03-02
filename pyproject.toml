@@ -32,6 +32,7 @@ dependencies = [
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
     "akshare>=1.16.80",
+    "baostock>=0.8.9",
 ]
 
 [project.scripts]

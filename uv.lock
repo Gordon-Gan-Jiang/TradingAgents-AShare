@@ -266,6 +266,18 @@ wheels = [
 ]
 
 [[package]]
+name = "baostock"
+version = "0.8.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pandas" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ee/d5/0fb2c61f392f89b1655490acb17a02861f1f1c38e973c9fc6aa049e54401/baostock-0.8.9.tar.gz", hash = "sha256:8169cdbed14fa442ace63c59549bef3f92b0c3dd1df9e5d9069f7bd04a76b0da", size = 21876, upload-time = "2024-05-31T02:56:54.546Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/37/bbabac2d33723d71bd8dbd5e819d9cbe5dc1e031b7dd12ed7de8fa040816/baostock-0.8.9-py3-none-any.whl", hash = "sha256:7a51fb30cd6b4325f5517198e350dc2fffaaab2923cd132b9f747b8b73ae7303", size = 45923, upload-time = "2024-05-31T02:56:53.161Z" },
+]
+
+[[package]]
 name = "beautifulsoup4"
 version = "4.13.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3622,6 +3634,7 @@ source = { editable = "." }
 dependencies = [
     { name = "akshare" },
     { name = "backtrader" },
+    { name = "baostock" },
     { name = "chainlit" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
@@ -3649,6 +3662,7 @@ dependencies = [
 requires-dist = [
     { name = "akshare", specifier = ">=1.16.80" },
     { name = "backtrader", specifier = ">=1.9.78.123" },
+    { name = "baostock", specifier = ">=0.8.9" },
     { name = "chainlit", specifier = ">=2.5.5" },
     { name = "langchain-anthropic", specifier = ">=0.3.15" },
     { name = "langchain-core", specifier = ">=0.3.81" },

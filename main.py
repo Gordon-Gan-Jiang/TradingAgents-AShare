@@ -18,10 +18,10 @@ config["max_risk_discuss_rounds"] = int(os.getenv("MAX_RISK_DISCUSS_ROUNDS", "1"
 
 # Configure data vendors (prefer cn_akshare for A-share, fallback to yfinance)
 config["data_vendors"] = {
-    "core_stock_apis": "cn_akshare,yfinance",
-    "technical_indicators": "cn_akshare,yfinance",
-    "fundamental_data": "cn_akshare,yfinance",
-    "news_data": "cn_akshare,yfinance",
+    "core_stock_apis": "cn_akshare,cn_baostock,yfinance",
+    "technical_indicators": "cn_akshare,cn_baostock,yfinance",
+    "fundamental_data": "cn_akshare,cn_baostock,yfinance",
+    "news_data": "cn_akshare,cn_baostock,yfinance",
 }
 
 # Initialize with custom config
