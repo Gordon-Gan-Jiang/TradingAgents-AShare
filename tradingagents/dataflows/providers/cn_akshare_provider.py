@@ -6,6 +6,7 @@ import pandas as pd
 from stockstats import wrap
 
 from .base import BaseMarketDataProvider
+from ..trade_calendar import cn_market_phase, cn_no_data_reason, cn_today_str, is_cn_trading_day
 
 
 class CnAkshareProvider(BaseMarketDataProvider):
@@ -152,7 +153,8 @@ class CnAkshareProvider(BaseMarketDataProvider):
                     end_date=end_yyyymmdd,
                     adjust="qfq",
                 )
-                return self._normalize_hist_df(df)
+                out = self._normalize_hist_df(df)
+                return self._maybe_append_realtime_row(symbol, out, end_date)
             except Exception as exc:
                 em_last_exc = exc
                 if i < 1:
@@ -166,7 +168,8 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 end_date=end_yyyymmdd,
                 adjust="qfq",
             )
-            return self._normalize_hist_df(df)
+            out = self._normalize_hist_df(df)
+            return self._maybe_append_realtime_row(symbol, out, end_date)
         except Exception:
             pass
 
@@ -178,13 +181,72 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 end_date=end_yyyymmdd,
                 adjust="qfq",
             )
-            return self._normalize_hist_df(df)
+            out = self._normalize_hist_df(df)
+            return self._maybe_append_realtime_row(symbol, out, end_date)
         except Exception:
             pass
 
         raise NotImplementedError(
             f"cn_akshare is temporarily unavailable for price history (eastmoney/sina/tencent all failed): {em_last_exc}"
         ) from em_last_exc
+
+    def _fetch_realtime_row(self, symbol: str) -> pd.DataFrame:
+        ak = self._ak()
+        spot = ak.stock_individual_spot_xq(symbol=self._xq_symbol(symbol))
+        if spot is None or spot.empty:
+            return pd.DataFrame()
+        if not {"item", "value"}.issubset(set(spot.columns)):
+            return pd.DataFrame()
+        kv = dict(zip(spot["item"].astype(str), spot["value"]))
+
+        date_val = pd.to_datetime(kv.get("时间"), errors="coerce")
+        if pd.isna(date_val):
+            date_val = pd.to_datetime(cn_today_str())
+        row = {
+            "Date": pd.to_datetime(date_val).normalize(),
+            "Open": pd.to_numeric(kv.get("今开"), errors="coerce"),
+            "High": pd.to_numeric(kv.get("最高"), errors="coerce"),
+            "Low": pd.to_numeric(kv.get("最低"), errors="coerce"),
+            "Close": pd.to_numeric(kv.get("现价"), errors="coerce"),
+            "Volume": pd.to_numeric(kv.get("成交量"), errors="coerce"),
+        }
+        rt = pd.DataFrame([row]).dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+        return rt
+
+    def _maybe_append_realtime_row(self, symbol: str, hist_df: pd.DataFrame, end_date: str) -> pd.DataFrame:
+        if hist_df is None:
+            hist_df = pd.DataFrame()
+        try:
+            end_dt = pd.to_datetime(end_date, errors="coerce")
+            if pd.isna(end_dt):
+                return hist_df
+            today = pd.to_datetime(cn_today_str())
+            if end_dt.normalize() < today:
+                return hist_df
+            if not is_cn_trading_day(today.strftime("%Y-%m-%d")):
+                return hist_df
+
+            has_today = False
+            if not hist_df.empty:
+                has_today = (pd.to_datetime(hist_df["Date"]).dt.normalize() == today).any()
+            if has_today:
+                return hist_df
+
+            phase = cn_market_phase()
+            if phase in ("pre_open", "closed"):
+                return hist_df
+
+            rt = self._fetch_realtime_row(symbol)
+            if rt.empty:
+                return hist_df
+            if pd.to_datetime(rt.iloc[0]["Date"]).normalize() != today:
+                return hist_df
+
+            merged = pd.concat([hist_df, rt], ignore_index=True)
+            merged = merged.sort_values("Date").drop_duplicates(subset=["Date"], keep="last")
+            return merged.reset_index(drop=True)
+        except Exception:
+            return hist_df
 
     def get_stock_data(self, symbol: str, start_date: str, end_date: str) -> str:
         df = self._fetch_hist_df(symbol, start_date, end_date)
@@ -232,7 +294,13 @@ class CnAkshareProvider(BaseMarketDataProvider):
         d = curr_dt
         while d >= begin:
             key = d.strftime("%Y-%m-%d")
-            lines.append(f"{key}: {values_by_date.get(key, 'N/A：该日期暂无数据（可能未收盘、数据延迟或非交易日）')}")
+            if key in values_by_date:
+                value = values_by_date[key]
+                if value == "N/A":
+                    value = cn_no_data_reason(key)
+            else:
+                value = cn_no_data_reason(key)
+            lines.append(f"{key}: {value}")
             d -= timedelta(days=1)
 
         result = (

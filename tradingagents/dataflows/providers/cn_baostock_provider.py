@@ -8,6 +8,7 @@ import pandas as pd
 from stockstats import wrap
 
 from .base import BaseMarketDataProvider
+from ..trade_calendar import cn_no_data_reason
 
 
 class CnBaoStockProvider(BaseMarketDataProvider):
@@ -157,8 +158,13 @@ class CnBaoStockProvider(BaseMarketDataProvider):
         d = curr_dt
         while d >= begin:
             key = d.strftime("%Y-%m-%d")
+            value = values_by_date.get(key)
+            if value is None:
+                value = cn_no_data_reason(key)
+            elif value == "N/A":
+                value = cn_no_data_reason(key)
             lines.append(
-                f"{key}: {values_by_date.get(key, 'N/A：该日期暂无数据（可能未收盘、数据延迟或非交易日）')}"
+                f"{key}: {value}"
             )
             d -= timedelta(days=1)
 

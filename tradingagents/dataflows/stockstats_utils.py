@@ -4,6 +4,7 @@ from stockstats import wrap
 from typing import Annotated
 import os
 from .config import get_config
+from .trade_calendar import cn_no_data_reason, is_cn_symbol
 
 
 class StockstatsUtils:
@@ -22,7 +23,7 @@ class StockstatsUtils:
         today_date = pd.Timestamp.today()
         curr_date_dt = pd.to_datetime(curr_date)
 
-        end_date = today_date
+        end_date = today_date + pd.DateOffset(days=1)
         start_date = today_date - pd.DateOffset(years=15)
         start_date_str = start_date.strftime("%Y-%m-%d")
         end_date_str = end_date.strftime("%Y-%m-%d")
@@ -61,4 +62,6 @@ class StockstatsUtils:
             indicator_value = matching_rows[indicator].values[0]
             return indicator_value
         else:
+            if is_cn_symbol(symbol.strip().upper().replace(".SS", ".SH")):
+                return cn_no_data_reason(curr_date_str)
             return "N/A：该日期暂无数据（可能未收盘、数据延迟或非交易日）"

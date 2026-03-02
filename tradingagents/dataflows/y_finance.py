@@ -1,9 +1,10 @@
 from typing import Annotated
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import yfinance as yf
 import os
 from .stockstats_utils import StockstatsUtils
+from .trade_calendar import cn_no_data_reason, is_cn_symbol
 
 def get_YFin_data_online(
     symbol: Annotated[str, "ticker symbol of the company"],
@@ -18,7 +19,10 @@ def get_YFin_data_online(
     ticker = yf.Ticker(symbol.upper())
 
     # Fetch historical data for the specified date range
-    data = ticker.history(start=start_date, end=end_date)
+    end_date_inclusive = (
+        datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    data = ticker.history(start=start_date, end=end_date_inclusive)
 
     # Check if data is empty
     if data.empty:
@@ -151,8 +155,10 @@ def get_stock_stats_indicators_window(
             # Look up the indicator value for this date
             if date_str in indicator_data:
                 indicator_value = indicator_data[date_str]
+                if indicator_value == "N/A":
+                    indicator_value = _missing_indicator_reason(symbol, date_str)
             else:
-                indicator_value = "N/A：该日期暂无数据（可能未收盘、数据延迟或非交易日）"
+                indicator_value = _missing_indicator_reason(symbol, date_str)
             
             date_values.append((date_str, indicator_value))
             current_dt = current_dt - relativedelta(days=1)
@@ -219,7 +225,7 @@ def _get_stock_stats_bulk(
         today_date = pd.Timestamp.today()
         curr_date_dt = pd.to_datetime(curr_date)
         
-        end_date = today_date
+        end_date = today_date + pd.DateOffset(days=1)
         start_date = today_date - pd.DateOffset(years=15)
         start_date_str = start_date.strftime("%Y-%m-%d")
         end_date_str = end_date.strftime("%Y-%m-%d")
@@ -291,6 +297,14 @@ def get_stockstats_indicator(
         return ""
 
     return str(indicator_value)
+
+
+def _missing_indicator_reason(symbol: str, date_str: str) -> str:
+    s = symbol.strip().upper()
+    normalized = s.replace(".SS", ".SH")
+    if is_cn_symbol(normalized):
+        return cn_no_data_reason(date_str)
+    return "N/A：该日期暂无数据（可能未收盘、数据延迟或非交易日）"
 
 
 def get_fundamentals(
