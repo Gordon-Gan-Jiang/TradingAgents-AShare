@@ -1,3 +1,5 @@
+import os
+
 from .alpha_vantage_common import AlphaVantageRateLimitError
 from .config import get_config
 from .providers import build_default_registry
@@ -36,6 +38,20 @@ _registry = build_default_registry()
 VENDOR_LIST = _registry.list_names()
 
 
+def _is_trace_enabled() -> bool:
+    env_value = os.getenv("TRADINGAGENTS_PROVIDER_TRACE")
+    if env_value is not None:
+        return env_value.strip().lower() in ("1", "true", "yes", "on")
+
+    config = get_config()
+    return bool(config.get("provider_trace", True))
+
+
+def _trace(msg: str) -> None:
+    if _is_trace_enabled():
+        print(f"[provider-trace] {msg}", flush=True)
+
+
 def get_category_for_method(method: str) -> str:
     """Get the category that contains the specified method."""
     for category, info in TOOLS_CATEGORIES.items():
@@ -72,24 +88,36 @@ def route_to_vendor(method: str, *args, **kwargs):
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
     fallback_vendors = _resolve_vendor_chain(method, vendor_config)
+    _trace(
+        f"method={method} category={category} configured='{vendor_config}' "
+        f"chain={fallback_vendors}"
+    )
 
     for vendor in fallback_vendors:
         provider = _registry.get(vendor)
         if provider is None:
+            _trace(f"method={method} vendor={vendor} status=skip reason=not-registered")
             continue
 
         impl_func = getattr(provider, method, None)
         if impl_func is None:
+            _trace(f"method={method} vendor={vendor} status=skip reason=not-implemented")
             continue
 
         try:
-            return impl_func(*args, **kwargs)
-        except (AlphaVantageRateLimitError, NotImplementedError):
+            result = impl_func(*args, **kwargs)
+            _trace(f"method={method} vendor={vendor} status=hit")
+            return result
+        except (AlphaVantageRateLimitError, NotImplementedError) as exc:
             # Try next provider for transient/routing issues or placeholder providers.
+            _trace(
+                f"method={method} vendor={vendor} status=fallback "
+                f"reason={type(exc).__name__}"
+            )
             continue
 
+    _trace(f"method={method} status=failed reason=no-available-vendor")
     raise RuntimeError(
         f"No available vendor for method '{method}'. "
         f"Configured chain: {fallback_vendors}"
     )
-

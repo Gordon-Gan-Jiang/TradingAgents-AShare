@@ -19,6 +19,8 @@ DEFAULT_CONFIG = {
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    # Provider routing trace logs (set TRADINGAGENTS_PROVIDER_TRACE=0 to disable)
+    "provider_trace": os.getenv("TRADINGAGENTS_PROVIDER_TRACE", "1").lower() in ("1", "true", "yes", "on"),
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
