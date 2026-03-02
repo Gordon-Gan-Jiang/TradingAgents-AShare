@@ -19,8 +19,12 @@ class Propagator:
         self, company_name: str, trade_date: str
     ) -> Dict[str, Any]:
         """Create the initial state for the agent graph."""
+        user_context = (
+            f"Symbol: {company_name}\n"
+            f"Trade date: {trade_date}"
+        )
         return {
-            "messages": [("human", company_name)],
+            "messages": [("human", user_context)],
             "company_of_interest": company_name,
             "trade_date": str(trade_date),
             "investment_debate_state": InvestDebateState(

@@ -5,30 +5,73 @@ import os
 import queue
 import re
 import traceback
+from io import StringIO
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+import pandas as pd
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.dataflows.trade_calendar import cn_today_str
+from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.interface import route_to_vendor
 
 load_dotenv()
 
 app = FastAPI(title="TradingAgents-AShare API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:5174",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs_lock = Lock()
 _jobs: Dict[str, Dict[str, Any]] = {}
 _job_events: Dict[str, "queue.Queue[Dict[str, Any]]"] = {}
+
+FIXED_TEAMS = {
+    "Analyst Team": [
+        "Market Analyst",
+        "Social Analyst",
+        "News Analyst",
+        "Fundamentals Analyst",
+    ],
+    "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
+    "Trading Team": ["Trader"],
+    "Risk Management": ["Aggressive Analyst", "Neutral Analyst", "Conservative Analyst"],
+    "Portfolio Management": ["Portfolio Manager"],
+}
+ANALYST_ORDER = ["market", "social", "news", "fundamentals"]
+ANALYST_AGENT_NAMES = {
+    "market": "Market Analyst",
+    "social": "Social Analyst",
+    "news": "News Analyst",
+    "fundamentals": "Fundamentals Analyst",
+}
+ANALYST_REPORT_MAP = {
+    "market": "market_report",
+    "social": "sentiment_report",
+    "news": "news_report",
+    "fundamentals": "fundamentals_report",
+}
 
 
 class AnalyzeRequest(BaseModel):
@@ -72,6 +115,13 @@ class ChatCompletionRequest(BaseModel):
     )
     config_overrides: Dict[str, Any] = Field(default_factory=dict)
     dry_run: bool = False
+
+
+class KlineResponse(BaseModel):
+    symbol: str
+    start_date: str
+    end_date: str
+    candles: List[Dict[str, Any]]
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -146,6 +196,115 @@ def _build_result_payload(final_state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+class AgentProgressTracker:
+    def __init__(self, selected_analysts: List[str], job_id: str):
+        self.job_id = job_id
+        self.selected_analysts = [a.lower() for a in selected_analysts]
+        self.status: Dict[str, str] = {}
+        self.report_sections: Dict[str, Optional[str]] = {
+            "market_report": None,
+            "sentiment_report": None,
+            "news_report": None,
+            "fundamentals_report": None,
+            "investment_plan": None,
+            "trader_investment_plan": None,
+            "final_trade_decision": None,
+        }
+        for team_agents in FIXED_TEAMS.values():
+            for agent in team_agents:
+                self.status[agent] = "pending"
+
+        # 未选中的分析师标记为 skipped（仍展示，便于固定 12-agent 看板）
+        for key in ANALYST_ORDER:
+            agent = ANALYST_AGENT_NAMES[key]
+            if key not in self.selected_analysts:
+                self.status[agent] = "skipped"
+
+    def snapshot(self) -> Dict[str, Any]:
+        agents = []
+        for team, members in FIXED_TEAMS.items():
+            for m in members:
+                agents.append({"team": team, "agent": m, "status": self.status.get(m, "pending")})
+        return {"agents": agents}
+
+    def _set_status(self, agent: str, status: str) -> None:
+        prev = self.status.get(agent)
+        if prev == status:
+            return
+        self.status[agent] = status
+        _emit_job_event(
+            self.job_id,
+            "agent.status",
+            {"agent": agent, "status": status, "previous_status": prev},
+        )
+
+    def _update_research_team_status(self, status: str) -> None:
+        for agent in ["Bull Researcher", "Bear Researcher", "Research Manager"]:
+            self._set_status(agent, status)
+
+    def apply_chunk(self, chunk: Dict[str, Any]) -> None:
+        # CLI: 分析师阶段状态推进
+        found_active = False
+        for analyst_key in ANALYST_ORDER:
+            if analyst_key not in self.selected_analysts:
+                continue
+
+            agent_name = ANALYST_AGENT_NAMES[analyst_key]
+            report_key = ANALYST_REPORT_MAP[analyst_key]
+            has_report = bool(chunk.get(report_key))
+
+            if has_report:
+                self._set_status(agent_name, "completed")
+                self.report_sections[report_key] = chunk.get(report_key)
+            elif not found_active:
+                self._set_status(agent_name, "in_progress")
+                found_active = True
+            else:
+                self._set_status(agent_name, "pending")
+
+        if not found_active and self.selected_analysts:
+            if self.status.get("Bull Researcher") == "pending":
+                self._set_status("Bull Researcher", "in_progress")
+
+        # CLI: 研究团队
+        debate_state = chunk.get("investment_debate_state") or {}
+        bull_hist = str(debate_state.get("bull_history", "")).strip()
+        bear_hist = str(debate_state.get("bear_history", "")).strip()
+        judge = str(debate_state.get("judge_decision", "")).strip()
+        if bull_hist or bear_hist:
+            self._update_research_team_status("in_progress")
+        if judge:
+            self._update_research_team_status("completed")
+            self._set_status("Trader", "in_progress")
+
+        # CLI: 交易团队
+        if chunk.get("trader_investment_plan"):
+            if self.status.get("Trader") != "completed":
+                self._set_status("Trader", "completed")
+                self._set_status("Aggressive Analyst", "in_progress")
+
+        # CLI: 风控与组合团队
+        risk_state = chunk.get("risk_debate_state") or {}
+        agg_hist = str(risk_state.get("aggressive_history", "")).strip()
+        con_hist = str(risk_state.get("conservative_history", "")).strip()
+        neu_hist = str(risk_state.get("neutral_history", "")).strip()
+        risk_judge = str(risk_state.get("judge_decision", "")).strip()
+
+        if agg_hist and self.status.get("Aggressive Analyst") != "completed":
+            self._set_status("Aggressive Analyst", "in_progress")
+        if con_hist and self.status.get("Conservative Analyst") != "completed":
+            self._set_status("Conservative Analyst", "in_progress")
+        if neu_hist and self.status.get("Neutral Analyst") != "completed":
+            self._set_status("Neutral Analyst", "in_progress")
+        if risk_judge:
+            if self.status.get("Portfolio Manager") != "completed":
+                self._set_status("Portfolio Manager", "in_progress")
+                self._set_status("Aggressive Analyst", "completed")
+                self._set_status("Conservative Analyst", "completed")
+                self._set_status("Neutral Analyst", "completed")
+                self._set_status("Portfolio Manager", "completed")
+
+
 def _extract_message_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -169,6 +328,8 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False) 
         "job.running",
         {"job_id": job_id, "symbol": request.symbol, "trade_date": request.trade_date},
     )
+    tracker = AgentProgressTracker(request.selected_analysts, job_id)
+    _emit_job_event(job_id, "agent.snapshot", tracker.snapshot())
     try:
         config = _build_runtime_config(request.config_overrides)
         if request.dry_run:
@@ -219,6 +380,7 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False) 
 
             for chunk in graph.graph.stream(init_state, **args):
                 final_state = chunk
+                tracker.apply_chunk(chunk)
                 messages = chunk.get("messages", [])
                 if messages:
                     msg = messages[-1]
@@ -266,6 +428,10 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False) 
             decision=decision,
             finished_at=datetime.now().isoformat(),
         )
+        # 全量收口为 completed/skipped
+        for agent, status in tracker.status.items():
+            if status not in ("completed", "skipped"):
+                tracker._set_status(agent, "completed")
         _emit_job_event(
             job_id,
             "job.completed",
@@ -330,6 +496,51 @@ def _sse_pack(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+def _parse_stock_csv(raw: str) -> List[Dict[str, Any]]:
+    if not raw:
+        return []
+    lines = [ln for ln in raw.splitlines() if ln.strip() and not ln.startswith("#")]
+    if not lines:
+        return []
+
+    try:
+        df = pd.read_csv(StringIO("\n".join(lines)))
+    except Exception:
+        return []
+
+    if "Date" not in df.columns:
+        return []
+
+    rename_map = {k: k.strip() for k in df.columns}
+    df = df.rename(columns=rename_map)
+    required = ["Date", "Open", "High", "Low", "Close"]
+    for col in required:
+        if col not in df.columns:
+            return []
+
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date", "Open", "High", "Low", "Close"]).sort_values("Date")
+    if df.empty:
+        return []
+
+    candles: List[Dict[str, Any]] = []
+    for _, row in df.iterrows():
+        candles.append(
+            {
+                "date": row["Date"].strftime("%Y-%m-%d"),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "volume": float(row["Volume"]) if "Volume" in df.columns and pd.notna(row.get("Volume")) else None,
+            }
+        )
+    return candles
+
+
 def _stream_job_events(job_id: str):
     q = _ensure_job_event_queue(job_id)
     yield _sse_pack("job.ready", {"job_id": job_id})
@@ -352,6 +563,32 @@ def _stream_job_events(job_id: str):
 @app.get("/healthz")
 def healthz() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/v1/market/kline", response_model=KlineResponse)
+def get_kline(
+    symbol: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> KlineResponse:
+    end = end_date or cn_today_str()
+    if start_date:
+        start = start_date
+    else:
+        start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=120)).strftime("%Y-%m-%d")
+
+    config = _build_runtime_config({})
+    set_config(config)
+    raw = route_to_vendor("get_stock_data", symbol, start, end)
+    candles = _parse_stock_csv(raw)
+    if not candles:
+        raise HTTPException(status_code=404, detail="no kline data")
+    return KlineResponse(
+        symbol=symbol,
+        start_date=start,
+        end_date=end,
+        candles=candles,
+    )
 
 
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
