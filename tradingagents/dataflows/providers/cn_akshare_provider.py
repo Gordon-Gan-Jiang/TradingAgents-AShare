@@ -13,27 +13,27 @@ class CnAkshareProvider(BaseMarketDataProvider):
 
     INDICATOR_DESCRIPTIONS = {
         "close_50_sma": (
-            "50 SMA: A medium-term trend indicator. "
-            "Usage: Identify trend direction and serve as dynamic support/resistance."
+            "50 日均线（SMA）：中期趋势指标。"
+            "用途：识别趋势方向，并作为动态支撑/阻力参考。"
         ),
         "close_200_sma": (
-            "200 SMA: A long-term trend benchmark. "
-            "Usage: Confirm overall market trend and identify golden/death cross setups."
+            "200 日均线（SMA）：长期趋势基准。"
+            "用途：确认大级别趋势，并辅助识别金叉/死叉结构。"
         ),
         "close_10_ema": (
-            "10 EMA: A responsive short-term average. "
-            "Usage: Capture quick shifts in momentum and potential entry points."
+            "10 日指数均线（EMA）：短期响应更快。"
+            "用途：捕捉短线动量变化与潜在入场时机。"
         ),
-        "macd": "MACD momentum indicator.",
-        "macds": "MACD signal line.",
-        "macdh": "MACD histogram.",
-        "rsi": "RSI momentum indicator.",
-        "boll": "Bollinger middle band.",
-        "boll_ub": "Bollinger upper band.",
-        "boll_lb": "Bollinger lower band.",
-        "atr": "Average True Range (ATR).",
-        "vwma": "Volume weighted moving average (VWMA).",
-        "mfi": "Money Flow Index (MFI).",
+        "macd": "MACD：趋势与动量综合指标。",
+        "macds": "MACD 信号线（Signal）。",
+        "macdh": "MACD 柱状图（Histogram）。",
+        "rsi": "RSI：衡量超买/超卖的动量指标。",
+        "boll": "布林中轨（20 日均线）。",
+        "boll_ub": "布林上轨。",
+        "boll_lb": "布林下轨。",
+        "atr": "ATR：真实波动幅度均值，用于波动与风控。",
+        "vwma": "VWMA：成交量加权均线。",
+        "mfi": "MFI：资金流量指标。",
     }
 
     @property
@@ -64,21 +64,51 @@ class CnAkshareProvider(BaseMarketDataProvider):
             return f"sh{code}"
         return f"sz{code}"
 
+    def _normalize_hist_df(self, raw_df: pd.DataFrame) -> pd.DataFrame:
+        if raw_df is None or raw_df.empty:
+            return pd.DataFrame()
+
+        col_map = {
+            "日期": "Date",
+            "date": "Date",
+            "Date": "Date",
+            "开盘": "Open",
+            "open": "Open",
+            "Open": "Open",
+            "最高": "High",
+            "high": "High",
+            "High": "High",
+            "最低": "Low",
+            "low": "Low",
+            "Low": "Low",
+            "收盘": "Close",
+            "close": "Close",
+            "Close": "Close",
+            "成交量": "Volume",
+            "volume": "Volume",
+            "Volume": "Volume",
+        }
+        df = raw_df.rename(columns=col_map).copy()
+        required = ["Date", "Open", "High", "Low", "Close", "Volume"]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            raise ValueError(f"hist dataframe missing columns: {missing}")
+
+        out = df[required].copy()
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out = out.dropna(subset=["Date"]).sort_values("Date")
+
+        for c in ["Open", "High", "Low", "Close", "Volume"]:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+        out = out.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+        out["Volume"] = out["Volume"].astype(float)
+
+        return out
+
     def _format_ak_hist(self, df: pd.DataFrame, symbol: str, start: str, end: str) -> str:
         if df is None or df.empty:
             return f"No data found for symbol '{symbol}' between {start} and {end}"
-
-        renamed = df.rename(
-            columns={
-                "日期": "Date",
-                "开盘": "Open",
-                "最高": "High",
-                "最低": "Low",
-                "收盘": "Close",
-                "成交量": "Volume",
-            }
-        )
-        out = renamed[["Date", "Open", "High", "Low", "Close", "Volume"]].copy()
+        out = self._normalize_hist_df(df)
         out["Dividends"] = 0.0
         out["Stock Splits"] = 0.0
         out["Date"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
@@ -91,23 +121,54 @@ class CnAkshareProvider(BaseMarketDataProvider):
     def _fetch_hist_df(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         ak = self._ak()
         code = self._normalize_symbol(symbol)
-        last_exc = None
-        for i in range(3):
+        symbol_with_market = self._sina_symbol(symbol)
+        start_yyyymmdd = start_date.replace("-", "")
+        end_yyyymmdd = end_date.replace("-", "")
+
+        # Source 1: Eastmoney (default)
+        em_last_exc = None
+        for i in range(2):
             try:
-                return ak.stock_zh_a_hist(
+                df = ak.stock_zh_a_hist(
                     symbol=code,
                     period="daily",
-                    start_date=start_date.replace("-", ""),
-                    end_date=end_date.replace("-", ""),
+                    start_date=start_yyyymmdd,
+                    end_date=end_yyyymmdd,
                     adjust="qfq",
                 )
+                return self._normalize_hist_df(df)
             except Exception as exc:
-                last_exc = exc
-                if i < 2:
+                em_last_exc = exc
+                if i < 1:
                     time.sleep(0.6 * (i + 1))
+
+        # Source 2: Sina
+        try:
+            df = ak.stock_zh_a_daily(
+                symbol=symbol_with_market,
+                start_date=start_yyyymmdd,
+                end_date=end_yyyymmdd,
+                adjust="qfq",
+            )
+            return self._normalize_hist_df(df)
+        except Exception:
+            pass
+
+        # Source 3: Tencent
+        try:
+            df = ak.stock_zh_a_hist_tx(
+                symbol=symbol_with_market,
+                start_date=start_yyyymmdd,
+                end_date=end_yyyymmdd,
+                adjust="qfq",
+            )
+            return self._normalize_hist_df(df)
+        except Exception:
+            pass
+
         raise NotImplementedError(
-            f"cn_akshare is temporarily unavailable for price history: {last_exc}"
-        ) from last_exc
+            f"cn_akshare is temporarily unavailable for price history (eastmoney/sina/tencent all failed): {em_last_exc}"
+        ) from em_last_exc
 
     def get_stock_data(self, symbol: str, start_date: str, end_date: str) -> str:
         df = self._fetch_hist_df(symbol, start_date, end_date)
@@ -130,24 +191,24 @@ class CnAkshareProvider(BaseMarketDataProvider):
 
         ind_df = df.rename(
             columns={
-                "日期": "date",
-                "开盘": "open",
-                "最高": "high",
-                "最低": "low",
-                "收盘": "close",
-                "成交量": "volume",
+                "Date": "date",
+                "Open": "open",
+                "High": "high",
+                "Low": "low",
+                "Close": "close",
+                "Volume": "volume",
             }
         )[["date", "open", "high", "low", "close", "volume"]].copy()
-        ind_df["date"] = pd.to_datetime(ind_df["date"])
-        ind_df = ind_df.sort_values("date")
+        ind_df["date"] = pd.to_datetime(ind_df["date"], errors="coerce")
+        ind_df = ind_df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
 
         ss = wrap(ind_df)
-        _ = ss[indicator]
+        indicator_series = ss[indicator]
 
         values_by_date = {}
-        for _, row in ss.iterrows():
-            date_str = pd.to_datetime(row["date"]).strftime("%Y-%m-%d")
-            val = row[indicator]
+        for idx, dt_val in enumerate(ind_df["date"]):
+            date_str = pd.to_datetime(dt_val).strftime("%Y-%m-%d")
+            val = indicator_series.iloc[idx]
             values_by_date[date_str] = "N/A" if pd.isna(val) else str(val)
 
         begin = curr_dt - timedelta(days=look_back_days)
@@ -155,7 +216,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
         d = curr_dt
         while d >= begin:
             key = d.strftime("%Y-%m-%d")
-            lines.append(f"{key}: {values_by_date.get(key, 'N/A: Not a trading day (weekend or holiday)')}")
+            lines.append(f"{key}: {values_by_date.get(key, 'N/A：非交易日（周末或节假日）')}")
             d -= timedelta(days=1)
 
         result = (
@@ -241,7 +302,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
                     rows.append(f"Link: {link}")
                 rows.append("")
 
-            return f"## {ticker} News, from {start_date} to {end_date}:\n\n" + "\n".join(rows)
+            return f"## {ticker} 新闻（{start_date} 至 {end_date}）：\n\n" + "\n".join(rows)
         except Exception as exc:
             raise NotImplementedError(
                 f"cn_akshare is temporarily unavailable for news: {exc}"
@@ -255,7 +316,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
             if hasattr(ak, "news_cctv"):
                 df = ak.news_cctv(date=curr_date.replace("-", ""))
                 if df is None or df.empty:
-                    return f"No global news found for {curr_date}"
+                    return f"{curr_date} 未获取到全球市场新闻"
                 rows = []
                 for _, row in df.head(limit).iterrows():
                     title = str(row.get("title", row.get("标题", "No title")))
@@ -267,8 +328,8 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 start = (
                     datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=look_back_days)
                 ).strftime("%Y-%m-%d")
-                return f"## Global Market News, from {start} to {curr_date}:\n\n" + "\n".join(rows)
-            return "Global news is not available in current cn_akshare implementation."
+                return f"## 全球市场新闻（{start} 至 {curr_date}）：\n\n" + "\n".join(rows)
+            return "当前 cn_akshare 实现暂不支持全球新闻接口。"
         except Exception as exc:
             raise NotImplementedError(
                 f"cn_akshare is temporarily unavailable for global news: {exc}"

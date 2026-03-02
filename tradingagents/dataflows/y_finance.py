@@ -40,9 +40,9 @@ def get_YFin_data_online(
     csv_string = data.to_csv()
 
     # Add header information
-    header = f"# Stock data for {symbol.upper()} from {start_date} to {end_date}\n"
-    header += f"# Total records: {len(data)}\n"
-    header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    header = f"# {symbol.upper()} 股票数据（{start_date} 至 {end_date}）\n"
+    header += f"# 记录总数：{len(data)}\n"
+    header += f"# 拉取时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
     return header + csv_string
 
@@ -58,73 +58,73 @@ def get_stock_stats_indicators_window(
     best_ind_params = {
         # Moving Averages
         "close_50_sma": (
-            "50 SMA: A medium-term trend indicator. "
-            "Usage: Identify trend direction and serve as dynamic support/resistance. "
-            "Tips: It lags price; combine with faster indicators for timely signals."
+            "50 日均线（SMA）：中期趋势指标。"
+            "用途：识别趋势方向并作为动态支撑/阻力。"
+            "提示：均线滞后于价格，建议与更快指标联合使用。"
         ),
         "close_200_sma": (
-            "200 SMA: A long-term trend benchmark. "
-            "Usage: Confirm overall market trend and identify golden/death cross setups. "
-            "Tips: It reacts slowly; best for strategic trend confirmation rather than frequent trading entries."
+            "200 日均线（SMA）：长期趋势基准。"
+            "用途：确认大级别趋势并识别金叉/死叉。"
+            "提示：反应较慢，适合战略级趋势判断。"
         ),
         "close_10_ema": (
-            "10 EMA: A responsive short-term average. "
-            "Usage: Capture quick shifts in momentum and potential entry points. "
-            "Tips: Prone to noise in choppy markets; use alongside longer averages for filtering false signals."
+            "10 日指数均线（EMA）：短线响应较快。"
+            "用途：捕捉短期动量变化与潜在入场点。"
+            "提示：震荡市噪音较大，建议与长周期均线配合。"
         ),
         # MACD Related
         "macd": (
-            "MACD: Computes momentum via differences of EMAs. "
-            "Usage: Look for crossovers and divergence as signals of trend changes. "
-            "Tips: Confirm with other indicators in low-volatility or sideways markets."
+            "MACD：由不同周期 EMA 差值构成的动量指标。"
+            "用途：通过金叉/死叉与背离判断趋势变化。"
+            "提示：震荡市建议与其他指标交叉验证。"
         ),
         "macds": (
-            "MACD Signal: An EMA smoothing of the MACD line. "
-            "Usage: Use crossovers with the MACD line to trigger trades. "
-            "Tips: Should be part of a broader strategy to avoid false positives."
+            "MACD 信号线（Signal）：MACD 的平滑线。"
+            "用途：与 MACD 线交叉用于触发信号。"
+            "提示：需结合趋势与量能，避免假信号。"
         ),
         "macdh": (
-            "MACD Histogram: Shows the gap between the MACD line and its signal. "
-            "Usage: Visualize momentum strength and spot divergence early. "
-            "Tips: Can be volatile; complement with additional filters in fast-moving markets."
+            "MACD 柱状图（Histogram）：MACD 与信号线差值。"
+            "用途：观察动量强弱与拐点。"
+            "提示：波动阶段易放大噪音，建议加入过滤条件。"
         ),
         # Momentum Indicators
         "rsi": (
-            "RSI: Measures momentum to flag overbought/oversold conditions. "
-            "Usage: Apply 70/30 thresholds and watch for divergence to signal reversals. "
-            "Tips: In strong trends, RSI may remain extreme; always cross-check with trend analysis."
+            "RSI：衡量超买/超卖的动量指标。"
+            "用途：常用 70/30 阈值并结合背离判断反转。"
+            "提示：强趋势中可长期钝化，需结合趋势判断。"
         ),
         # Volatility Indicators
         "boll": (
-            "Bollinger Middle: A 20 SMA serving as the basis for Bollinger Bands. "
-            "Usage: Acts as a dynamic benchmark for price movement. "
-            "Tips: Combine with the upper and lower bands to effectively spot breakouts or reversals."
+            "布林中轨：通常为 20 日均线。"
+            "用途：作为价格波动的动态中枢。"
+            "提示：需结合上下轨判断突破与回归。"
         ),
         "boll_ub": (
-            "Bollinger Upper Band: Typically 2 standard deviations above the middle line. "
-            "Usage: Signals potential overbought conditions and breakout zones. "
-            "Tips: Confirm signals with other tools; prices may ride the band in strong trends."
+            "布林上轨：通常为中轨上方 2 倍标准差。"
+            "用途：识别潜在超买或强趋势突破区域。"
+            "提示：强趋势中价格可沿上轨运行，需结合动量指标。"
         ),
         "boll_lb": (
-            "Bollinger Lower Band: Typically 2 standard deviations below the middle line. "
-            "Usage: Indicates potential oversold conditions. "
-            "Tips: Use additional analysis to avoid false reversal signals."
+            "布林下轨：通常为中轨下方 2 倍标准差。"
+            "用途：识别潜在超卖区域。"
+            "提示：避免单独使用，需结合趋势与量价确认。"
         ),
         "atr": (
-            "ATR: Averages true range to measure volatility. "
-            "Usage: Set stop-loss levels and adjust position sizes based on current market volatility. "
-            "Tips: It's a reactive measure, so use it as part of a broader risk management strategy."
+            "ATR：平均真实波幅，用于刻画波动率。"
+            "用途：辅助止损设置与仓位控制。"
+            "提示：ATR 具滞后性，建议纳入完整风控框架。"
         ),
         # Volume-Based Indicators
         "vwma": (
-            "VWMA: A moving average weighted by volume. "
-            "Usage: Confirm trends by integrating price action with volume data. "
-            "Tips: Watch for skewed results from volume spikes; use in combination with other volume analyses."
+            "VWMA：成交量加权均线。"
+            "用途：结合量价验证趋势有效性。"
+            "提示：异常放量会扭曲结果，建议结合其他量能指标。"
         ),
         "mfi": (
-            "MFI: The Money Flow Index is a momentum indicator that uses both price and volume to measure buying and selling pressure. "
-            "Usage: Identify overbought (>80) or oversold (<20) conditions and confirm the strength of trends or reversals. "
-            "Tips: Use alongside RSI or MACD to confirm signals; divergence between price and MFI can indicate potential reversals."
+            "MFI：资金流量指标，结合价格与成交量衡量买卖压力。"
+            "用途：识别超买（>80）/超卖（<20）并辅助判断趋势强弱。"
+            "提示：与 RSI/MACD 联合使用，价量背离可提示潜在反转。"
         ),
     }
 
@@ -152,7 +152,7 @@ def get_stock_stats_indicators_window(
             if date_str in indicator_data:
                 indicator_value = indicator_data[date_str]
             else:
-                indicator_value = "N/A: Not a trading day (weekend or holiday)"
+                indicator_value = "N/A：非交易日（周末或节假日）"
             
             date_values.append((date_str, indicator_value))
             current_dt = current_dt - relativedelta(days=1)
@@ -175,7 +175,7 @@ def get_stock_stats_indicators_window(
             curr_date_dt = curr_date_dt - relativedelta(days=1)
 
     result_str = (
-        f"## {indicator} values from {before.strftime('%Y-%m-%d')} to {end_date}:\n\n"
+        f"## {indicator} 指标值（{before.strftime('%Y-%m-%d')} 至 {end_date}）：\n\n"
         + ind_string
         + "\n\n"
         + best_ind_params.get(indicator, "No description available.")

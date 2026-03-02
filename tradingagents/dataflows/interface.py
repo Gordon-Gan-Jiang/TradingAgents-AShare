@@ -88,6 +88,7 @@ def route_to_vendor(method: str, *args, **kwargs):
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
     fallback_vendors = _resolve_vendor_chain(method, vendor_config)
+    last_exc = None
     _trace(
         f"method={method} category={category} configured='{vendor_config}' "
         f"chain={fallback_vendors}"
@@ -109,7 +110,17 @@ def route_to_vendor(method: str, *args, **kwargs):
             _trace(f"method={method} vendor={vendor} status=hit")
             return result
         except (AlphaVantageRateLimitError, NotImplementedError) as exc:
+            last_exc = exc
             # Try next provider for transient/routing issues or placeholder providers.
+            _trace(
+                f"method={method} vendor={vendor} status=fallback "
+                f"reason={type(exc).__name__}"
+            )
+            continue
+        except Exception as exc:
+            # Provider-specific runtime/parsing errors (e.g., schema changes, KeyError)
+            # should not terminate the full chain; fall through to next vendor.
+            last_exc = exc
             _trace(
                 f"method={method} vendor={vendor} status=fallback "
                 f"reason={type(exc).__name__}"
@@ -117,6 +128,12 @@ def route_to_vendor(method: str, *args, **kwargs):
             continue
 
     _trace(f"method={method} status=failed reason=no-available-vendor")
+    if last_exc is not None:
+        raise RuntimeError(
+            f"No available vendor for method '{method}'. "
+            f"Configured chain: {fallback_vendors}. "
+            f"Last error: {type(last_exc).__name__}: {last_exc}"
+        ) from last_exc
     raise RuntimeError(
         f"No available vendor for method '{method}'. "
         f"Configured chain: {fallback_vendors}"
