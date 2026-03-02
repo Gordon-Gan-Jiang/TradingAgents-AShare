@@ -1,3 +1,4 @@
+import os
 import questionary
 from typing import List, Optional, Tuple, Dict
 
@@ -9,6 +10,33 @@ ANALYST_ORDER = [
     ("News Analyst", AnalystType.NEWS),
     ("Fundamentals Analyst", AnalystType.FUNDAMENTALS),
 ]
+
+
+def _parse_csv_env(name: str) -> List[str]:
+    value = os.getenv(name, "")
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _get_openai_compatible_models() -> List[str]:
+    models = _parse_csv_env("OPENAI_MODELS")
+    if models:
+        return models
+
+    single_model = os.getenv("OPENAI_MODEL", "").strip()
+    if single_model:
+        return [single_model]
+
+    return _parse_csv_env("OPENAI_COMPAT_MODELS")
+
+
+def _get_openai_compatible_provider_option() -> tuple[str, str, str] | None:
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+    if not base_url:
+        base_url = os.getenv("OPENAI_COMPAT_BASE_URL", "").strip()
+    if not base_url:
+        return None
+    name = os.getenv("OPENAI_COMPAT_NAME", "Custom OpenAI-Compatible").strip() or "Custom OpenAI-Compatible"
+    return (name, "OpenAI", base_url)
 
 
 def get_ticker() -> str:
@@ -162,6 +190,14 @@ def select_shallow_thinking_agent(provider) -> str:
         ],
     }
 
+    if provider.lower() == "openai":
+        existing = {value for _, value in SHALLOW_AGENT_OPTIONS["openai"]}
+        for model in _get_openai_compatible_models():
+            if model not in existing:
+                SHALLOW_AGENT_OPTIONS["openai"].insert(
+                    0, (f"{model} - OpenAI-compatible (env)", model)
+                )
+
     choice = questionary.select(
         "Select Your [Quick-Thinking LLM Engine]:",
         choices=[
@@ -230,6 +266,14 @@ def select_deep_thinking_agent(provider) -> str:
         ],
     }
 
+    if provider.lower() == "openai":
+        existing = {value for _, value in DEEP_AGENT_OPTIONS["openai"]}
+        for model in _get_openai_compatible_models():
+            if model not in existing:
+                DEEP_AGENT_OPTIONS["openai"].insert(
+                    0, (f"{model} - OpenAI-compatible (env)", model)
+                )
+
     choice = questionary.select(
         "Select Your [Deep-Thinking LLM Engine]:",
         choices=[
@@ -256,19 +300,23 @@ def select_llm_provider() -> tuple[str, str]:
     """Select the OpenAI api url using interactive selection."""
     # Define OpenAI api options with their corresponding endpoints
     BASE_URLS = [
-        ("OpenAI", "https://api.openai.com/v1"),
-        ("Google", "https://generativelanguage.googleapis.com/v1"),
-        ("Anthropic", "https://api.anthropic.com/"),
-        ("xAI", "https://api.x.ai/v1"),
-        ("Openrouter", "https://openrouter.ai/api/v1"),
-        ("Ollama", "http://localhost:11434/v1"),
+        ("OpenAI", "OpenAI", "https://api.openai.com/v1"),
+        ("Google", "Google", "https://generativelanguage.googleapis.com/v1"),
+        ("Anthropic", "Anthropic", "https://api.anthropic.com/"),
+        ("xAI", "xAI", "https://api.x.ai/v1"),
+        ("Openrouter", "Openrouter", "https://openrouter.ai/api/v1"),
+        ("Ollama", "Ollama", "http://localhost:11434/v1"),
     ]
+
+    custom_openai_option = _get_openai_compatible_provider_option()
+    if custom_openai_option:
+        BASE_URLS.insert(1, custom_openai_option)
     
     choice = questionary.select(
         "Select your LLM Provider:",
         choices=[
-            questionary.Choice(display, value=(display, value))
-            for display, value in BASE_URLS
+            questionary.Choice(label, value=(provider, url))
+            for label, provider, url in BASE_URLS
         ],
         instruction="\n- Use arrow keys to navigate\n- Press Enter to select",
         style=questionary.Style(
@@ -284,10 +332,10 @@ def select_llm_provider() -> tuple[str, str]:
         console.print("\n[red]no OpenAI backend selected. Exiting...[/red]")
         exit(1)
     
-    display_name, url = choice
-    print(f"You selected: {display_name}\tURL: {url}")
+    provider_name, url = choice
+    print(f"You selected: {provider_name}\tURL: {url}")
 
-    return display_name, url
+    return provider_name, url
 
 
 def ask_openai_reasoning_effort() -> str:
