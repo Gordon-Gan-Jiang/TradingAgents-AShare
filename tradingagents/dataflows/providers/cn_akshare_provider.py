@@ -216,11 +216,11 @@ class CnAkshareProvider(BaseMarketDataProvider):
         d = curr_dt
         while d >= begin:
             key = d.strftime("%Y-%m-%d")
-            lines.append(f"{key}: {values_by_date.get(key, 'N/A：非交易日（周末或节假日）')}")
+            lines.append(f"{key}: {values_by_date.get(key, 'N/A：该日期暂无数据（可能未收盘、数据延迟或非交易日）')}")
             d -= timedelta(days=1)
 
         result = (
-            f"## {indicator} values from {begin.strftime('%Y-%m-%d')} to {curr_date}:\n\n"
+            f"## {indicator} 指标值（{begin.strftime('%Y-%m-%d')} 至 {curr_date}）：\n\n"
             + "\n".join(lines)
             + "\n\n"
             + self.INDICATOR_DESCRIPTIONS[indicator]

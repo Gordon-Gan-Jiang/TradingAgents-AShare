@@ -152,7 +152,7 @@ def get_stock_stats_indicators_window(
             if date_str in indicator_data:
                 indicator_value = indicator_data[date_str]
             else:
-                indicator_value = "N/A：非交易日（周末或节假日）"
+                indicator_value = "N/A：该日期暂无数据（可能未收盘、数据延迟或非交易日）"
             
             date_values.append((date_str, indicator_value))
             current_dt = current_dt - relativedelta(days=1)

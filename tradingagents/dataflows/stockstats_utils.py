@@ -61,4 +61,4 @@ class StockstatsUtils:
             indicator_value = matching_rows[indicator].values[0]
             return indicator_value
         else:
-            return "N/A: Not a trading day (weekend or holiday)"
+            return "N/A：该日期暂无数据（可能未收盘、数据延迟或非交易日）"
