@@ -60,9 +60,15 @@ class CnAkshareProvider(BaseMarketDataProvider):
 
     def _sina_symbol(self, symbol: str) -> str:
         code = self._normalize_symbol(symbol)
-        if code.startswith(("6", "9")):
+        if code.startswith(("5", "6", "9")):
             return f"sh{code}"
         return f"sz{code}"
+
+    def _xq_symbol(self, symbol: str) -> str:
+        code = self._normalize_symbol(symbol)
+        if code.startswith(("5", "6", "9")):
+            return f"SH{code}"
+        return f"SZ{code}"
 
     def _normalize_hist_df(self, raw_df: pd.DataFrame) -> pd.DataFrame:
         if raw_df is None or raw_df.empty:
@@ -87,6 +93,8 @@ class CnAkshareProvider(BaseMarketDataProvider):
             "成交量": "Volume",
             "volume": "Volume",
             "Volume": "Volume",
+            "amount": "Volume",
+            "Amount": "Volume",
         }
         df = raw_df.rename(columns=col_map).copy()
         required = ["Date", "Open", "High", "Low", "Close", "Volume"]
@@ -117,6 +125,14 @@ class CnAkshareProvider(BaseMarketDataProvider):
         header += f"# Total records: {len(out)}\n"
         header += f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         return header + out.to_csv(index=False)
+
+    @staticmethod
+    def _shrink_table(df: pd.DataFrame, max_rows: int = 12, max_cols: int = 16) -> pd.DataFrame:
+        if df is None or df.empty:
+            return df
+        rows = min(max_rows, len(df))
+        cols = min(max_cols, len(df.columns))
+        return df.head(rows).iloc[:, :cols]
 
     def _fetch_hist_df(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         ak = self._ak()
@@ -230,28 +246,75 @@ class CnAkshareProvider(BaseMarketDataProvider):
     def get_fundamentals(self, ticker: str, curr_date: str = None) -> str:
         ak = self._ak()
         code = self._normalize_symbol(ticker)
+        errors = []
+
+        info_df = None
         try:
-            df = ak.stock_individual_info_em(symbol=code)
-            if df is None or df.empty:
-                return f"No fundamentals data found for symbol '{ticker}'"
-            return f"## Fundamentals for {ticker}\n\n{df.to_markdown(index=False)}"
+            info_df = ak.stock_individual_info_em(symbol=code)
         except Exception as exc:
-            raise NotImplementedError(
-                f"cn_akshare is temporarily unavailable for fundamentals: {exc}"
-            ) from exc
+            errors.append(f"stock_individual_info_em: {type(exc).__name__}")
+
+        if info_df is None or info_df.empty:
+            try:
+                info_df = ak.stock_individual_basic_info_xq(symbol=self._xq_symbol(ticker))
+                if not info_df.empty and set(info_df.columns) >= {"item", "value"}:
+                    info_df = info_df.rename(columns={"item": "item", "value": "value"})
+            except Exception as exc:
+                errors.append(f"stock_individual_basic_info_xq: {type(exc).__name__}")
+
+        abstract_df = None
+        try:
+            abstract_df = ak.stock_financial_abstract(symbol=code)
+        except Exception as exc:
+            errors.append(f"stock_financial_abstract: {type(exc).__name__}")
+
+        parts = [f"## Fundamentals for {ticker}"]
+        if info_df is not None and not info_df.empty:
+            for c in info_df.columns:
+                info_df[c] = info_df[c].astype(str).str.slice(0, 220)
+            parts.append("### Company Profile")
+            parts.append(info_df.head(40).to_markdown(index=False))
+        if abstract_df is not None and not abstract_df.empty:
+            parts.append("### Financial Abstract (latest available columns)")
+            metric_cols = [c for c in abstract_df.columns if c not in ("选项", "指标")]
+            top_cols = metric_cols[:8]
+            cols = [c for c in ("选项", "指标") if c in abstract_df.columns] + top_cols
+            parts.append(self._shrink_table(abstract_df[cols], max_rows=20, max_cols=10).to_markdown(index=False))
+
+        if len(parts) > 1:
+            return "\n\n".join(parts)
+
+        raise NotImplementedError(
+            "cn_akshare is temporarily unavailable for fundamentals: "
+            + "; ".join(errors)
+        )
 
     def _financial_report_sina(self, ticker: str, report_name: str) -> str:
         ak = self._ak()
         symbol = self._sina_symbol(ticker)
+        errors = []
         try:
             df = ak.stock_financial_report_sina(stock=symbol, symbol=report_name)
             if df is None or df.empty:
-                return f"No {report_name} data found for symbol '{ticker}'"
-            return df.head(12).to_markdown(index=False)
+                raise ValueError("empty dataframe")
+            return self._shrink_table(df, max_rows=12, max_cols=18).to_markdown(index=False)
         except Exception as exc:
-            raise NotImplementedError(
-                f"cn_akshare is temporarily unavailable for {report_name}: {exc}"
-            ) from exc
+            errors.append(f"stock_financial_report_sina: {type(exc).__name__}")
+
+        code = self._normalize_symbol(ticker)
+        indicator = "按报告期"
+        try:
+            # 同花顺摘要表作为备用，口径不完全一致但可作为降级保障
+            df = ak.stock_financial_abstract_new_ths(symbol=code, indicator=indicator)
+            if df is None or df.empty:
+                raise ValueError("empty dataframe")
+            return self._shrink_table(df, max_rows=12, max_cols=18).to_markdown(index=False)
+        except Exception as exc:
+            errors.append(f"stock_financial_abstract_new_ths: {type(exc).__name__}")
+
+        raise NotImplementedError(
+            f"cn_akshare is temporarily unavailable for {report_name}: {'; '.join(errors)}"
+        )
 
     def get_balance_sheet(
         self, ticker: str, freq: str = "quarterly", curr_date: str = None
@@ -338,14 +401,31 @@ class CnAkshareProvider(BaseMarketDataProvider):
     def get_insider_transactions(self, symbol: str) -> str:
         ak = self._ak()
         code = self._normalize_symbol(symbol)
+        errors = []
         try:
-            if hasattr(ak, "stock_ggcg_em"):
-                df = ak.stock_ggcg_em(symbol=code)
-                if df is None or df.empty:
-                    return f"No insider transactions found for {symbol}"
-                return f"## Insider Transactions for {symbol}\n\n{df.head(20).to_markdown(index=False)}"
-            return "Insider transactions endpoint is not available in current AkShare version."
+            # stock_ggcg_em 不支持按个股代码查询，默认全市场数据量较大
+            df = ak.stock_main_stock_holder(stock=code)
+            if df is not None and not df.empty:
+                return (
+                    f"## Insider Transactions for {symbol}\n\n"
+                    f"{df.head(20).to_markdown(index=False)}"
+                )
+            errors.append("stock_main_stock_holder: empty dataframe")
         except Exception as exc:
-            raise NotImplementedError(
-                f"cn_akshare is temporarily unavailable for insider transactions: {exc}"
-            ) from exc
+            errors.append(f"stock_main_stock_holder: {type(exc).__name__}")
+
+        try:
+            # 退化为最近相关新闻，至少保证接口有可用输出
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            start_date = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+            news = self.get_news(symbol, start_date, end_date)
+            return (
+                f"## Insider Transactions for {symbol}\n\n"
+                f"未获取到股东交易明细，降级返回近两周公司相关新闻：\n\n{news}"
+            )
+        except Exception as exc:
+            errors.append(f"news_fallback: {type(exc).__name__}")
+
+        raise NotImplementedError(
+            f"cn_akshare is temporarily unavailable for insider transactions: {'; '.join(errors)}"
+        )
