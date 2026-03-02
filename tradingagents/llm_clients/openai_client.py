@@ -1,4 +1,6 @@
 import os
+import time
+from json import JSONDecodeError
 from typing import Any, Optional
 
 from langchain_openai import ChatOpenAI
@@ -11,11 +13,30 @@ class UnifiedChatOpenAI(ChatOpenAI):
     """ChatOpenAI subclass that strips incompatible params for certain models."""
 
     def __init__(self, **kwargs):
+        parse_retries = kwargs.pop("response_parse_retries", 2)
+        parse_retry_delay = kwargs.pop("response_parse_retry_delay", 1.0)
         model = kwargs.get("model", "")
         if self._is_reasoning_model(model):
             kwargs.pop("temperature", None)
             kwargs.pop("top_p", None)
         super().__init__(**kwargs)
+        object.__setattr__(self, "response_parse_retries", parse_retries)
+        object.__setattr__(self, "response_parse_retry_delay", parse_retry_delay)
+
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        """Retry transient malformed-response errors from OpenAI-compatible gateways."""
+        attempts = self.response_parse_retries + 1
+        last_err = None
+        for i in range(attempts):
+            try:
+                return super().invoke(input=input, config=config, **kwargs)
+            except (JSONDecodeError, ValueError) as exc:
+                # Some OpenAI-compatible gateways occasionally return non-JSON payloads.
+                last_err = exc
+                if i == attempts - 1:
+                    break
+                time.sleep(self.response_parse_retry_delay * (i + 1))
+        raise last_err
 
     @staticmethod
     def _is_reasoning_model(model: str) -> bool:
@@ -62,6 +83,9 @@ class OpenAIClient(BaseLLMClient):
             llm_kwargs["base_url"] = self.base_url
 
         for key in ("timeout", "max_retries", "reasoning_effort", "api_key", "callbacks"):
+            if key in self.kwargs:
+                llm_kwargs[key] = self.kwargs[key]
+        for key in ("response_parse_retries", "response_parse_retry_delay"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 

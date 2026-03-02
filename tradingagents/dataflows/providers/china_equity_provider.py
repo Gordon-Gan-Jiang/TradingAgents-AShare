@@ -1,17 +1,17 @@
 from .base import BaseMarketDataProvider
 
 
-class ChinaEquityProvider(BaseMarketDataProvider):
-    """Placeholder provider for CN market data integration."""
+class CnStubProvider(BaseMarketDataProvider):
+    """Placeholder provider for CN market data integrations."""
 
     @property
     def name(self) -> str:
-        return "china_equity"
+        return "cn_stub"
 
     def _not_implemented(self) -> str:
         raise NotImplementedError(
-            "Provider 'china_equity' is not implemented yet. "
-            "Implement this provider to connect A-share data sources."
+            "Provider 'cn_stub' is a placeholder. "
+            "Use concrete provider names like 'cn_akshare' or 'cn_tushare'."
         )
 
     def get_stock_data(self, symbol: str, start_date: str, end_date: str) -> str:
@@ -50,4 +50,3 @@ class ChinaEquityProvider(BaseMarketDataProvider):
 
     def get_insider_transactions(self, symbol: str) -> str:
         return self._not_implemented()
-

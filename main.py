@@ -16,19 +16,19 @@ config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", "gpt-5-mini")
 config["max_debate_rounds"] = int(os.getenv("MAX_DEBATE_ROUNDS", "1"))
 config["max_risk_discuss_rounds"] = int(os.getenv("MAX_RISK_DISCUSS_ROUNDS", "1"))
 
-# Configure data vendors (default uses yfinance, no extra API keys needed)
+# Configure data vendors (prefer cn_akshare for A-share, fallback to yfinance)
 config["data_vendors"] = {
-    "core_stock_apis": "yfinance",           # Options: alpha_vantage, yfinance
-    "technical_indicators": "yfinance",      # Options: alpha_vantage, yfinance
-    "fundamental_data": "yfinance",          # Options: alpha_vantage, yfinance
-    "news_data": "yfinance",                 # Options: alpha_vantage, yfinance
+    "core_stock_apis": "cn_akshare,yfinance",
+    "technical_indicators": "cn_akshare,yfinance",
+    "fundamental_data": "cn_akshare,yfinance",
+    "news_data": "cn_akshare,yfinance",
 }
 
 # Initialize with custom config
 ta = TradingAgentsGraph(debug=True, config=config)
 
 # forward propagate
-_, decision = ta.propagate("NVDA", "2024-05-10")
+_, decision = ta.propagate("600519.SH", "2026-03-02")
 print(decision)
 
 # Memorize mistakes and reflect

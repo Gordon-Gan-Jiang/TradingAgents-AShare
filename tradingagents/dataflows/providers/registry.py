@@ -3,7 +3,8 @@ from typing import Dict
 from .base import BaseMarketDataProvider
 from .yfinance_provider import YFinanceProvider
 from .alpha_vantage_provider import AlphaVantageProvider
-from .china_equity_provider import ChinaEquityProvider
+from .china_equity_provider import CnStubProvider
+from .cn_akshare_provider import CnAkshareProvider
 
 
 class DataProviderRegistry:
@@ -26,6 +27,6 @@ def build_default_registry() -> DataProviderRegistry:
     registry = DataProviderRegistry()
     registry.register(YFinanceProvider())
     registry.register(AlphaVantageProvider())
-    registry.register(ChinaEquityProvider())
+    registry.register(CnAkshareProvider())
+    registry.register(CnStubProvider())
     return registry
-
