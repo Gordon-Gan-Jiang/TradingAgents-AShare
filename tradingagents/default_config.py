@@ -19,6 +19,11 @@ DEFAULT_CONFIG = {
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    # Prompt language control: zh, en, or auto (by llm_provider mapping below)
+    "prompt_language": os.getenv("TRADINGAGENTS_PROMPT_LANGUAGE", "zh"),
+    "prompt_language_by_provider": {
+        # Example: "opesnai": "zh",
+    },
     # Provider routing trace logs (set TRADINGAGENTS_PROVIDER_TRACE=0 to disable)
     "provider_trace": os.getenv("TRADINGAGENTS_PROVIDER_TRACE", "1").lower() in ("1", "true", "yes", "on"),
     # Data vendor configuration
