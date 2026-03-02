@@ -33,10 +33,13 @@ dependencies = [
     "yfinance>=0.2.63",
     "akshare>=1.16.80",
     "baostock>=0.8.9",
+    "fastapi>=0.116.1",
+    "uvicorn>=0.35.0",
 ]
 
 [project.scripts]
 tradingagents = "cli.main:app"
+tradingagents-api = "api.main:run"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]
