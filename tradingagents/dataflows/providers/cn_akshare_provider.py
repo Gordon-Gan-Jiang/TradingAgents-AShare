@@ -445,9 +445,21 @@ class CnAkshareProvider(BaseMarketDataProvider):
         ak = self._ak()
         try:
             if hasattr(ak, "news_cctv"):
+                target_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+                used_date = curr_date
                 df = ak.news_cctv(date=curr_date.replace("-", ""))
                 if df is None or df.empty:
-                    return f"{curr_date} 未获取到全球市场新闻"
+                    # Fallback: if today's feed is empty, try recent 3 days.
+                    for back in range(1, 4):
+                        probe_dt = target_dt - timedelta(days=back)
+                        probe_date = probe_dt.strftime("%Y-%m-%d")
+                        probe_df = ak.news_cctv(date=probe_date.replace("-", ""))
+                        if probe_df is not None and not probe_df.empty:
+                            df = probe_df
+                            used_date = probe_date
+                            break
+                if df is None or df.empty:
+                    return f"{curr_date} 未获取到全球市场新闻（已回看最近3天）"
                 rows = []
                 for _, row in df.head(limit).iterrows():
                     title = str(row.get("title", row.get("标题", "No title")))
@@ -459,6 +471,11 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 start = (
                     datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=look_back_days)
                 ).strftime("%Y-%m-%d")
+                if used_date != curr_date:
+                    return (
+                        f"## 全球市场新闻（{start} 至 {curr_date}，当日为空，回退至 {used_date}）：\n\n"
+                        + "\n".join(rows)
+                    )
                 return f"## 全球市场新闻（{start} 至 {curr_date}）：\n\n" + "\n".join(rows)
             return "当前 cn_akshare 实现暂不支持全球新闻接口。"
         except Exception as exc:

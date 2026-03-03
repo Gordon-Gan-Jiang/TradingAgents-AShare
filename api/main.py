@@ -454,7 +454,8 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False) 
 
 def _normalize_symbol(raw: str) -> str:
     s = raw.strip().upper()
-    m = re.search(r"\b(\d{6})(?:\.(SH|SZ|SS))?\b", s)
+    # Priority: 6-digit CN stock code
+    m = re.search(r"(\d{6})(?:\.(SH|SZ|SS))?", s)
     if m:
         code = m.group(1)
         suffix = m.group(2)
@@ -464,9 +465,10 @@ def _normalize_symbol(raw: str) -> str:
             return f"{code}.{suffix}"
         market = "SH" if code.startswith(("5", "6", "9")) else "SZ"
         return f"{code}.{market}"
-    m2 = re.search(r"\b[A-Z]{1,6}(?:\.[A-Z]{1,3})?\b", s)
+    # Fallback: 1-6 letter ticker
+    m2 = re.search(r"([A-Z]{1,6}(?:\.[A-Z]{1,3})?)", s)
     if m2:
-        return m2.group(0)
+        return m2.group(1)
     return s
 
 
@@ -478,16 +480,19 @@ def _extract_chat_text(messages: List[ChatMessage]) -> str:
 
 
 def _extract_symbol_and_date(text: str) -> tuple[Optional[str], Optional[str]]:
-    date_match = re.search(r"\b\d{4}-\d{2}-\d{2}\b", text)
+    # Date extraction (flexible boundaries)
+    date_match = re.search(r"\d{4}-\d{2}-\d{2}", text)
     date = date_match.group(0) if date_match else None
 
-    sym_match = re.search(r"\b\d{6}(?:\.(?:SH|SZ|SS))?\b", text, re.IGNORECASE)
+    # Priority 1: A-Share 6-digit code (even if stuck to Chinese characters)
+    sym_match = re.search(r"(\d{6}(?:\.(?:SH|SZ|SS))?)", text, re.IGNORECASE)
     if sym_match:
-        return _normalize_symbol(sym_match.group(0)), date
+        return _normalize_symbol(sym_match.group(1)), date
 
-    us_match = re.search(r"\b[A-Z]{1,6}(?:\.[A-Z]{1,3})?\b", text.upper())
+    # Priority 2: US Stocks or other Tickers (use boundaries for letters to avoid partial words)
+    us_match = re.search(r"\b([A-Z]{1,6}(?:\.[A-Z]{1,3})?)\b", text.upper())
     if us_match:
-        return us_match.group(0), date
+        return us_match.group(1), date
 
     return None, date
 
@@ -665,12 +670,72 @@ def stream_job_events(job_id: str):
     )
 
 
+def _ai_extract_symbol_and_date(text: str, config: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    """Use LLM to resolve symbol and date from natural language."""
+    from tradingagents.llm_clients.factory import create_llm_client
+    
+    try:
+        # 1. Initialize a lightweight client
+        client = create_llm_client(
+            provider=config.get("llm_provider", "openai"),
+            model=config.get("quick_think_llm", "gpt-4o-mini"),
+            base_url=config.get("backend_url"),
+        )
+
+        # 2. Craft a strict extraction prompt
+        today = datetime.now().strftime("%Y-%m-%d")
+        prompt = f"""
+        You are a financial data assistant. Extract the STOCK SYMBOL and TRADE DATE from the user's message.
+
+        Rules:
+        - If it's a Chinese company name, convert to A-share code (e.g., '贵州茅台' -> '600519.SH').
+        - If it's a US company, use ticker (e.g., '苹果' -> 'AAPL').
+        - Use YYYY-MM-DD for date. Today is {today}.
+        - If no date mentioned, use {today}.
+        - Output ONLY a JSON: {{"symbol": "...", "date": "..."}}. 
+        - If no stock found, return {{"symbol": null, "date": null}}.
+
+        User message: "{text}"
+        """
+
+        # 3. Call LLM
+        llm = client.get_llm()
+        response = llm.invoke(prompt)
+        raw_text = response if isinstance(response, str) else getattr(response, "content", str(response))
+
+        # 4. Parse JSON from response
+        import json
+        match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+        if match:
+            data = json.loads(match.group(0))
+            return _normalize_symbol(data.get("symbol") or ""), data.get("date")
+    except Exception as e:
+        print(f"AI Extraction failed: {e}")
+
+    # Fallback to regex if AI fails
+    return _extract_symbol_and_date(text)
+
 @app.post("/v1/chat/completions")
 def chat_completions(request: ChatCompletionRequest):
     text = _extract_chat_text(request.messages)
-    symbol, trade_date = _extract_symbol_and_date(text)
+    config = _build_runtime_config(request.config_overrides)
+
+    # NEW: Use AI to extract instead of just regex
+    symbol, trade_date = _ai_extract_symbol_and_date(text, config)
+
     if not symbol:
-        raise HTTPException(status_code=400, detail="无法从消息中识别标的代码")
+        message = "抱歉，我没能从您的消息中识别出股票标的。请输入代码（如 600519.SH）或可识别的公司名称。"
+        if request.stream:
+            def _error_stream():
+                yield _sse_pack("job.failed", {"error": message})
+                yield "event: done\ndata: [DONE]\n\n"
+            return StreamingResponse(
+                _error_stream(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            )
+        raise HTTPException(status_code=400, detail=message)
+
 
     analyze_req = AnalyzeRequest(
         symbol=symbol,

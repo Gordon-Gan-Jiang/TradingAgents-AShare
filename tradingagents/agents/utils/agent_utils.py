@@ -27,8 +27,14 @@ def create_msg_delete():
         # Remove all messages
         removal_operations = [RemoveMessage(id=m.id) for m in messages]
 
-        # Add a minimal placeholder message
-        placeholder = HumanMessage(content="Continue")
+        company = state.get("company_of_interest", "")
+        trade_date = state.get("trade_date", "")
+        # Keep concise but explicit context so next agent doesn't ask for missing task/date.
+        placeholder_text = (
+            f"Continue analysis for symbol {company} on {trade_date}. "
+            "Use available tools and context; do not ask the user for missing task details."
+        ).strip()
+        placeholder = HumanMessage(content=placeholder_text)
 
         return {"messages": removal_operations + [placeholder]}
 
