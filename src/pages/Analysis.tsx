@@ -1,3 +1,4 @@
+
 import { useEffect, useState } from 'react'
 import { Settings2 } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
@@ -12,6 +13,9 @@ const ANALYST_OPTIONS = [
     { id: 'news', label: '新闻分析', description: '财经新闻事件分析' },
     { id: 'fundamentals', label: '基本面', description: '财务报表和估值分析' },
 ]
+
+// 使用字符串字面量，避免被windicss扫描
+const CTX_SECTION = "card"
 
 export default function Analysis() {
     const [searchParams] = useSearchParams()
@@ -43,10 +47,10 @@ export default function Analysis() {
 
                     <section className="card">
                         <div className="flex items-center gap-2 mb-3">
-                            <Settings2 className="w-5 h-5 text-trading-accent-blue" />
-                            <h2 className="text-lg font-semibold text-trading-text-primary">分析师配置</h2>
+                            <Settings2 className="w-5 h-5 text-blue-500" />
+                            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">分析师配置</h2>
                         </div>
-                        <p className="text-sm text-trading-text-secondary mb-3">
+                        <p className="text-sm text-slate-600 dark:text-slate-400 mb-3">
                             通过右侧对话启动分析，可在此选择启用的分析师。
                         </p>
                         <div className="flex flex-wrap gap-2">
@@ -55,8 +59,8 @@ export default function Analysis() {
                                     key={option.id}
                                     onClick={() => toggleAnalyst(option.id)}
                                     className={`px-4 py-2 rounded-lg border transition-all duration-200 ${selectedAnalysts.includes(option.id)
-                                        ? 'bg-trading-accent-blue/10 border-trading-accent-blue text-trading-accent-blue'
-                                        : 'bg-trading-bg-tertiary border-trading-border text-trading-text-secondary hover:border-trading-text-muted'
+                                        ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-500 text-blue-600 dark:text-blue-400'
+                                        : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 hover:border-slate-400 dark:hover:border-slate-500'
                                         }`}
                                 >
                                     <span className="font-medium">{option.label}</span>
