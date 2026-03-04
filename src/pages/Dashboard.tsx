@@ -95,9 +95,9 @@ export default function Dashboard() {
                                 className="flex items-start gap-3 p-3 rounded-lg bg-slate-100 dark:bg-slate-800/50"
                             >
                                 <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${log.type === 'error' ? 'bg-red-500' :
-                                        log.type === 'system' ? 'bg-blue-500' :
-                                            log.type === 'tool' ? 'bg-orange-500' :
-                                                'bg-green-500'
+                                    log.type === 'system' ? 'bg-blue-500' :
+                                        log.type === 'tool' ? 'bg-orange-500' :
+                                            'bg-green-500'
                                     }`} />
                                 <div className="flex-1 min-w-0">
                                     <p className="text-sm text-slate-900 dark:text-slate-100">{log.content}</p>

@@ -1,4 +1,4 @@
-import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse } from '@/types'
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -63,6 +63,37 @@ class ApiService {
         }
 
         return response
+    }
+
+    // Report API Methods
+    async getReports(symbol?: string, skip = 0, limit = 100): Promise<ReportListResponse> {
+        const params = new URLSearchParams()
+        if (symbol) params.append('symbol', symbol)
+        params.append('skip', skip.toString())
+        params.append('limit', limit.toString())
+        return this.request<ReportListResponse>(`/v1/reports?${params}`)
+    }
+
+    async getReport(reportId: string): Promise<ReportDetail> {
+        return this.request<ReportDetail>(`/v1/reports/${reportId}`)
+    }
+
+    async deleteReport(reportId: string): Promise<{ message: string }> {
+        return this.request<{ message: string }>(`/v1/reports/${reportId}`, {
+            method: 'DELETE',
+        })
+    }
+
+    async createReport(report: {
+        symbol: string
+        trade_date: string
+        decision?: string
+        result_data?: AnalysisReport
+    }): Promise<Report> {
+        return this.request<Report>('/v1/reports', {
+            method: 'POST',
+            body: JSON.stringify(report),
+        })
     }
 }
 

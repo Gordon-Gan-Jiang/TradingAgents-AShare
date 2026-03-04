@@ -1,5 +1,7 @@
 import { FormEvent, useMemo, useState } from 'react'
-import { Bot, Loader2, Send, Sparkles } from 'lucide-react'
+import { Bot, Loader2, Send, Sparkles, Settings2, ChevronDown, ChevronUp } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { api } from '@/services/api'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import type {
@@ -13,9 +15,15 @@ import type {
 } from '@/types'
 
 interface ChatCopilotPanelProps {
-    selectedAnalysts: string[]
     onSymbolDetected: (symbol: string) => void
 }
+
+const ANALYST_OPTIONS = [
+    { id: 'market', label: '市场分析', description: '技术面' },
+    { id: 'social', label: '舆情分析', description: '社交媒体' },
+    { id: 'news', label: '新闻分析', description: '财经新闻' },
+    { id: 'fundamentals', label: '基本面', description: '财务估值' },
+]
 
 interface ChatBubble {
     id: string
@@ -35,9 +43,11 @@ const PRESET_PROMPTS = [
     '分析宁德时代300750.SZ，给出交易建议',
 ]
 
-export default function ChatCopilotPanel({ selectedAnalysts, onSymbolDetected }: ChatCopilotPanelProps) {
+export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelProps) {
     const [input, setInput] = useState('')
     const [streaming, setStreaming] = useState(false)
+    const [showConfig, setShowConfig] = useState(false)
+    const [selectedAnalysts, setSelectedAnalysts] = useState<string[]>(['market', 'social', 'news', 'fundamentals'])
     const [chat, setChat] = useState<ChatBubble[]>([
         {
             id: 'init',
@@ -63,6 +73,12 @@ export default function ChatCopilotPanel({ selectedAnalysts, onSymbolDetected }:
     } = useAnalysisStore()
 
     const timelineLogs = useMemo(() => [...logs].reverse(), [logs])
+
+    const toggleAnalyst = (id: string) => {
+        setSelectedAnalysts((prev) =>
+            prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id]
+        )
+    }
 
     const pushAssistant = (content: string) => {
         setChat((prev) => [
@@ -249,6 +265,7 @@ export default function ChatCopilotPanel({ selectedAnalysts, onSymbolDetected }:
                 示例：分析贵州茅台 600519.SH 今天走势
             </div>
 
+            {/* 快速提示 */}
             <div className="flex flex-wrap gap-2 mb-3">
                 {PRESET_PROMPTS.map((prompt) => (
                     <button
@@ -261,16 +278,90 @@ export default function ChatCopilotPanel({ selectedAnalysts, onSymbolDetected }:
                 ))}
             </div>
 
+            {/* 分析师配置（可折叠） */}
+            <div className="mb-3 border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+                <button
+                    onClick={() => setShowConfig(!showConfig)}
+                    className="w-full flex items-center justify-between px-3 py-2 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                >
+                    <div className="flex items-center gap-2">
+                        <Settings2 className="w-4 h-4 text-slate-400" />
+                        <span className="text-sm text-slate-600 dark:text-slate-400">
+                            分析类型 ({selectedAnalysts.length}/4)
+                        </span>
+                    </div>
+                    {showConfig ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+                </button>
+
+                {showConfig && (
+                    <div className="p-3 bg-white dark:bg-slate-800/30">
+                        <div className="flex flex-wrap gap-2">
+                            {ANALYST_OPTIONS.map((option) => (
+                                <button
+                                    key={option.id}
+                                    onClick={() => toggleAnalyst(option.id)}
+                                    className={`px-3 py-1.5 text-xs rounded-md border transition-all ${selectedAnalysts.includes(option.id)
+                                        ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-500 text-blue-600 dark:text-blue-400'
+                                        : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-500'
+                                        }`}
+                                >
+                                    <span className="font-medium">{option.label}</span>
+                                    <span className="block opacity-70">{option.description}</span>
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* 聊天内容 */}
             <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1">
                 {chat.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                         <div
                             className={`max-w-[92%] rounded-xl px-3 py-2 text-sm leading-relaxed ${msg.role === 'user'
-                                    ? 'bg-blue-100 dark:bg-blue-500/20 border border-blue-300 dark:border-blue-500/30 text-slate-900 dark:text-slate-100'
-                                    : 'bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                                ? 'bg-blue-100 dark:bg-blue-500/20 border border-blue-300 dark:border-blue-500/30 text-slate-900 dark:text-slate-100'
+                                : 'bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
                                 }`}
                         >
-                            {msg.content}
+                            {msg.role === 'user' ? (
+                                msg.content
+                            ) : (
+                                <div className="prose dark:prose-invert prose-sm max-w-none">
+                                    <ReactMarkdown
+                                        remarkPlugins={[remarkGfm]}
+                                        components={{
+                                            table: ({ children }) => (
+                                                <table className="w-full border-collapse border border-slate-300 dark:border-slate-600 my-2 text-xs">
+                                                    {children}
+                                                </table>
+                                            ),
+                                            thead: ({ children }) => (
+                                                <thead className="bg-slate-100 dark:bg-slate-700">
+                                                    {children}
+                                                </thead>
+                                            ),
+                                            th: ({ children }) => (
+                                                <th className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-left font-semibold text-slate-700 dark:text-slate-300">
+                                                    {children}
+                                                </th>
+                                            ),
+                                            td: ({ children }) => (
+                                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-slate-600 dark:text-slate-400">
+                                                    {children}
+                                                </td>
+                                            ),
+                                            tr: ({ children }) => (
+                                                <tr className="even:bg-slate-50 dark:even:bg-slate-800/50">
+                                                    {children}
+                                                </tr>
+                                            ),
+                                        }}
+                                    >
+                                        {msg.content}
+                                    </ReactMarkdown>
+                                </div>
+                            )}
                         </div>
                     </div>
                 ))}
@@ -289,6 +380,7 @@ export default function ChatCopilotPanel({ selectedAnalysts, onSymbolDetected }:
                 </div>
             </div>
 
+            {/* 输入框 */}
             <form onSubmit={handleSubmit} className="mt-3 shrink-0">
                 <div className="flex items-center gap-2">
                     <input

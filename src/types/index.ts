@@ -136,3 +136,33 @@ export interface KlineResponse {
     end_date: string
     candles: KlineCandle[]
 }
+
+// Report Types (from database)
+export interface Report {
+    id: string
+    user_id?: string
+    symbol: string
+    trade_date: string
+    decision?: string
+    confidence?: number
+    target_price?: number
+    stop_loss_price?: number
+    created_at?: string
+    updated_at?: string
+}
+
+export interface ReportDetail extends Report {
+    market_report?: string
+    sentiment_report?: string
+    news_report?: string
+    fundamentals_report?: string
+    investment_plan?: string
+    trader_investment_plan?: string
+    final_trade_decision?: string
+    result_data?: AnalysisReport
+}
+
+export interface ReportListResponse {
+    total: number
+    reports: Report[]
+}

@@ -11,6 +11,22 @@ const TEAMS = [
     { name: 'Portfolio Management', color: 'cyan', label: '组合管理' },
 ] as const
 
+// Agent 中文名称映射
+const AGENT_NAME_MAP: Record<string, string> = {
+    'Market Analyst': '技术分析师',
+    'Social Analyst': '舆情分析师',
+    'News Analyst': '新闻分析师',
+    'Fundamentals Analyst': '基本面分析师',
+    'Bull Researcher': '看多研究员',
+    'Bear Researcher': '看空研究员',
+    'Research Manager': '研究经理',
+    'Trader': '交易员',
+    'Aggressive Analyst': '激进风控',
+    'Conservative Analyst': '保守风控',
+    'Neutral Analyst': '中性风控',
+    'Portfolio Manager': '投资组合经理',
+}
+
 const COLORS = {
     blue: { bg: 'bg-blue-500', text: 'text-blue-500', border: 'border-blue-500', light: 'bg-blue-50 dark:bg-blue-500/10' },
     purple: { bg: 'bg-purple-500', text: 'text-purple-500', border: 'border-purple-500', light: 'bg-purple-50 dark:bg-purple-500/10' },
@@ -70,7 +86,7 @@ export default function AgentPipeline() {
                             </h3>
                             <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
                                 {teamAgents.map((agent) => (
-                                    <AgentCard key={agent.id} agent={agent} team={team} colors={colors} />
+                                    <AgentCard key={agent.id} agent={agent} colors={colors} />
                                 ))}
                             </div>
                         </div>
@@ -87,11 +103,10 @@ interface AgentCardProps {
         name: string
         status: AgentStatus
     }
-    team: typeof TEAMS[number]
     colors: typeof COLORS['blue']
 }
 
-function AgentCard({ agent, team, colors }: AgentCardProps) {
+function AgentCard({ agent, colors }: AgentCardProps) {
     const StatusIcon = {
         pending: Circle,
         in_progress: Loader2,
@@ -137,10 +152,7 @@ function AgentCard({ agent, team, colors }: AgentCardProps) {
                 <StatusIcon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${statusConfig.textClass}`} />
                 <div className="flex-1 min-w-0">
                     <p className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">
-                        {agent.name}
-                    </p>
-                    <p className={`text-[11px] ${colors.text} opacity-85`}>
-                        {team.label}
+                        {AGENT_NAME_MAP[agent.name] || agent.name}
                     </p>
                     <p className={`text-xs ${agent.status === 'in_progress' ? colors.text : 'text-slate-500 dark:text-slate-400'}`}>
                         {statusLabels[agent.status]}
