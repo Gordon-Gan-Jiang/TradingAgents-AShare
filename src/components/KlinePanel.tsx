@@ -62,6 +62,7 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
     const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [isDark, setIsDark] = useState(document.documentElement.classList.contains('dark'))
 
     const range = useMemo(() => {
         const end = new Date()
@@ -72,12 +73,27 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
         }
     }, [])
 
+    // Listen for theme changes
+    useEffect(() => {
+        const observer = new MutationObserver(() => {
+            const dark = document.documentElement.classList.contains('dark')
+            setIsDark(dark)
+        })
+        observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+        return () => observer.disconnect()
+    }, [])
+
     useEffect(() => {
         if (!containerRef.current) return
+
+        const textColor = isDark ? '#94a3b8' : '#475569'
+        const gridColor = isDark ? 'rgba(51, 65, 85, 0.6)' : 'rgba(203, 213, 225, 0.6)'
+        const bgColor = isDark ? 'transparent' : 'transparent'
+
         const chart = createChart(containerRef.current, {
             layout: {
-                background: { type: ColorType.Solid, color: 'transparent' },
-                textColor: '#8B949E',
+                background: { type: ColorType.Solid, color: bgColor },
+                textColor: textColor,
                 attributionLogo: false,
             },
             localization: {
@@ -87,14 +103,14 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
             width: containerRef.current.clientWidth,
             height: containerRef.current.clientHeight,
             grid: {
-                vertLines: { color: 'rgba(48, 54, 61, 0.6)' },
-                horzLines: { color: 'rgba(48, 54, 61, 0.6)' },
+                vertLines: { color: gridColor },
+                horzLines: { color: gridColor },
             },
             rightPriceScale: {
-                borderColor: '#30363D',
+                borderColor: isDark ? '#334155' : '#cbd5e1',
             },
             timeScale: {
-                borderColor: '#30363D',
+                borderColor: isDark ? '#334155' : '#cbd5e1',
                 timeVisible: true,
                 rightOffset: 6,
                 tickMarkFormatter: (time: BusinessDay | string) => {
@@ -106,15 +122,16 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
                 },
             },
             crosshair: {
-                vertLine: { color: 'rgba(88, 166, 255, 0.35)' },
-                horzLine: { color: 'rgba(88, 166, 255, 0.35)' },
+                vertLine: { color: isDark ? 'rgba(59, 130, 246, 0.35)' : 'rgba(59, 130, 246, 0.25)' },
+                horzLine: { color: isDark ? 'rgba(59, 130, 246, 0.35)' : 'rgba(59, 130, 246, 0.25)' },
             },
         })
+
         const series = chart.addSeries(CandlestickSeries, {
-            upColor: '#DA3633',
-            downColor: '#238636',
-            wickUpColor: '#DA3633',
-            wickDownColor: '#238636',
+            upColor: '#ef4444',
+            downColor: '#22c55e',
+            wickUpColor: '#ef4444',
+            wickDownColor: '#22c55e',
             borderVisible: false,
         })
 
@@ -136,7 +153,7 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
             chartRef.current = null
             seriesRef.current = null
         }
-    }, [])
+    }, [isDark])
 
     useEffect(() => {
         let cancelled = false
@@ -183,35 +200,34 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
         <section className="card h-[340px] flex flex-col min-h-0 overflow-hidden">
             <div className="flex items-center justify-between mb-3 shrink-0">
                 <div className="flex items-center gap-2">
-                    <CandlestickChart className="w-5 h-5 text-trading-accent-cyan" />
-                    <h2 className="text-lg font-semibold text-trading-text-primary">{getDisplayName(symbol)} K线</h2>
+                    <CandlestickChart className="w-5 h-5 text-cyan-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">{getDisplayName(symbol)} K线</h2>
                 </div>
                 <div className="flex items-center gap-1.5">
                     {INDEX_PRESETS.map((item) => (
                         <button
                             key={item.symbol}
                             onClick={() => onSymbolChange?.(item.symbol)}
-                            className={`text-xs px-2 py-1 rounded border transition-colors ${
-                                item.symbol === symbol
-                                    ? 'border-trading-accent-blue text-trading-accent-blue bg-trading-accent-blue/10'
-                                    : 'border-trading-border text-trading-text-secondary hover:text-trading-text-primary hover:border-trading-text-muted'
-                            }`}
+                            className={`text-xs px-2 py-1 rounded border transition-colors ${item.symbol === symbol
+                                    ? 'border-blue-500 text-blue-500 bg-blue-50 dark:bg-blue-500/10'
+                                    : 'border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:border-slate-400 dark:hover:border-slate-500'
+                                }`}
                         >
                             {item.label}
                         </button>
                     ))}
                 </div>
             </div>
-            <div className="relative flex-1 min-h-0 rounded-md border border-trading-border bg-trading-bg-primary/30 overflow-hidden">
+            <div className="relative flex-1 min-h-0 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 overflow-hidden">
                 <div ref={containerRef} className="absolute inset-0" />
                 {loading && (
-                    <div className="absolute right-3 top-3 text-xs px-2 py-1 rounded bg-trading-bg-secondary/90 text-trading-text-secondary flex items-center gap-1">
+                    <div className="absolute right-3 top-3 text-xs px-2 py-1 rounded bg-white/90 dark:bg-slate-800/90 text-slate-600 dark:text-slate-400 flex items-center gap-1">
                         <Activity className="w-3 h-3 animate-pulse" />
                         加载中
                     </div>
                 )}
                 {error && (
-                    <div className="absolute left-3 top-3 text-xs px-2 py-1 rounded bg-trading-bg-secondary/90 text-trading-accent-orange">
+                    <div className="absolute left-3 top-3 text-xs px-2 py-1 rounded bg-white/90 dark:bg-slate-800/90 text-orange-500">
                         {error}
                     </div>
                 )}

@@ -1,4 +1,4 @@
-import { ReactNode, useState } from 'react'
+import { ReactNode } from 'react'
 import Sidebar from './Sidebar'
 import Header from './Header'
 
@@ -7,17 +7,12 @@ interface LayoutProps {
 }
 
 export default function Layout({ children }: LayoutProps) {
-    const [sidebarExpanded, setSidebarExpanded] = useState(false)
-
     return (
-        <div className="flex h-screen bg-trading-bg-primary overflow-hidden">
-            <Sidebar
-                expanded={sidebarExpanded}
-                onToggleExpand={() => setSidebarExpanded((prev) => !prev)}
-            />
-            <div className="flex-1 flex flex-col min-w-0">
+        <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
+            <Sidebar />
+            <div className="ml-16 min-h-screen flex flex-col">
                 <Header />
-                <main className="flex-1 overflow-auto p-6">
+                <main className="flex-1 p-6 bg-slate-50 dark:bg-gradient-to-br dark:from-slate-900 dark:via-slate-900/95 dark:to-slate-800">
                     {children}
                 </main>
             </div>

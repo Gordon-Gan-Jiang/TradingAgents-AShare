@@ -1,7 +1,5 @@
 import { FileText, Download, ChevronDown, ChevronRight } from 'lucide-react'
 import { useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { useAnalysisStore } from '@/stores/analysisStore'
 
 const REPORT_SECTIONS = [
@@ -49,11 +47,11 @@ export default function ReportViewer() {
 
     if (!hasReport && !isAnalyzing) {
         return (
-            <div className="card flex items-center justify-center py-12 overflow-hidden">
+            <div className="card flex items-center justify-center py-12">
                 <div className="text-center">
-                    <FileText className="w-12 h-12 text-trading-text-muted mx-auto mb-4" />
-                    <p className="text-trading-text-secondary">暂无分析报告</p>
-                    <p className="text-sm text-trading-text-muted mt-1">
+                    <FileText className="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-4" />
+                    <p className="text-slate-500 dark:text-slate-400">暂无分析报告</p>
+                    <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">
                         开始分析后将在此显示报告
                     </p>
                 </div>
@@ -62,11 +60,11 @@ export default function ReportViewer() {
     }
 
     return (
-        <div className="card overflow-hidden">
+        <div className="card flex-1 flex flex-col min-h-0">
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
-                    <FileText className="w-5 h-5 text-trading-accent-blue" />
-                    <h2 className="text-lg font-semibold text-trading-text-primary">分析报告</h2>
+                    <FileText className="w-5 h-5 text-blue-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">分析报告</h2>
                     {isAnalyzing && (
                         <span className="badge-orange animate-pulse">生成中</span>
                     )}
@@ -82,7 +80,7 @@ export default function ReportViewer() {
                 )}
             </div>
 
-            <div className="space-y-2">
+            <div className="flex-1 overflow-y-auto space-y-2 min-h-0">
                 {REPORT_SECTIONS.map((section) => {
                     const content = report?.[section.key as keyof typeof report]
                     if (!content || typeof content !== 'string' || content.length === 0) {
@@ -94,34 +92,32 @@ export default function ReportViewer() {
                     return (
                         <div
                             key={section.key}
-                            className="border border-trading-border rounded-lg overflow-hidden"
+                            className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden"
                         >
                             <button
                                 onClick={() => toggleSection(section.key)}
-                                className="w-full flex items-center justify-between p-3 bg-trading-bg-tertiary/30 hover:bg-trading-bg-tertiary/50 transition-colors"
+                                className="w-full flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                             >
                                 <div className="flex items-center gap-2">
                                     {isExpanded ? (
-                                        <ChevronDown className="w-4 h-4 text-trading-text-muted" />
+                                        <ChevronDown className="w-4 h-4 text-slate-400" />
                                     ) : (
-                                        <ChevronRight className="w-4 h-4 text-trading-text-muted" />
+                                        <ChevronRight className="w-4 h-4 text-slate-400" />
                                     )}
-                                    <span className="font-medium text-trading-text-primary">
+                                    <span className="font-medium text-slate-900 dark:text-slate-100">
                                         {section.title}
                                     </span>
-                                    <span className="text-xs text-trading-text-muted">
+                                    <span className="text-xs text-slate-500 dark:text-slate-400">
                                         {section.team}
                                     </span>
                                 </div>
-                                <span className="text-xs text-trading-accent-green">✓</span>
+                                <span className="text-xs text-green-500">✓</span>
                             </button>
 
                             {isExpanded && (
-                                <div className="p-4">
-                                    <div className="prose prose-sm max-w-none text-trading-text-secondary prose-headings:text-trading-text-primary prose-strong:text-trading-text-primary prose-code:text-trading-text-primary prose-pre:bg-trading-bg-tertiary prose-pre:border prose-pre:border-trading-border prose-th:text-trading-text-primary prose-td:text-trading-text-secondary">
-                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                            {content}
-                                        </ReactMarkdown>
+                                <div className="p-4 bg-white dark:bg-slate-800/30">
+                                    <div className="whitespace-pre-wrap text-slate-700 dark:text-slate-300 leading-relaxed">
+                                        {content}
                                     </div>
                                 </div>
                             )}
@@ -132,8 +128,8 @@ export default function ReportViewer() {
                 {isAnalyzing && !hasReport && (
                     <div className="flex items-center justify-center py-12">
                         <div className="text-center">
-                            <div className="w-8 h-8 border-2 border-trading-accent-blue border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                            <p className="text-trading-text-secondary">正在生成报告...</p>
+                            <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                            <p className="text-slate-500 dark:text-slate-400">正在生成报告...</p>
                         </div>
                     </div>
                 )}

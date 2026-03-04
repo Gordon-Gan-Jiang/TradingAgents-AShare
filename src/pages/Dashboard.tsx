@@ -12,14 +12,14 @@ export default function Dashboard() {
             {/* Welcome Section */}
             <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="text-2xl font-bold text-trading-text-primary">控制台</h1>
-                    <p className="text-trading-text-secondary mt-1">
+                    <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">控制台</h1>
+                    <p className="text-slate-500 dark:text-slate-400 mt-1">
                         欢迎使用 TradingAgents 智能分析系统
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-trading-accent-green animate-pulse' : 'bg-trading-text-muted'}`} />
-                    <span className="text-sm text-trading-text-secondary">
+                    <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500 animate-pulse' : 'bg-slate-400'}`} />
+                    <span className="text-sm text-slate-500 dark:text-slate-400">
                         {isConnected ? '已连接' : '未连接'}
                     </span>
                 </div>
@@ -59,7 +59,7 @@ export default function Dashboard() {
 
             {/* Quick Actions */}
             <div className="card">
-                <h2 className="text-lg font-semibold text-trading-text-primary mb-4">快速开始</h2>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">快速开始</h2>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <QuickActionCard
                         title="开始新分析"
@@ -84,24 +84,24 @@ export default function Dashboard() {
 
             {/* Recent Activity */}
             <div className="card">
-                <h2 className="text-lg font-semibold text-trading-text-primary mb-4">最近活动</h2>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">最近活动</h2>
                 <div className="space-y-2 max-h-64 overflow-y-auto">
                     {logs.length === 0 ? (
-                        <p className="text-trading-text-muted text-center py-8">暂无活动记录</p>
+                        <p className="text-slate-400 dark:text-slate-500 text-center py-8">暂无活动记录</p>
                     ) : (
                         logs.slice(0, 20).map((log) => (
                             <div
                                 key={log.id}
-                                className="flex items-start gap-3 p-3 rounded-lg bg-trading-bg-tertiary/50"
+                                className="flex items-start gap-3 p-3 rounded-lg bg-slate-100 dark:bg-slate-800/50"
                             >
-                                <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${log.type === 'error' ? 'bg-trading-accent-red' :
-                                        log.type === 'system' ? 'bg-trading-accent-blue' :
-                                            log.type === 'tool' ? 'bg-trading-accent-orange' :
-                                                'bg-trading-accent-green'
+                                <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${log.type === 'error' ? 'bg-red-500' :
+                                        log.type === 'system' ? 'bg-blue-500' :
+                                            log.type === 'tool' ? 'bg-orange-500' :
+                                                'bg-green-500'
                                     }`} />
                                 <div className="flex-1 min-w-0">
-                                    <p className="text-sm text-trading-text-primary">{log.content}</p>
-                                    <p className="text-xs text-trading-text-muted mt-1">
+                                    <p className="text-sm text-slate-900 dark:text-slate-100">{log.content}</p>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                                         {new Date(log.timestamp).toLocaleTimeString()}
                                         {log.agent && ` · ${log.agent}`}
                                     </p>
@@ -125,20 +125,20 @@ interface StatCardProps {
 
 function StatCard({ icon: Icon, label, value, subValue, color }: StatCardProps) {
     const colorClasses = {
-        blue: 'bg-trading-accent-blue/10 text-trading-accent-blue',
-        green: 'bg-trading-accent-green/10 text-trading-accent-green',
-        orange: 'bg-trading-accent-orange/10 text-trading-accent-orange',
-        purple: 'bg-trading-accent-purple/10 text-trading-accent-purple',
-        red: 'bg-trading-accent-red/10 text-trading-accent-red',
+        blue: 'bg-blue-100 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400',
+        green: 'bg-green-100 dark:bg-green-500/10 text-green-600 dark:text-green-400',
+        orange: 'bg-orange-100 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400',
+        purple: 'bg-purple-100 dark:bg-purple-500/10 text-purple-600 dark:text-purple-400',
+        red: 'bg-red-100 dark:bg-red-500/10 text-red-600 dark:text-red-400',
     }
 
     return (
         <div className="card card-hover">
             <div className="flex items-start justify-between">
                 <div>
-                    <p className="text-sm text-trading-text-secondary">{label}</p>
-                    <p className="text-2xl font-bold text-trading-text-primary mt-1">{value}</p>
-                    <p className="text-xs text-trading-text-muted mt-1">{subValue}</p>
+                    <p className="text-sm text-slate-500 dark:text-slate-400">{label}</p>
+                    <p className="text-2xl font-bold text-slate-900 dark:text-slate-100 mt-1">{value}</p>
+                    <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">{subValue}</p>
                 </div>
                 <div className={`p-3 rounded-lg ${colorClasses[color]}`}>
                     <Icon className="w-5 h-5" />
@@ -159,11 +159,11 @@ function QuickActionCard({ title, description, action, href }: QuickActionCardPr
     return (
         <a
             href={href}
-            className="block p-4 rounded-lg border border-trading-border bg-trading-bg-tertiary/30 hover:border-trading-accent-blue/50 hover:bg-trading-bg-tertiary/50 transition-all duration-200"
+            className="block p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/30 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-all duration-200"
         >
-            <h3 className="font-medium text-trading-text-primary">{title}</h3>
-            <p className="text-sm text-trading-text-secondary mt-1">{description}</p>
-            <span className="inline-block mt-3 text-sm text-trading-accent-blue hover:underline">
+            <h3 className="font-medium text-slate-900 dark:text-slate-100">{title}</h3>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">{description}</p>
+            <span className="inline-block mt-3 text-sm text-blue-600 dark:text-blue-400 hover:underline">
                 {action} →
             </span>
         </a>

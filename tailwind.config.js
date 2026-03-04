@@ -1,5 +1,6 @@
 /** @type {import('tailwindcss').Config} */
 export default {
+    darkMode: 'class',
     content: [
         "./index.html",
         "./src/**/*.{js,ts,jsx,tsx}",
@@ -7,26 +8,18 @@ export default {
     theme: {
         extend: {
             colors: {
+                // 保留 trading 命名空间用于特定业务颜色
                 trading: {
-                    bg: {
-                        primary: 'rgb(var(--trading-bg-primary) / <alpha-value>)',
-                        secondary: 'rgb(var(--trading-bg-secondary) / <alpha-value>)',
-                        tertiary: 'rgb(var(--trading-bg-tertiary) / <alpha-value>)',
-                    },
                     accent: {
-                        green: 'rgb(var(--trading-accent-green) / <alpha-value>)',
-                        red: 'rgb(var(--trading-accent-red) / <alpha-value>)',
-                        blue: 'rgb(var(--trading-accent-blue) / <alpha-value>)',
-                        orange: 'rgb(var(--trading-accent-orange) / <alpha-value>)',
-                        purple: 'rgb(var(--trading-accent-purple) / <alpha-value>)',
-                        cyan: 'rgb(var(--trading-accent-cyan) / <alpha-value>)',
+                        green: '#22c55e',
+                        red: '#ef4444',
+                        blue: '#3b82f6',
+                        cyan: '#06b6d4',
+                        purple: '#8b5cf6',
+                        orange: '#f97316',
+                        yellow: '#eab308',
+                        pink: '#ec4899',
                     },
-                    text: {
-                        primary: 'rgb(var(--trading-text-primary) / <alpha-value>)',
-                        secondary: 'rgb(var(--trading-text-secondary) / <alpha-value>)',
-                        muted: 'rgb(var(--trading-text-muted) / <alpha-value>)',
-                    },
-                    border: 'rgb(var(--trading-border) / <alpha-value>)',
                 },
             },
             fontFamily: {

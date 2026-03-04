@@ -12,7 +12,6 @@ export default function Settings() {
     const [saved, setSaved] = useState(false)
 
     const handleSave = () => {
-        // Save to localStorage or API
         localStorage.setItem('tradingagents-settings', JSON.stringify(settings))
         setSaved(true)
         setTimeout(() => setSaved(false), 2000)
@@ -22,8 +21,8 @@ export default function Settings() {
         <div className="space-y-6 max-w-3xl">
             {/* Header */}
             <div>
-                <h1 className="text-2xl font-bold text-trading-text-primary">系统设置</h1>
-                <p className="text-trading-text-secondary mt-1">
+                <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">系统设置</h1>
+                <p className="text-slate-500 dark:text-slate-400 mt-1">
                     配置 API 连接和分析参数
                 </p>
             </div>
@@ -31,13 +30,13 @@ export default function Settings() {
             {/* API Settings */}
             <div className="card space-y-6">
                 <div className="flex items-center gap-2 mb-4">
-                    <Server className="w-5 h-5 text-trading-accent-blue" />
-                    <h2 className="text-lg font-semibold text-trading-text-primary">API 配置</h2>
+                    <Server className="w-5 h-5 text-blue-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">API 配置</h2>
                 </div>
 
                 <div className="space-y-4">
                     <div>
-                        <label className="block text-sm font-medium text-trading-text-secondary mb-2">
+                        <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
                             API 地址
                         </label>
                         <input
@@ -47,17 +46,17 @@ export default function Settings() {
                             className="input w-full"
                             placeholder="http://localhost:8000"
                         />
-                        <p className="text-xs text-trading-text-muted mt-1">
+                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                             TradingAgents FastAPI 后端服务地址
                         </p>
                     </div>
 
                     <div>
-                        <label className="block text-sm font-medium text-trading-text-secondary mb-2">
+                        <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
                             API Key (可选)
                         </label>
                         <div className="relative">
-                            <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-trading-text-muted" />
+                            <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                             <input
                                 type="password"
                                 value={settings.apiKey}
@@ -73,13 +72,13 @@ export default function Settings() {
             {/* LLM Settings */}
             <div className="card space-y-6">
                 <div className="flex items-center gap-2 mb-4">
-                    <Database className="w-5 h-5 text-trading-accent-purple" />
-                    <h2 className="text-lg font-semibold text-trading-text-primary">LLM 配置</h2>
+                    <Database className="w-5 h-5 text-purple-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">LLM 配置</h2>
                 </div>
 
                 <div className="space-y-4">
                     <div>
-                        <label className="block text-sm font-medium text-trading-text-secondary mb-2">
+                        <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
                             默认 LLM 提供商
                         </label>
                         <select
@@ -98,12 +97,12 @@ export default function Settings() {
             {/* Default Analysts */}
             <div className="card space-y-6">
                 <div className="flex items-center gap-2 mb-4">
-                    <Database className="w-5 h-5 text-trading-accent-green" />
-                    <h2 className="text-lg font-semibold text-trading-text-primary">默认分析配置</h2>
+                    <Database className="w-5 h-5 text-green-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">默认分析配置</h2>
                 </div>
 
                 <div>
-                    <label className="block text-sm font-medium text-trading-text-secondary mb-2">
+                    <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
                         默认启用的分析师
                     </label>
                     <div className="flex flex-wrap gap-2">
@@ -111,8 +110,8 @@ export default function Settings() {
                             <label
                                 key={analyst}
                                 className={`px-4 py-2 rounded-lg border cursor-pointer transition-all ${settings.defaultAnalysts.includes(analyst)
-                                        ? 'bg-trading-accent-blue/10 border-trading-accent-blue text-trading-accent-blue'
-                                        : 'bg-trading-bg-tertiary border-trading-border text-trading-text-secondary'
+                                    ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-500 text-blue-600 dark:text-blue-400'
+                                    : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-400'
                                     }`}
                             >
                                 <input
@@ -154,7 +153,7 @@ export default function Settings() {
                 </button>
 
                 {saved && (
-                    <span className="text-sm text-trading-accent-green">
+                    <span className="text-sm text-green-600 dark:text-green-400">
                         ✓ 设置已保存
                     </span>
                 )}

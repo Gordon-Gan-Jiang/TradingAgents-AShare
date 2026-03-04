@@ -15,9 +15,15 @@ export default function Header() {
 
     const applyTheme = (mode: ThemeMode) => {
         const root = document.documentElement
-        root.classList.remove('theme-light', 'theme-dark')
-        if (mode === 'light') root.classList.add('theme-light')
-        if (mode === 'dark') root.classList.add('theme-dark')
+        const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+
+        const shouldBeDark = mode === 'system' ? systemDark : mode === 'dark'
+
+        if (shouldBeDark) {
+            root.classList.add('dark')
+        } else {
+            root.classList.remove('dark')
+        }
     }
 
     const cycleTheme = () => {
@@ -32,19 +38,20 @@ export default function Header() {
     const ThemeIcon = themeMode === 'system' ? Monitor : themeMode === 'light' ? Sun : Moon
 
     return (
-        <header className="h-16 bg-trading-bg-secondary border-b border-trading-border flex items-center justify-end px-6">
+        <header className="h-16 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 flex items-center justify-end px-6 sticky top-0 z-40">
             <div className="flex items-center gap-4">
                 <button
                     onClick={cycleTheme}
-                    className="inline-flex items-center justify-center w-9 h-9 rounded-md border border-trading-border text-trading-text-secondary hover:text-trading-text-primary hover:bg-trading-bg-tertiary transition-colors"
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-all"
                     title={`主题：${themeLabel}（点击切换）`}
-                    aria-label={`主题：${themeLabel}`}
                 >
                     <ThemeIcon className="w-4 h-4" />
+                    <span className="text-sm">{themeLabel}</span>
                 </button>
-                <button className="relative p-2 text-trading-text-secondary hover:text-trading-text-primary transition-colors">
+
+                <button className="relative p-2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800">
                     <Bell className="w-5 h-5" />
-                    <span className="absolute top-1 right-1 w-2 h-2 bg-trading-accent-red rounded-full" />
+                    <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />
                 </button>
             </div>
         </header>
