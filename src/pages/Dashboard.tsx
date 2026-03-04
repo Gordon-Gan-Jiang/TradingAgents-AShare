@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { TrendingUp, Activity, Clock, CheckCircle } from 'lucide-react'
 import { useAnalysisStore } from '@/stores/analysisStore'
 

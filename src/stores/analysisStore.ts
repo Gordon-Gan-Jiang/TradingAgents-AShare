@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import type {
     Agent,
-    AnalysisRequest,
     JobStatus,
     AnalysisReport,
     LogEntry,
@@ -69,6 +68,12 @@ const initialAgents: Agent[] = [
     { id: 'portfolio_manager', name: 'Portfolio Manager', team: 'Portfolio Management', status: 'pending' },
 ]
 
+const truncateLog = (content: string, max = 420) => {
+    if (!content) return ''
+    if (content.length <= max) return content
+    return `${content.slice(0, max)}...`
+}
+
 export const useAnalysisStore = create<AnalysisState>((set) => ({
     currentJobId: null,
     jobStatus: null,
@@ -101,11 +106,14 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     }),
 
     addAgentMessage: (event) => set((state) => {
+        const summarized = event.message_type === 'tool'
+            ? truncateLog(event.content, 240)
+            : truncateLog(event.content, 420)
         const log: LogEntry = {
             id: `${Date.now()}-${Math.random()}`,
             timestamp: new Date().toISOString(),
             type: 'agent',
-            content: event.content,
+            content: summarized,
             agent: event.agent || undefined
         }
         return { logs: [log, ...state.logs].slice(0, 100) }
@@ -116,7 +124,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
             id: `${Date.now()}-${Math.random()}`,
             timestamp: new Date().toISOString(),
             type: 'tool',
-            content: `${event.tool_call.name}: ${JSON.stringify(event.tool_call.args)}`,
+            content: truncateLog(`${event.tool_call.name}: ${JSON.stringify(event.tool_call.args)}`, 260),
             agent: event.agent || undefined
         }
         return { logs: [log, ...state.logs].slice(0, 100) }

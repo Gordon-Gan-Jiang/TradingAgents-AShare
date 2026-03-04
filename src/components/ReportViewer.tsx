@@ -47,7 +47,7 @@ export default function ReportViewer() {
 
     if (!hasReport && !isAnalyzing) {
         return (
-            <div className="card flex items-center justify-center py-12">
+            <div className="card flex items-center justify-center py-12 overflow-hidden">
                 <div className="text-center">
                     <FileText className="w-12 h-12 text-trading-text-muted mx-auto mb-4" />
                     <p className="text-trading-text-secondary">暂无分析报告</p>
@@ -60,7 +60,7 @@ export default function ReportViewer() {
     }
 
     return (
-        <div className="card h-full flex flex-col min-h-0 overflow-hidden">
+        <div className="card overflow-hidden">
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                     <FileText className="w-5 h-5 text-trading-accent-blue" />
@@ -80,7 +80,7 @@ export default function ReportViewer() {
                 )}
             </div>
 
-            <div className="flex-1 overflow-y-auto space-y-2 min-h-0">
+            <div className="space-y-2">
                 {REPORT_SECTIONS.map((section) => {
                     const content = report?.[section.key as keyof typeof report]
                     if (!content || typeof content !== 'string' || content.length === 0) {

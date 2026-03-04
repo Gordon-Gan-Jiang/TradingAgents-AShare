@@ -1,11 +1,22 @@
 <!doctype html>
-<html lang="zh-CN" class="dark">
+<html lang="zh-CN">
 
 <head>
   <meta charset="UTF-8" />
   <link rel="icon" type="image/svg+xml" href="/vite.svg" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>TradingAgents Dashboard</title>
+  <script>
+    (() => {
+      try {
+        const saved = localStorage.getItem('ta-theme');
+        const root = document.documentElement;
+        root.classList.remove('theme-light', 'theme-dark');
+        if (saved === 'light') root.classList.add('theme-light');
+        if (saved === 'dark') root.classList.add('theme-dark');
+      } catch (_) { }
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link

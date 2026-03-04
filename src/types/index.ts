@@ -120,3 +120,19 @@ export interface StockInfo {
     change: number
     changePercent: number
 }
+
+export interface KlineCandle {
+    date: string
+    open: number
+    high: number
+    low: number
+    close: number
+    volume?: number | null
+}
+
+export interface KlineResponse {
+    symbol: string
+    start_date: string
+    end_date: string
+    candles: KlineCandle[]
+}

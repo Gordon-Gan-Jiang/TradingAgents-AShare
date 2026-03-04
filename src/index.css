@@ -2,6 +2,72 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: light;
+  --trading-bg-primary: 245 247 250;
+  --trading-bg-secondary: 255 255 255;
+  --trading-bg-tertiary: 241 245 249;
+  --trading-text-primary: 15 23 42;
+  --trading-text-secondary: 71 85 105;
+  --trading-text-muted: 100 116 139;
+  --trading-border: 203 213 225;
+
+  --trading-accent-green: 22 163 74;
+  --trading-accent-red: 220 38 38;
+  --trading-accent-blue: 37 99 235;
+  --trading-accent-orange: 234 88 12;
+  --trading-accent-purple: 124 58 237;
+  --trading-accent-cyan: 8 145 178;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --trading-bg-primary: 13 17 23;
+    --trading-bg-secondary: 22 27 34;
+    --trading-bg-tertiary: 33 38 45;
+    --trading-text-primary: 230 237 243;
+    --trading-text-secondary: 139 148 158;
+    --trading-text-muted: 110 118 129;
+    --trading-border: 48 54 61;
+
+    --trading-accent-green: 35 134 54;
+    --trading-accent-red: 218 54 51;
+    --trading-accent-blue: 88 166 255;
+    --trading-accent-orange: 240 136 62;
+    --trading-accent-purple: 137 87 229;
+    --trading-accent-cyan: 57 208 216;
+  }
+}
+
+html.theme-light {
+  color-scheme: light;
+  --trading-bg-primary: 245 247 250;
+  --trading-bg-secondary: 255 255 255;
+  --trading-bg-tertiary: 241 245 249;
+  --trading-text-primary: 15 23 42;
+  --trading-text-secondary: 71 85 105;
+  --trading-text-muted: 100 116 139;
+  --trading-border: 203 213 225;
+}
+
+html.theme-dark {
+  color-scheme: dark;
+  --trading-bg-primary: 13 17 23;
+  --trading-bg-secondary: 22 27 34;
+  --trading-bg-tertiary: 33 38 45;
+  --trading-text-primary: 230 237 243;
+  --trading-text-secondary: 139 148 158;
+  --trading-text-muted: 110 118 129;
+  --trading-border: 48 54 61;
+  --trading-accent-green: 35 134 54;
+  --trading-accent-red: 218 54 51;
+  --trading-accent-blue: 88 166 255;
+  --trading-accent-orange: 240 136 62;
+  --trading-accent-purple: 137 87 229;
+  --trading-accent-cyan: 57 208 216;
+}
+
 @layer base {
   * {
     @apply border-trading-border;

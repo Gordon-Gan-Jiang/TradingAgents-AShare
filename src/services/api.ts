@@ -1,6 +1,6 @@
-import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse } from '@/types'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 class ApiService {
     private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
@@ -36,18 +36,26 @@ class ApiService {
         return this.request(`/v1/jobs/${jobId}/result`)
     }
 
-    async getKline(symbol: string, startDate?: string, endDate?: string) {
+    async getKline(symbol: string, startDate?: string, endDate?: string): Promise<KlineResponse> {
         const params = new URLSearchParams({ symbol })
         if (startDate) params.append('start_date', startDate)
         if (endDate) params.append('end_date', endDate)
-        return this.request(`/v1/market/kline?${params}`)
+        return this.request<KlineResponse>(`/v1/market/kline?${params}`)
     }
 
-    async chatCompletion(messages: Array<{ role: string; content: string }>, stream = true) {
+    async chatCompletion(
+        messages: Array<{ role: string; content: string }>,
+        stream = true,
+        selectedAnalysts?: string[],
+    ) {
         const response = await fetch(`${API_BASE_URL}/v1/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ messages, stream }),
+            body: JSON.stringify({
+                messages,
+                stream,
+                selected_analysts: selectedAnalysts,
+            }),
         })
 
         if (!response.ok) {

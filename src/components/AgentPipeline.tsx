@@ -11,6 +11,14 @@ const TEAMS = [
     { name: 'Portfolio Management', color: 'cyan' },
 ] as const
 
+const TEAM_TITLE_ZH: Record<(typeof TEAMS)[number]['name'], string> = {
+    'Analyst Team': '分析团队',
+    'Research Team': '研究团队',
+    'Trading Team': '交易团队',
+    'Risk Management': '风控团队',
+    'Portfolio Management': '组合管理',
+}
+
 export default function AgentPipeline() {
     const { agents, isAnalyzing } = useAnalysisStore()
 
@@ -25,9 +33,16 @@ export default function AgentPipeline() {
     const completedCount = agents.filter(a => a.status === 'completed').length
     const totalCount = agents.length
     const progress = totalCount > 0 ? (completedCount / totalCount) * 100 : 0
+    const teamAccentHexByTeam = {
+        blue: '#58A6FF',
+        purple: '#8957E5',
+        green: '#238636',
+        orange: '#F0883E',
+        cyan: '#39D0D8',
+    } as const
 
     return (
-        <div className="card h-full flex flex-col min-h-0 overflow-hidden">
+        <div className="card flex flex-col min-h-[320px] max-h-[380px] overflow-hidden">
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                     <h2 className="text-lg font-semibold text-trading-text-primary">Agent 流水线</h2>
@@ -35,8 +50,10 @@ export default function AgentPipeline() {
                         <span className="badge-blue animate-pulse">分析中</span>
                     )}
                 </div>
-                <div className="text-sm text-trading-text-secondary">
-                    {completedCount}/{totalCount} 完成
+                <div className="flex items-center gap-3">
+                    <div className="text-sm text-trading-text-secondary">
+                        {completedCount}/{totalCount} 完成
+                    </div>
                 </div>
             </div>
 
@@ -57,7 +74,9 @@ export default function AgentPipeline() {
                     return (
                         <div key={team.name} className="space-y-2">
                             <h3 className="text-xs font-medium text-trading-text-muted uppercase tracking-wider">
-                                {team.name}
+                                <span style={{ color: teamAccentHexByTeam[team.color as keyof typeof teamAccentHexByTeam] }}>
+                                    {TEAM_TITLE_ZH[team.name]}
+                                </span>
                             </h3>
                             <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2">
                                 {teamAgents.map((agent) => (
