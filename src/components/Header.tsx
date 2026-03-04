@@ -36,11 +36,11 @@ export default function Header() {
             <div className="flex items-center gap-4">
                 <button
                     onClick={cycleTheme}
-                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-sm border border-trading-border text-trading-text-secondary hover:text-trading-text-primary hover:bg-trading-bg-tertiary transition-colors"
+                    className="inline-flex items-center justify-center w-9 h-9 rounded-md border border-trading-border text-trading-text-secondary hover:text-trading-text-primary hover:bg-trading-bg-tertiary transition-colors"
                     title={`主题：${themeLabel}（点击切换）`}
+                    aria-label={`主题：${themeLabel}`}
                 >
                     <ThemeIcon className="w-4 h-4" />
-                    <span>{themeLabel}</span>
                 </button>
                 <button className="relative p-2 text-trading-text-secondary hover:text-trading-text-primary transition-colors">
                     <Bell className="w-5 h-5" />

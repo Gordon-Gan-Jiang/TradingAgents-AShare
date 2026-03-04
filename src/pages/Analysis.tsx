@@ -16,7 +16,7 @@ const ANALYST_OPTIONS = [
 export default function Analysis() {
     const [searchParams] = useSearchParams()
     const [selectedAnalysts, setSelectedAnalysts] = useState<string[]>(['market', 'social', 'news', 'fundamentals'])
-    const [activeSymbol, setActiveSymbol] = useState('510300.SH')
+    const [activeSymbol, setActiveSymbol] = useState('000001.SH')
 
     useEffect(() => {
         const querySymbol = (searchParams.get('symbol') || '').trim()
@@ -36,7 +36,10 @@ export default function Analysis() {
         <div className="flex flex-col gap-4">
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_430px] gap-4 items-start">
                 <div className="space-y-4">
-                    <KlinePanel symbol={activeSymbol} />
+                    <KlinePanel
+                        symbol={activeSymbol}
+                        onSymbolChange={setActiveSymbol}
+                    />
 
                     <section className="card">
                         <div className="flex items-center gap-2 mb-3">
@@ -67,7 +70,7 @@ export default function Analysis() {
                     <ReportViewer />
                 </div>
 
-                <div className="xl:sticky xl:top-4 h-[calc(100vh-7.5rem)] min-h-[620px]">
+                <div className="xl:sticky xl:top-0 self-start h-[calc(100vh-7rem)] min-h-[620px]">
                     <ChatCopilotPanel
                         selectedAnalysts={selectedAnalysts}
                         onSymbolDetected={setActiveSymbol}

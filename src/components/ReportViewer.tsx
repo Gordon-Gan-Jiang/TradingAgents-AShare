@@ -1,5 +1,7 @@
 import { FileText, Download, ChevronDown, ChevronRight } from 'lucide-react'
 import { useState } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useAnalysisStore } from '@/stores/analysisStore'
 
 const REPORT_SECTIONS = [
@@ -115,9 +117,11 @@ export default function ReportViewer() {
                             </button>
 
                             {isExpanded && (
-                                <div className="p-4 prose prose-invert prose-sm max-w-none">
-                                    <div className="whitespace-pre-wrap text-trading-text-secondary leading-relaxed">
-                                        {content}
+                                <div className="p-4">
+                                    <div className="prose prose-sm max-w-none text-trading-text-secondary prose-headings:text-trading-text-primary prose-strong:text-trading-text-primary prose-code:text-trading-text-primary prose-pre:bg-trading-bg-tertiary prose-pre:border prose-pre:border-trading-border prose-th:text-trading-text-primary prose-td:text-trading-text-secondary">
+                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                            {content}
+                                        </ReactMarkdown>
                                     </div>
                                 </div>
                             )}

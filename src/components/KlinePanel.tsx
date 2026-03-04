@@ -13,6 +13,7 @@ import { api } from '@/services/api'
 
 interface KlinePanelProps {
     symbol: string
+    onSymbolChange?: (symbol: string) => void
 }
 
 function toDateText(date: Date): string {
@@ -32,11 +33,33 @@ function toBusinessDay(value: string): BusinessDay | null {
     return { year, month, day }
 }
 
-export default function KlinePanel({ symbol }: KlinePanelProps) {
+const SYMBOL_NAME_MAP: Record<string, string> = {
+    '000001.SH': '上证指数',
+    '399001.SZ': '深证成指',
+    '399006.SZ': '创业板指',
+    '000300.SH': '沪深300',
+    '000905.SH': '中证500',
+    '000852.SH': '中证1000',
+    '510300.SH': '沪深300ETF',
+}
+
+function getDisplayName(symbol: string): string {
+    const s = symbol.toUpperCase()
+    return SYMBOL_NAME_MAP[s] || s
+}
+
+const INDEX_PRESETS = [
+    { symbol: '000001.SH', label: '上证指数' },
+    { symbol: '399001.SZ', label: '深证成指' },
+    { symbol: '399006.SZ', label: '创业板指' },
+    { symbol: '000688.SH', label: '科创50' },
+    { symbol: '899050.BJ', label: '北证50' },
+] as const
+
+export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) {
     const containerRef = useRef<HTMLDivElement | null>(null)
     const chartRef = useRef<IChartApi | null>(null)
     const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
-    const [bars, setBars] = useState(0)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
 
@@ -57,6 +80,10 @@ export default function KlinePanel({ symbol }: KlinePanelProps) {
                 textColor: '#8B949E',
                 attributionLogo: false,
             },
+            localization: {
+                locale: 'zh-CN',
+                dateFormat: 'yyyy-MM-dd',
+            },
             width: containerRef.current.clientWidth,
             height: containerRef.current.clientHeight,
             grid: {
@@ -70,6 +97,13 @@ export default function KlinePanel({ symbol }: KlinePanelProps) {
                 borderColor: '#30363D',
                 timeVisible: true,
                 rightOffset: 6,
+                tickMarkFormatter: (time: BusinessDay | string) => {
+                    if (typeof time !== 'object') return String(time)
+                    const y = String(time.year)
+                    const m = String(time.month).padStart(2, '0')
+                    const d = String(time.day).padStart(2, '0')
+                    return `${y}/${m}/${d}`
+                },
             },
             crosshair: {
                 vertLine: { color: 'rgba(88, 166, 255, 0.35)' },
@@ -127,14 +161,12 @@ export default function KlinePanel({ symbol }: KlinePanelProps) {
                 if (cancelled) return
                 seriesRef.current?.setData(data)
                 chartRef.current?.timeScale().fitContent()
-                setBars(data.length)
                 if (!data.length) {
                     setError('暂无可用K线数据')
                 }
             } catch (e) {
                 if (cancelled) return
                 setError(e instanceof Error ? e.message : '加载K线失败')
-                setBars(0)
                 seriesRef.current?.setData([])
             } finally {
                 if (!cancelled) setLoading(false)
@@ -152,10 +184,22 @@ export default function KlinePanel({ symbol }: KlinePanelProps) {
             <div className="flex items-center justify-between mb-3 shrink-0">
                 <div className="flex items-center gap-2">
                     <CandlestickChart className="w-5 h-5 text-trading-accent-cyan" />
-                    <h2 className="text-lg font-semibold text-trading-text-primary">TradingView K线</h2>
+                    <h2 className="text-lg font-semibold text-trading-text-primary">{getDisplayName(symbol)} K线</h2>
                 </div>
-                <div className="text-xs text-trading-text-muted">
-                    {symbol} · {bars} bars
+                <div className="flex items-center gap-1.5">
+                    {INDEX_PRESETS.map((item) => (
+                        <button
+                            key={item.symbol}
+                            onClick={() => onSymbolChange?.(item.symbol)}
+                            className={`text-xs px-2 py-1 rounded border transition-colors ${
+                                item.symbol === symbol
+                                    ? 'border-trading-accent-blue text-trading-accent-blue bg-trading-accent-blue/10'
+                                    : 'border-trading-border text-trading-text-secondary hover:text-trading-text-primary hover:border-trading-text-muted'
+                            }`}
+                        >
+                            {item.label}
+                        </button>
+                    ))}
                 </div>
             </div>
             <div className="relative flex-1 min-h-0 rounded-md border border-trading-border bg-trading-bg-primary/30 overflow-hidden">
