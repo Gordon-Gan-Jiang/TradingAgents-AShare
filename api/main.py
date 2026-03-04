@@ -14,11 +14,15 @@ from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 import pandas as pd
+
+from api.database import init_db, get_db, ReportDB
+from api.services import report_service
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -124,6 +128,46 @@ class KlineResponse(BaseModel):
     start_date: str
     end_date: str
     candles: List[Dict[str, Any]]
+
+
+# Report API Models
+class ReportCreateRequest(BaseModel):
+    symbol: str = Field(..., description="股票代码")
+    trade_date: str = Field(..., description="交易日期 YYYY-MM-DD")
+    decision: Optional[str] = Field(None, description="交易决策")
+    result_data: Optional[Dict[str, Any]] = Field(None, description="完整分析结果")
+
+
+class ReportResponse(BaseModel):
+    id: str
+    user_id: Optional[str]
+    symbol: str
+    trade_date: str
+    decision: Optional[str]
+    confidence: Optional[int]
+    target_price: Optional[float]
+    stop_loss_price: Optional[float]
+    created_at: Optional[str]
+    updated_at: Optional[str]
+    
+    class Config:
+        from_attributes = True
+
+
+class ReportDetailResponse(ReportResponse):
+    market_report: Optional[str]
+    sentiment_report: Optional[str]
+    news_report: Optional[str]
+    fundamentals_report: Optional[str]
+    investment_plan: Optional[str]
+    trader_investment_plan: Optional[str]
+    final_trade_decision: Optional[str]
+    result_data: Optional[Dict[str, Any]]
+
+
+class ReportListResponse(BaseModel):
+    total: int
+    reports: List[ReportResponse]
 
 
 def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
@@ -323,7 +367,7 @@ def _extract_message_text(content: Any) -> str:
     return str(content)
 
 
-def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False) -> None:
+def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, save_report: bool = True) -> None:
     _set_job(job_id, status="running", started_at=datetime.now().isoformat())
     _emit_job_event(
         job_id,
@@ -434,6 +478,23 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False) 
         for agent, status in tracker.status.items():
             if status not in ("completed", "skipped"):
                 tracker._set_status(agent, "completed")
+        
+        # 自动保存报告到数据库
+        if save_report:
+            try:
+                db = SessionLocal()
+                report_service.create_report(
+                    db=db,
+                    symbol=request.symbol,
+                    trade_date=request.trade_date,
+                    decision=decision,
+                    result_data=result,
+                    user_id=None,  # TODO: 后续添加用户认证后传入 user_id
+                )
+                db.close()
+            except Exception as e:
+                print(f"Failed to save report: {e}")
+        
         _emit_job_event(
             job_id,
             "job.completed",
@@ -795,6 +856,77 @@ def chat_completions(request: ChatCompletionRequest):
             }
         ],
     }
+
+
+# Report API Endpoints
+@app.post("/v1/reports", response_model=ReportResponse)
+def create_report_endpoint(
+    request: ReportCreateRequest,
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = None,  # TODO: 从认证 token 中提取
+):
+    """手动创建报告（通常由系统自动调用）."""
+    report = report_service.create_report(
+        db=db,
+        symbol=request.symbol,
+        trade_date=request.trade_date,
+        decision=request.decision,
+        result_data=request.result_data,
+        user_id=user_id,
+    )
+    return report
+
+
+@app.get("/v1/reports", response_model=ReportListResponse)
+def list_reports(
+    symbol: Optional[str] = Query(None, description="按股票代码筛选"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    user_id: Optional[str] = None,  # TODO: 从认证 token 中提取
+):
+    """获取报告列表."""
+    reports = report_service.get_reports_by_user(
+        db=db,
+        user_id=user_id,
+        symbol=symbol,
+        skip=skip,
+        limit=limit,
+    )
+    total = len(reports)  # 简化处理，实际应该使用 count 查询
+    return {"total": total, "reports": reports}
+
+
+@app.get("/v1/reports/{report_id}", response_model=ReportDetailResponse)
+def get_report_endpoint(
+    report_id: str,
+    db: Session = Depends(get_db),
+):
+    """获取报告详情."""
+    report = report_service.get_report(db, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    return report
+
+
+@app.delete("/v1/reports/{report_id}")
+def delete_report_endpoint(
+    report_id: str,
+    db: Session = Depends(get_db),
+):
+    """删除报告."""
+    success = report_service.delete_report(db, report_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    return {"message": "报告已删除"}
+
+
+# Initialize database on startup
+@app.on_event("startup")
+def startup_event():
+    """Initialize database tables on startup."""
+    init_db()
+    print("Database initialized.")
 
 
 def run() -> None:
