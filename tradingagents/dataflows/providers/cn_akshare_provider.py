@@ -71,6 +71,11 @@ class CnAkshareProvider(BaseMarketDataProvider):
             return f"SH{code}"
         return f"SZ{code}"
 
+    def _is_likely_etf_symbol(self, symbol: str) -> bool:
+        code = self._normalize_symbol(symbol)
+        # 常见 A 股 ETF 代码段：5xxxxx(沪市) / 15xxxx,16xxxx,18xxxx(深市)
+        return code.startswith(("5", "15", "16", "18"))
+
     def _normalize_hist_df(self, raw_df: pd.DataFrame) -> pd.DataFrame:
         if raw_df is None or raw_df.empty:
             return pd.DataFrame()
@@ -128,6 +133,20 @@ class CnAkshareProvider(BaseMarketDataProvider):
         return header + out.to_csv(index=False)
 
     @staticmethod
+    def _slice_hist_df(df: pd.DataFrame, start_date: str, end_date: str) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        start_dt = pd.to_datetime(start_date, errors="coerce")
+        end_dt = pd.to_datetime(end_date, errors="coerce")
+        if pd.isna(start_dt) or pd.isna(end_dt):
+            return df
+        out = df.copy()
+        out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+        out = out.dropna(subset=["Date"])
+        out = out[(out["Date"] >= start_dt) & (out["Date"] <= end_dt)]
+        return out.sort_values("Date").reset_index(drop=True)
+
+    @staticmethod
     def _shrink_table(df: pd.DataFrame, max_rows: int = 12, max_cols: int = 16) -> pd.DataFrame:
         if df is None or df.empty:
             return df
@@ -141,6 +160,34 @@ class CnAkshareProvider(BaseMarketDataProvider):
         symbol_with_market = self._sina_symbol(symbol)
         start_yyyymmdd = start_date.replace("-", "")
         end_yyyymmdd = end_date.replace("-", "")
+
+        # ETF 优先：Sina 历史接口稳定且不依赖东财
+        if self._is_likely_etf_symbol(symbol):
+            etf_errors = []
+            try:
+                df = ak.fund_etf_hist_sina(symbol=symbol_with_market)
+                out = self._normalize_hist_df(df)
+                out = self._slice_hist_df(out, start_date, end_date)
+                if not out.empty:
+                    return self._maybe_append_realtime_row(symbol, out, end_date)
+                etf_errors.append("fund_etf_hist_sina: empty after date filter")
+            except Exception as exc:
+                etf_errors.append(f"fund_etf_hist_sina: {type(exc).__name__}")
+
+            try:
+                df = ak.fund_etf_hist_em(
+                    symbol=code,
+                    period="daily",
+                    start_date=start_yyyymmdd,
+                    end_date=end_yyyymmdd,
+                    adjust="qfq",
+                )
+                out = self._normalize_hist_df(df)
+                if not out.empty:
+                    return self._maybe_append_realtime_row(symbol, out, end_date)
+                etf_errors.append("fund_etf_hist_em: empty dataframe")
+            except Exception as exc:
+                etf_errors.append(f"fund_etf_hist_em: {type(exc).__name__}")
 
         # Source 1: Eastmoney (default)
         em_last_exc = None

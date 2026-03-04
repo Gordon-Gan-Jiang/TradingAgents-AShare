@@ -714,15 +714,14 @@ def _ai_extract_symbol_and_date(text: str, config: Dict[str, Any]) -> tuple[Opti
     except Exception as e:
         print(f"AI Extraction failed: {e}")
 
-    # Fallback to regex if AI fails
-    return _extract_symbol_and_date(text)
+    return None, None
 
 @app.post("/v1/chat/completions")
 def chat_completions(request: ChatCompletionRequest):
     text = _extract_chat_text(request.messages)
     config = _build_runtime_config(request.config_overrides)
 
-    # NEW: Use AI to extract instead of just regex
+    # 仅使用 LLM 解析，避免本地正则误判后缀
     symbol, trade_date = _ai_extract_symbol_and_date(text, config)
 
     if not symbol:
