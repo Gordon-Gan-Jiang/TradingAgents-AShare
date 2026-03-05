@@ -1,12 +1,11 @@
 """Database configuration and session management."""
 
 import os
-from datetime import datetime
-from typing import AsyncGenerator, Generator
+from datetime import datetime, timezone
+from typing import Generator
 
 from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, JSON
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 # Database URL - default to SQLite for simplicity
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tradingagents.db")
@@ -72,8 +71,8 @@ class ReportDB(Base):
     final_trade_decision = Column(Text, nullable=True)
     
     # Metadata
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
     
     def to_dict(self) -> dict:
         """Convert to dictionary."""

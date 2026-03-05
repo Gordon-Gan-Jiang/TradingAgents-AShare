@@ -2,10 +2,11 @@
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from uuid import uuid4
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from api.database import ReportDB
 
@@ -17,10 +18,12 @@ def extract_confidence_from_decision(decision_text: Optional[str]) -> Optional[i
     # Look for patterns like "置信度: 78%" or "confidence: 78%"
     match = re.search(r'置信度[:：]\s*(\d+)%', decision_text)
     if match:
-        return int(match.group(1))
+        value = int(match.group(1))
+        return value if 0 <= value <= 100 else None
     match = re.search(r'confidence[:：]\s*(\d+)%', decision_text, re.IGNORECASE)
     if match:
-        return int(match.group(1))
+        value = int(match.group(1))
+        return value if 0 <= value <= 100 else None
     return None
 
 
@@ -40,7 +43,7 @@ def extract_price_from_text(text: Optional[str], price_type: str = "target") -> 
         # Look for 止损价, stop loss
         patterns = [
             r'止损价[:：]\s*[¥$]?\s*(\d+\.?\d*)',
-            r'stop[-\s]?loss[:：]\s*[¥$]?\s*(\d+\.?\d*)',
+            r'stop[-\s_]?loss[:：]\s*[¥$]?\s*(\d+\.?\d*)',
             r'止损价格[:：]\s*[¥$]?\s*(\d+\.?\d*)',
         ]
     
@@ -108,8 +111,8 @@ def create_report(
         investment_plan=investment_plan,
         trader_investment_plan=trader_investment_plan,
         final_trade_decision=final_trade_decision,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
     
     db.add(db_report)
@@ -142,6 +145,17 @@ def get_reports_by_user(
     return query.order_by(ReportDB.created_at.desc()).offset(skip).limit(limit).all()
 
 
+def count_reports(
+    db: Session,
+    symbol: Optional[str] = None,
+) -> int:
+    """Count reports with optional filtering."""
+    query = db.query(func.count(ReportDB.id))
+    if symbol:
+        query = query.filter(ReportDB.symbol == symbol)
+    return query.scalar() or 0
+
+
 def delete_report(db: Session, report_id: str) -> bool:
     """Delete a report."""
     report = db.query(ReportDB).filter(ReportDB.id == report_id).first()
@@ -150,23 +164,3 @@ def delete_report(db: Session, report_id: str) -> bool:
         db.commit()
         return True
     return False
-
-
-def update_report(
-    db: Session,
-    report_id: str,
-    **kwargs
-) -> Optional[ReportDB]:
-    """Update a report."""
-    report = db.query(ReportDB).filter(ReportDB.id == report_id).first()
-    if not report:
-        return None
-    
-    for key, value in kwargs.items():
-        if hasattr(report, key):
-            setattr(report, key, value)
-    
-    report.updated_at = datetime.utcnow()
-    db.commit()
-    db.refresh(report)
-    return report

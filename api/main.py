@@ -5,6 +5,7 @@ import os
 import queue
 import re
 import traceback
+from contextlib import asynccontextmanager
 from io import StringIO
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -12,6 +13,8 @@ from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
+
+from pydantic import field_serializer
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends, Query
@@ -21,7 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import pandas as pd
 
-from api.database import init_db, get_db, ReportDB
+from api.database import init_db, get_db, SessionLocal
 from api.services import report_service
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -32,7 +35,16 @@ from tradingagents.dataflows.interface import route_to_vendor
 
 load_dotenv()
 
-app = FastAPI(title="TradingAgents-AShare API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize resources on startup."""
+    init_db()
+    print("Database initialized.")
+    yield
+
+
+app = FastAPI(title="TradingAgents-AShare API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -150,6 +162,12 @@ class ReportResponse(BaseModel):
     created_at: Optional[str]
     updated_at: Optional[str]
     
+    @field_serializer('created_at', 'updated_at')
+    def serialize_datetime(self, value):
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return value
+    
     class Config:
         from_attributes = True
 
@@ -243,6 +261,18 @@ def _build_result_payload(final_state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class AgentProgressTracker:
+    # 阶段标题映射
+    STAGE_TITLES = {
+        "market_analysis": "市场分析完成",
+        "sentiment_analysis": "舆情分析完成",
+        "news_analysis": "新闻分析完成",
+        "fundamentals_analysis": "基本面分析完成",
+        "research_decision": "研究团队决策",
+        "trader_plan": "交易计划制定",
+        "risk_assessment": "风险评估完成",
+        "final_decision": "最终决策",
+    }
+    
     def __init__(self, selected_analysts: List[str], job_id: str):
         self.job_id = job_id
         self.selected_analysts = [a.lower() for a in selected_analysts]
@@ -256,6 +286,11 @@ class AgentProgressTracker:
             "trader_investment_plan": None,
             "final_trade_decision": None,
         }
+        # 跟踪已完成的阶段，避免重复发送里程碑
+        self._completed_stages: set = set()
+        # 跟踪已发送的 writing 状态，避免重复发送
+        self._writing_status_sent: set = set()
+        
         for team_agents in FIXED_TEAMS.values():
             for agent in team_agents:
                 self.status[agent] = "pending"
@@ -265,6 +300,60 @@ class AgentProgressTracker:
             agent = ANALYST_AGENT_NAMES[key]
             if key not in self.selected_analysts:
                 self.status[agent] = "skipped"
+
+    def _emit_milestone(self, stage: str, summary: str = "") -> None:
+        """发送用户可见的里程碑事件"""
+        if stage in self._completed_stages:
+            return
+        self._completed_stages.add(stage)
+        
+        title = self.STAGE_TITLES.get(stage, stage)
+        _emit_job_event(
+            self.job_id,
+            "agent.milestone",
+            {
+                "stage": stage,
+                "title": title,
+                "summary": summary,
+                "timestamp": datetime.now().isoformat(),
+            },
+        )
+        print(f"[Milestone] {title}: {summary[:100]}...")
+
+    def _emit_report_chunked(self, job_id: str, section: str, content: str) -> None:
+        """将报告内容分片发送，直接透传不做人工延迟
+        
+        按较大块分片（如按段落），让前端自然渲染
+        """
+        # 按段落分割，保持Markdown结构
+        paragraphs = content.split('\n\n')
+        
+        for i, para in enumerate(paragraphs):
+            if not para.strip():
+                continue
+                
+            _emit_job_event(
+                job_id,
+                "agent.report.chunk",
+                {
+                    "section": section,
+                    "chunk": para + '\n\n',
+                    "index": i,
+                    "is_complete": False,
+                },
+            )
+        
+        # 发送完成标记
+        _emit_job_event(
+            job_id,
+            "agent.report.chunk",
+            {
+                "section": section,
+                "chunk": "",
+                "index": -1,
+                "is_complete": True,
+            },
+        )
 
     def snapshot(self) -> Dict[str, Any]:
         agents = []
@@ -288,8 +377,61 @@ class AgentProgressTracker:
         for agent in ["Bull Researcher", "Bear Researcher", "Research Manager"]:
             self._set_status(agent, status)
 
+    def _generate_stage_summary(self, stage: str, chunk: Dict[str, Any]) -> str:
+        """根据阶段生成简要总结"""
+        if stage == "market_analysis":
+            report = chunk.get("market_report", "")
+            # 提取关键信息
+            if "支撑" in report or "压力" in report:
+                return "技术面关键位已识别"
+            return "技术面分析完成"
+        elif stage == "sentiment_analysis":
+            return "舆情数据已收集"
+        elif stage == "news_analysis":
+            return "新闻影响已评估"
+        elif stage == "fundamentals_analysis":
+            return "基本面指标已计算"
+        elif stage == "research_decision":
+            return "多空观点已形成"
+        elif stage == "trader_plan":
+            return "交易策略已制定"
+        elif stage == "risk_assessment":
+            return "风险水平已评估"
+        elif stage == "final_decision":
+            decision = chunk.get("final_trade_decision", "")
+            return f"最终建议: {decision[:50]}..." if len(decision) > 50 else f"最终建议: {decision}"
+        return ""
+
+    def _emit_writing_status(self, agent_name: str, report_type: str) -> None:
+        """发送正在编写报告的状态（每个agent只发送一次）"""
+        # 检查是否已经发送过
+        status_key = f"{agent_name}:{report_type}"
+        if status_key in self._writing_status_sent:
+            return
+        self._writing_status_sent.add(status_key)
+        
+        report_names = {
+            "market_report": "市场分析",
+            "sentiment_report": "舆情分析",
+            "news_report": "新闻分析",
+            "fundamentals_report": "基本面分析",
+            "investment_plan": "投资计划",
+            "trader_investment_plan": "交易计划",
+            "final_trade_decision": "最终交易决策",
+        }
+        _emit_job_event(
+            self.job_id,
+            "agent.writing",
+            {
+                "agent": agent_name,
+                "report": report_type,
+                "report_name": report_names.get(report_type, report_type),
+                "status": "writing",
+            },
+        )
+
     def apply_chunk(self, chunk: Dict[str, Any]) -> None:
-        # CLI: 分析师阶段状态推进
+        # 分析师阶段状态推进
         found_active = False
         for analyst_key in ANALYST_ORDER:
             if analyst_key not in self.selected_analysts:
@@ -300,10 +442,16 @@ class AgentProgressTracker:
             has_report = bool(chunk.get(report_key))
 
             if has_report:
-                self._set_status(agent_name, "completed")
-                self.report_sections[report_key] = chunk.get(report_key)
+                if self.status.get(agent_name) != "completed":
+                    self._set_status(agent_name, "completed")
+                    self.report_sections[report_key] = chunk.get(report_key)
             elif not found_active:
-                self._set_status(agent_name, "in_progress")
+                # 只在状态从 pending 变为 in_progress 时发送 writing 状态
+                prev_status = self.status.get(agent_name)
+                if prev_status != "in_progress":
+                    self._set_status(agent_name, "in_progress")
+                    # 发送正在分析的状态（只发送一次）
+                    self._emit_writing_status(agent_name, report_key)
                 found_active = True
             else:
                 self._set_status(agent_name, "pending")
@@ -312,7 +460,7 @@ class AgentProgressTracker:
             if self.status.get("Bull Researcher") == "pending":
                 self._set_status("Bull Researcher", "in_progress")
 
-        # CLI: 研究团队
+        # 研究团队状态更新
         debate_state = chunk.get("investment_debate_state") or {}
         bull_hist = str(debate_state.get("bull_history", "")).strip()
         bear_hist = str(debate_state.get("bear_history", "")).strip()
@@ -321,27 +469,20 @@ class AgentProgressTracker:
             self._update_research_team_status("in_progress")
         if judge:
             self._update_research_team_status("completed")
-            self._set_status("Trader", "in_progress")
+            if self.status.get("Trader") != "in_progress":
+                self._set_status("Trader", "in_progress")
+                self._emit_writing_status("Trader", "trader_investment_plan")
 
-        # CLI: 交易团队
+        # 交易团队
         if chunk.get("trader_investment_plan"):
             if self.status.get("Trader") != "completed":
                 self._set_status("Trader", "completed")
                 self._set_status("Aggressive Analyst", "in_progress")
 
-        # CLI: 风控与组合团队
+        # 风控与组合团队（发送最终决策）
         risk_state = chunk.get("risk_debate_state") or {}
-        agg_hist = str(risk_state.get("aggressive_history", "")).strip()
-        con_hist = str(risk_state.get("conservative_history", "")).strip()
-        neu_hist = str(risk_state.get("neutral_history", "")).strip()
         risk_judge = str(risk_state.get("judge_decision", "")).strip()
 
-        if agg_hist and self.status.get("Aggressive Analyst") != "completed":
-            self._set_status("Aggressive Analyst", "in_progress")
-        if con_hist and self.status.get("Conservative Analyst") != "completed":
-            self._set_status("Conservative Analyst", "in_progress")
-        if neu_hist and self.status.get("Neutral Analyst") != "completed":
-            self._set_status("Neutral Analyst", "in_progress")
         if risk_judge:
             if self.status.get("Portfolio Manager") != "completed":
                 self._set_status("Portfolio Manager", "in_progress")
@@ -349,6 +490,8 @@ class AgentProgressTracker:
                 self._set_status("Conservative Analyst", "completed")
                 self._set_status("Neutral Analyst", "completed")
                 self._set_status("Portfolio Manager", "completed")
+                final_summary = self._generate_stage_summary("final_decision", chunk)
+                self._emit_milestone("final_decision", final_summary)
 
 
 def _extract_message_text(content: Any) -> str:
@@ -365,6 +508,33 @@ def _extract_message_text(content: Any) -> str:
                     parts.append(text)
         return "\n".join(parts).strip()
     return str(content)
+
+
+def _generate_tool_description(tool_name: str, tool_args: Dict[str, Any]) -> str:
+    """生成工具调用的可读描述"""
+    if tool_name == "get_indicators":
+        indicators = tool_args.get("indicators", [])
+        if indicators:
+            return f"计算 {', '.join(indicators[:3])}{' 等' if len(indicators) > 3 else ''} 指标"
+        return "获取技术指标"
+    elif tool_name == "get_stock_data":
+        return "获取股票历史数据"
+    elif tool_name == "get_fundamentals":
+        metrics = tool_args.get("metrics", [])
+        if metrics:
+            return f"获取 {', '.join(metrics[:2])}{' 等' if len(metrics) > 2 else ''} 基本面数据"
+        return "获取基本面数据"
+    elif tool_name == "get_income_statement":
+        return "获取利润表"
+    elif tool_name == "get_balance_sheet":
+        return "获取资产负债表"
+    elif tool_name == "get_cash_flow":
+        return "获取现金流量表"
+    elif tool_name == "get_news":
+        return "获取相关新闻"
+    elif tool_name == "get_social_sentiment":
+        return "获取舆情数据"
+    return f"调用 {tool_name}"
 
 
 def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, save_report: bool = True) -> None:
@@ -431,33 +601,54 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, 
                 if messages:
                     msg = messages[-1]
                     content = _extract_message_text(getattr(msg, "content", ""))
+                    agent_name = getattr(msg, "name", None)
+                    
+                    # 服务器日志
                     if content:
-                        _emit_job_event(
-                            job_id,
-                            "agent.message",
-                            {
-                                "agent": getattr(msg, "name", None),
-                                "message_type": getattr(msg, "type", None),
-                                "content": content,
-                            },
-                        )
+                        print(f"[Agent Message] {agent_name}: {content[:200]}...")
 
+                    # 发送工具调用到前端，让用户看到系统正在做什么
                     for tool_call in getattr(msg, "tool_calls", []) or []:
+                        tool_name = tool_call.get("name", "unknown") if isinstance(tool_call, dict) else getattr(tool_call, "name", "unknown")
+                        tool_args = tool_call.get("args", {}) if isinstance(tool_call, dict) else getattr(tool_call, "args", {})
+                        print(f"[Tool Call] {agent_name}: {tool_name}")
+                        
+                        # 根据工具名推断是哪个Agent在调用
+                        agent_display = agent_name
+                        if not agent_display:
+                            # 根据工具名推断Agent
+                            tool_to_agent = {
+                                "get_stock_data": "数据获取",
+                                "get_indicators": "技术分析师",
+                                "get_fundamentals": "基本面分析师",
+                                "get_income_statement": "基本面分析师",
+                                "get_balance_sheet": "基本面分析师",
+                                "get_cash_flow": "基本面分析师",
+                                "get_news": "新闻分析师",
+                                "get_social_sentiment": "舆情分析师",
+                            }
+                            agent_display = tool_to_agent.get(tool_name, "系统")
+                        
+                        # 生成工具调用的描述（包含具体指标）
+                        tool_description = _generate_tool_description(tool_name, tool_args)
+                        
+                        # 发送给用户可见的工具调用事件
                         _emit_job_event(
                             job_id,
                             "agent.tool_call",
-                            {"agent": getattr(msg, "name", None), "tool_call": tool_call},
+                            {
+                                "agent": agent_display,
+                                "tool": tool_name,
+                                "description": tool_description,
+                            },
                         )
 
                 for key in report_keys:
                     value = chunk.get(key)
                     if value and value != last_report.get(key):
                         last_report[key] = value
-                        _emit_job_event(
-                            job_id,
-                            "agent.report",
-                            {"section": key, "content": str(value)},
-                        )
+                        # 使用分片推送，支持打字机效果
+                        tracker._emit_report_chunked(job_id, key, str(value))
         else:
             final_state, _ = graph.propagate(request.symbol, request.trade_date)
 
@@ -481,8 +672,8 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, 
         
         # 自动保存报告到数据库
         if save_report:
+            db = SessionLocal()
             try:
-                db = SessionLocal()
                 report_service.create_report(
                     db=db,
                     symbol=request.symbol,
@@ -491,9 +682,10 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, 
                     result_data=result,
                     user_id=None,  # TODO: 后续添加用户认证后传入 user_id
                 )
-                db.close()
             except Exception as e:
                 print(f"Failed to save report: {e}")
+            finally:
+                db.close()
         
         _emit_job_event(
             job_id,
@@ -863,7 +1055,6 @@ def chat_completions(request: ChatCompletionRequest):
 def create_report_endpoint(
     request: ReportCreateRequest,
     db: Session = Depends(get_db),
-    user_id: Optional[str] = None,  # TODO: 从认证 token 中提取
 ):
     """手动创建报告（通常由系统自动调用）."""
     report = report_service.create_report(
@@ -872,7 +1063,7 @@ def create_report_endpoint(
         trade_date=request.trade_date,
         decision=request.decision,
         result_data=request.result_data,
-        user_id=user_id,
+        user_id=None,  # TODO: 后续添加用户认证后从 token 中提取
     )
     return report
 
@@ -883,17 +1074,16 @@ def list_reports(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
-    user_id: Optional[str] = None,  # TODO: 从认证 token 中提取
 ):
     """获取报告列表."""
+    total = report_service.count_reports(db=db, symbol=symbol)
     reports = report_service.get_reports_by_user(
         db=db,
-        user_id=user_id,
+        user_id=None,  # TODO: 后续添加用户认证后从 token 中提取
         symbol=symbol,
         skip=skip,
         limit=limit,
     )
-    total = len(reports)  # 简化处理，实际应该使用 count 查询
     return {"total": total, "reports": reports}
 
 
@@ -919,14 +1109,6 @@ def delete_report_endpoint(
     if not success:
         raise HTTPException(status_code=404, detail="报告不存在")
     return {"message": "报告已删除"}
-
-
-# Initialize database on startup
-@app.on_event("startup")
-def startup_event():
-    """Initialize database tables on startup."""
-    init_db()
-    print("Database initialized.")
 
 
 def run() -> None:
