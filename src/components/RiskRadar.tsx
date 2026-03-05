@@ -8,29 +8,10 @@ const LEVEL_CONFIG = {
     low: { color: 'text-emerald-400', bg: 'bg-emerald-500/20', label: '低风险', icon: Shield },
 }
 
-/** Fallback: extract risks from text when structured data unavailable */
-function parseRisksFromText(text: string): RiskItem[] {
-    const risks: RiskItem[] = []
-    const lines = text.split(/[。\n]/)
-    for (const line of lines) {
-        const l = line.trim()
-        if (!l) continue
-        if (/高风险|重大风险|严重风险|高度风险/.test(l)) {
-            risks.push({ name: l.slice(0, 20), level: 'high' })
-        } else if (/风险|注意|警示|下行|波动|不确定/.test(l)) {
-            risks.push({ name: l.slice(0, 20), level: 'medium' })
-        }
-        if (risks.length >= 3) break
-    }
-    return risks
-}
-
 export default function RiskRadar() {
-    const { riskItems, report } = useAnalysisStore()
+    const { riskItems } = useAnalysisStore()
 
-    const risks: RiskItem[] = riskItems.length > 0
-        ? riskItems
-        : (report?.final_trade_decision ? parseRisksFromText(report.final_trade_decision) : [])
+    const risks: RiskItem[] = riskItems
 
     return (
         <div className="card bg-slate-900/50 border-slate-700/50 p-4">

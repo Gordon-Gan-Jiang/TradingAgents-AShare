@@ -72,7 +72,7 @@ export default function AgentCollaboration() {
             <div className="card bg-slate-900/50 border-slate-700/50 flex items-center justify-center py-12">
                 <div className="text-center">
                     <Users className="w-10 h-10 text-slate-600 mx-auto mb-3" />
-                    <p className="text-sm text-slate-400">智能体委员会待命中</p>
+                    <p className="text-sm text-slate-400">多智能体待命中</p>
                     <p className="text-xs text-slate-500 mt-1">发起分析后将在此显示协作过程</p>
                 </div>
             </div>
@@ -87,7 +87,7 @@ export default function AgentCollaboration() {
                     <div className="p-1.5 rounded-lg bg-gradient-to-br from-blue-500 to-purple-500">
                         <Users className="w-4 h-4 text-white" />
                     </div>
-                    <h3 className="text-sm font-semibold text-slate-100">智能体委员会讨论记录</h3>
+                    <h3 className="text-sm font-semibold text-slate-100">多智能体协作过程</h3>
                 </div>
                 {isAnalyzing && (
                     <div className="flex items-center gap-1.5 text-xs text-blue-400">

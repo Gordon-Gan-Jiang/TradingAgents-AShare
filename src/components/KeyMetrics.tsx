@@ -8,48 +8,10 @@ const STATUS_COLOR = {
     bad: 'text-rose-400',
 }
 
-/** Fallback: extract metrics from text when structured data unavailable */
-function extractMetricsFromText(
-    fundamentals?: string,
-    finalDecision?: string,
-): KeyMetric[] {
-    const metrics: KeyMetric[] = []
-
-    if (finalDecision) {
-        const confMatch = finalDecision.match(/置信度[:：]\s*(\d+)%/i) ||
-            finalDecision.match(/confidence[:：]\s*(\d+)%/i)
-        if (confMatch) {
-            const val = parseInt(confMatch[1])
-            metrics.push({
-                name: '分析置信度',
-                value: `${val}%`,
-                status: val >= 70 ? 'good' : val >= 50 ? 'neutral' : 'bad',
-            })
-        }
-    }
-
-    if (fundamentals) {
-        const peMatch = fundamentals.match(/市盈率[^：:\d]*[:：]?\s*([\d.]+)/i) ||
-            fundamentals.match(/PE[^：:\d]*[:：]?\s*([\d.]+)/i)
-        if (peMatch) metrics.push({ name: '市盈率(PE)', value: `${peMatch[1]}x`, status: 'neutral' })
-
-        const pbMatch = fundamentals.match(/市净率[^：:\d]*[:：]?\s*([\d.]+)/i) ||
-            fundamentals.match(/PB[^：:\d]*[:：]?\s*([\d.]+)/i)
-        if (pbMatch) metrics.push({ name: '市净率(PB)', value: `${pbMatch[1]}x`, status: 'neutral' })
-
-        const roeMatch = fundamentals.match(/ROE[^：:\d]*[:：]?\s*([\d.]+)%/i)
-        if (roeMatch) metrics.push({ name: 'ROE', value: `${roeMatch[1]}%`, status: 'good' })
-    }
-
-    return metrics.slice(0, 4)
-}
-
 export default function KeyMetrics() {
-    const { keyMetrics, report } = useAnalysisStore()
+    const { keyMetrics } = useAnalysisStore()
 
-    const metrics: KeyMetric[] = keyMetrics.length > 0
-        ? keyMetrics
-        : (report ? extractMetricsFromText(report.fundamentals_report, report.final_trade_decision) : [])
+    const metrics: KeyMetric[] = keyMetrics
 
     return (
         <div className="card bg-slate-900/50 border-slate-700/50 p-4">
