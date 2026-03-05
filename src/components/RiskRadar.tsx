@@ -1,10 +1,6 @@
 import { AlertTriangle, Shield, AlertCircle } from 'lucide-react'
 import { useAnalysisStore } from '@/stores/analysisStore'
-
-interface RiskItem {
-    name: string
-    level: 'high' | 'medium' | 'low'
-}
+import type { RiskItem } from '@/types'
 
 const LEVEL_CONFIG = {
     high: { color: 'text-rose-400', bg: 'bg-rose-500/20', label: '高风险', icon: AlertTriangle },
@@ -12,8 +8,8 @@ const LEVEL_CONFIG = {
     low: { color: 'text-emerald-400', bg: 'bg-emerald-500/20', label: '低风险', icon: Shield },
 }
 
-/** 从最终决策文本中简单提取风险条目 */
-function parseRisks(text: string): RiskItem[] {
+/** Fallback: extract risks from text when structured data unavailable */
+function parseRisksFromText(text: string): RiskItem[] {
     const risks: RiskItem[] = []
     const lines = text.split(/[。\n]/)
     for (const line of lines) {
@@ -30,11 +26,11 @@ function parseRisks(text: string): RiskItem[] {
 }
 
 export default function RiskRadar() {
-    const { report } = useAnalysisStore()
+    const { riskItems, report } = useAnalysisStore()
 
-    const risks: RiskItem[] = report?.final_trade_decision
-        ? parseRisks(report.final_trade_decision)
-        : []
+    const risks: RiskItem[] = riskItems.length > 0
+        ? riskItems
+        : (report?.final_trade_decision ? parseRisksFromText(report.final_trade_decision) : [])
 
     return (
         <div className="card bg-slate-900/50 border-slate-700/50 p-4">
@@ -57,9 +53,14 @@ export default function RiskRadar() {
                         return (
                             <div
                                 key={i}
-                                className="flex items-center justify-between p-2.5 rounded-lg bg-slate-800/50 border border-slate-700/50"
+                                className="flex items-start justify-between p-2.5 rounded-lg bg-slate-800/50 border border-slate-700/50 gap-2"
                             >
-                                <span className="text-sm text-slate-300 truncate mr-2">{risk.name}</span>
+                                <div className="flex-1 min-w-0">
+                                    <span className="text-sm text-slate-300 block truncate">{risk.name}</span>
+                                    {risk.description && (
+                                        <span className="text-xs text-slate-500 mt-0.5 block line-clamp-2">{risk.description}</span>
+                                    )}
+                                </div>
                                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium shrink-0 ${config.color} ${config.bg}`}>
                                     {config.label}
                                 </span>

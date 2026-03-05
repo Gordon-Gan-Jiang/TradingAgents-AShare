@@ -12,7 +12,9 @@ import type {
     ReportChunkEvent,
     AgentMilestoneEvent,
     StreamingSectionState,
-    MilestoneMessage
+    MilestoneMessage,
+    RiskItem,
+    KeyMetric,
 } from '@/types'
 
 export interface ChatMessage {
@@ -32,6 +34,13 @@ interface AnalysisState {
 
     // Report
     report: AnalysisReport | null
+
+    // Structured data from job.completed SSE event (LLM-extracted)
+    riskItems: RiskItem[]
+    keyMetrics: KeyMetric[]
+    jobConfidence: number | null
+    jobTargetPrice: number | null
+    jobStopLoss: number | null
 
     // Streaming Report State (for typewriter effect)
     streamingSections: Record<string, StreamingSectionState>
@@ -61,6 +70,13 @@ interface AnalysisState {
     addMilestone: (event: AgentMilestoneEvent) => void
     addLog: (log: LogEntry) => void
     setReport: (report: AnalysisReport | null) => void
+    setStructuredData: (data: {
+        riskItems?: RiskItem[]
+        keyMetrics?: KeyMetric[]
+        confidence?: number | null
+        targetPrice?: number | null
+        stopLoss?: number | null
+    }) => void
     setIsAnalyzing: (isAnalyzing: boolean) => void
     setIsConnected: (isConnected: boolean) => void
     addChatMessage: (message: ChatMessage) => void
@@ -97,6 +113,11 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     jobStatus: null,
     agents: initialAgents,
     report: null,
+    riskItems: [],
+    keyMetrics: [],
+    jobConfidence: null,
+    jobTargetPrice: null,
+    jobStopLoss: null,
     streamingSections: {},
     milestones: [],
     chatMessages: [
@@ -228,6 +249,14 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
 
     setReport: (report) => set({ report }),
 
+    setStructuredData: (data) => set({
+        riskItems: data.riskItems ?? [],
+        keyMetrics: data.keyMetrics ?? [],
+        jobConfidence: data.confidence ?? null,
+        jobTargetPrice: data.targetPrice ?? null,
+        jobStopLoss: data.stopLoss ?? null,
+    }),
+
     setIsAnalyzing: (isAnalyzing) => set({ isAnalyzing }),
 
     setIsConnected: (isConnected) => set({ isConnected }),
@@ -237,6 +266,11 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
         jobStatus: null,
         agents: initialAgents.map(a => ({ ...a, status: 'pending' })),
         report: null,
+        riskItems: [],
+        keyMetrics: [],
+        jobConfidence: null,
+        jobTargetPrice: null,
+        jobStopLoss: null,
         streamingSections: {},
         milestones: [],
         // 注意：reset时不清空chatMessages，保持对话历史

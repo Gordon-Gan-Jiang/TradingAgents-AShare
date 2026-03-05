@@ -35,7 +35,7 @@ export default function Analysis() {
     const [searchParams] = useSearchParams()
     const [activeSymbol, setActiveSymbol] = useState('000001.SH')
     const [showReport, setShowReport] = useState(false)
-    const { report } = useAnalysisStore()
+    const { report, jobConfidence, jobTargetPrice, jobStopLoss } = useAnalysisStore()
 
     useEffect(() => {
         const querySymbol = (searchParams.get('symbol') || '').trim()
@@ -49,9 +49,10 @@ export default function Analysis() {
     }, [report])
 
     const finalDecision = report?.final_trade_decision
-    const confidence = extractConfidence(finalDecision)
-    const targetPrice = extractPrice(finalDecision, 'target')
-    const stopLoss = extractPrice(finalDecision, 'stop')
+    // Prefer LLM-extracted structured values, fall back to regex parsing
+    const confidence = jobConfidence ?? extractConfidence(finalDecision)
+    const targetPrice = jobTargetPrice ?? extractPrice(finalDecision, 'target')
+    const stopLoss = jobStopLoss ?? extractPrice(finalDecision, 'stop')
 
     return (
         <div className="flex gap-4 h-[calc(100vh-5rem)]">

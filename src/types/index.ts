@@ -115,7 +115,6 @@ export interface AgentWritingEvent {
     status: 'writing' | 'completed'
 }
 
-// 新增：Agent活动事件（聚合工具调用）
 export interface AgentActivityEvent {
     agent: string
     type: 'data_fetch' | 'data_analysis' | 'writing' | 'thinking'
@@ -139,10 +138,10 @@ export interface AgentSnapshotEvent {
 
 // Streaming Report State
 export interface StreamingSectionState {
-    buffer: string      // 待渲染的完整内容
-    displayed: string   // 已显示的内容
-    isTyping: boolean   // 是否正在打字
-    isComplete: boolean // 是否完成
+    buffer: string
+    displayed: string
+    isTyping: boolean
+    isComplete: boolean
 }
 
 export interface MilestoneMessage {
@@ -199,6 +198,19 @@ export interface KlineResponse {
     candles: KlineCandle[]
 }
 
+// Structured extraction types
+export interface RiskItem {
+    name: string
+    level: 'high' | 'medium' | 'low'
+    description?: string
+}
+
+export interface KeyMetric {
+    name: string
+    value: string
+    status: 'good' | 'neutral' | 'bad'
+}
+
 // Report Types (from database)
 export interface Report {
     id: string
@@ -209,6 +221,8 @@ export interface Report {
     confidence?: number
     target_price?: number
     stop_loss_price?: number
+    risk_items?: RiskItem[]
+    key_metrics?: KeyMetric[]
     created_at?: string
     updated_at?: string
 }
@@ -227,4 +241,14 @@ export interface ReportDetail extends Report {
 export interface ReportListResponse {
     total: number
     reports: Report[]
+}
+
+// Runtime config
+export interface RuntimeConfig {
+    llm_provider: string
+    deep_think_llm: string
+    quick_think_llm: string
+    backend_url: string
+    max_debate_rounds: number
+    max_risk_discuss_rounds: number
 }

@@ -1,4 +1,4 @@
-import { FileText, Download, Trash2, Search, ChevronLeft, Loader2 } from 'lucide-react'
+import { FileText, Download, Trash2, Search, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '@/services/api'
 import type { Report, ReportDetail } from '@/types'
@@ -47,7 +47,9 @@ function exportReport(report: ReportDetail) {
 }
 
 export default function Reports() {
+    const PAGE_SIZE = 20
     const [searchQuery, setSearchQuery] = useState('')
+    const [page, setPage] = useState(0)
     const [reports, setReports] = useState<Report[]>([])
     const [total, setTotal] = useState(0)
     const [selectedReport, setSelectedReport] = useState<ReportDetail | null>(null)
@@ -56,11 +58,13 @@ export default function Reports() {
     const [error, setError] = useState<string | null>(null)
     const [deleting, setDeleting] = useState<string | null>(null)
 
-    const fetchReports = useCallback(async () => {
+    const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+
+    const fetchReports = useCallback(async (targetPage: number) => {
         setLoading(true)
         setError(null)
         try {
-            const response = await api.getReports(undefined, 0, 100)
+            const response = await api.getReports(undefined, targetPage * PAGE_SIZE, PAGE_SIZE)
             setReports(response.reports)
             setTotal(response.total)
         } catch (err) {
@@ -70,7 +74,7 @@ export default function Reports() {
         }
     }, [])
 
-    useEffect(() => { fetchReports() }, [fetchReports])
+    useEffect(() => { fetchReports(page) }, [fetchReports, page])
 
     const handleDelete = async (e: React.MouseEvent, reportId: string) => {
         e.stopPropagation()
@@ -79,7 +83,12 @@ export default function Reports() {
         try {
             await api.deleteReport(reportId)
             setReports(prev => prev.filter(r => r.id !== reportId))
-            setTotal(prev => prev - 1)
+            setTotal(prev => {
+                const newTotal = prev - 1
+                // Go to prev page if current page is now empty
+                if (reports.length === 1 && page > 0) setPage(p => p - 1)
+                return newTotal
+            })
         } catch (err) {
             alert(err instanceof Error ? err.message : '删除失败')
         } finally {
@@ -209,7 +218,7 @@ export default function Reports() {
                 <div className="card py-12 text-center">
                     <p className="text-red-500 mb-4">{error}</p>
                     <button
-                        onClick={fetchReports}
+                        onClick={() => fetchReports(page)}
                         className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
                     >
                         重试
@@ -313,6 +322,31 @@ export default function Reports() {
                             <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">
                                 在分析页面生成新的报告
                             </p>
+                        </div>
+                    )}
+
+                    {/* Pagination */}
+                    {totalPages > 1 && (
+                        <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 dark:border-slate-700">
+                            <span className="text-sm text-slate-500 dark:text-slate-400">
+                                第 {page + 1} / {totalPages} 页，共 {total} 条
+                            </span>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    onClick={() => setPage(p => p - 1)}
+                                    disabled={page === 0}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                >
+                                    <ChevronLeft className="w-4 h-4" />
+                                </button>
+                                <button
+                                    onClick={() => setPage(p => p + 1)}
+                                    disabled={page >= totalPages - 1}
+                                    className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                >
+                                    <ChevronRight className="w-4 h-4" />
+                                </button>
+                            </div>
                         </div>
                     )}
                 </div>

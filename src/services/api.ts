@@ -1,4 +1,4 @@
-import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig } from '@/types'
 
 export function getBaseUrl(): string {
     try {
@@ -105,6 +105,17 @@ class ApiService {
         return this.request<Report>('/v1/reports', {
             method: 'POST',
             body: JSON.stringify(report),
+        })
+    }
+
+    async getConfig(): Promise<RuntimeConfig> {
+        return this.request<RuntimeConfig>('/v1/config')
+    }
+
+    async updateConfig(updates: Partial<RuntimeConfig>): Promise<{ message: string; applied: Partial<RuntimeConfig>; current: RuntimeConfig }> {
+        return this.request('/v1/config', {
+            method: 'PATCH',
+            body: JSON.stringify(updates),
         })
     }
 }

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { useAnalysisStore } from '@/stores/analysisStore'
-import type { AnalysisReport } from '@/types'
+import type { AnalysisReport, RiskItem, KeyMetric } from '@/types'
 import { getBaseUrl } from '@/services/api'
 
 export function useSSE(jobId: string | null) {
@@ -14,6 +14,7 @@ export function useSSE(jobId: string | null) {
         addAgentReport,
         addLog,
         setReport,
+        setStructuredData,
         setIsAnalyzing
     } = useAnalysisStore()
 
@@ -58,6 +59,13 @@ export function useSSE(jobId: string | null) {
                 case 'job.completed':
                     setIsAnalyzing(false)
                     setReport((data.result || null) as AnalysisReport | null)
+                    setStructuredData({
+                        riskItems: (data.risk_items as RiskItem[] | undefined) ?? [],
+                        keyMetrics: (data.key_metrics as KeyMetric[] | undefined) ?? [],
+                        confidence: data.confidence as number | null | undefined,
+                        targetPrice: data.target_price as number | null | undefined,
+                        stopLoss: data.stop_loss_price as number | null | undefined,
+                    })
                     addLog({
                         id: Date.now().toString(),
                         timestamp: new Date().toISOString(),
