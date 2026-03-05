@@ -50,7 +50,12 @@ export type SSEEventType =
     | 'agent.message'
     | 'agent.tool_call'
     | 'agent.report'
+    | 'agent.report.chunk'
     | 'agent.snapshot'
+    | 'agent.milestone'
+    | 'agent.writing'
+    | 'agent.activity'
+    | 'agent.activity_complete'
 
 export interface SSEEvent {
     event: SSEEventType
@@ -83,12 +88,69 @@ export interface AgentReportEvent {
     content: string
 }
 
+export interface ReportChunkEvent {
+    section: string
+    chunk: string
+    index: number
+    is_complete: boolean
+}
+
+export interface AgentMilestoneEvent {
+    stage: string
+    title: string
+    summary: string
+    timestamp: string
+}
+
+export interface AgentToolCallDisplayEvent {
+    agent: string
+    tool: string
+    description: string
+}
+
+export interface AgentWritingEvent {
+    agent: string
+    report: string
+    report_name: string
+    status: 'writing' | 'completed'
+}
+
+// 新增：Agent活动事件（聚合工具调用）
+export interface AgentActivityEvent {
+    agent: string
+    type: 'data_fetch' | 'data_analysis' | 'writing' | 'thinking'
+    details: string
+    tools?: string[]
+    is_update?: boolean
+}
+
+export interface AgentActivityCompleteEvent {
+    agent: string
+    type: string
+}
+
 export interface AgentSnapshotEvent {
     agents: Array<{
         team: string
         agent: string
         status: AgentStatus
     }>
+}
+
+// Streaming Report State
+export interface StreamingSectionState {
+    buffer: string      // 待渲染的完整内容
+    displayed: string   // 已显示的内容
+    isTyping: boolean   // 是否正在打字
+    isComplete: boolean // 是否完成
+}
+
+export interface MilestoneMessage {
+    id: string
+    stage: string
+    title: string
+    summary: string
+    timestamp: string
 }
 
 // Report Types

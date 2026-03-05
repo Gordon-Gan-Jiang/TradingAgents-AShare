@@ -1,8 +1,9 @@
-import { FileText, Download, ChevronDown, ChevronRight } from 'lucide-react'
-import { useState } from 'react'
+import { FileText, Download, ChevronDown, ChevronRight, Loader2 } from 'lucide-react'
+import { useState, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAnalysisStore } from '@/stores/analysisStore'
+import type { ReportDetail } from '@/types'
 
 const REPORT_SECTIONS = [
     { key: 'market_report', title: '市场分析报告', team: 'Analyst Team' },
@@ -14,64 +15,120 @@ const REPORT_SECTIONS = [
     { key: 'final_trade_decision', title: '最终交易决策', team: 'Portfolio Management' },
 ]
 
-export default function ReportViewer() {
-    const { report, isAnalyzing } = useAnalysisStore()
+const MD_COMPONENTS = {
+    table: ({ children }: { children?: React.ReactNode }) => (
+        <table className="w-full border-collapse border border-slate-300 dark:border-slate-600 my-4">{children}</table>
+    ),
+    thead: ({ children }: { children?: React.ReactNode }) => (
+        <thead className="bg-slate-100 dark:bg-slate-700">{children}</thead>
+    ),
+    th: ({ children }: { children?: React.ReactNode }) => (
+        <th className="border border-slate-300 dark:border-slate-600 px-3 py-2 text-left font-semibold text-slate-700 dark:text-slate-300">{children}</th>
+    ),
+    td: ({ children }: { children?: React.ReactNode }) => (
+        <td className="border border-slate-300 dark:border-slate-600 px-3 py-2 text-slate-600 dark:text-slate-400">{children}</td>
+    ),
+    tr: ({ children }: { children?: React.ReactNode }) => (
+        <tr className="even:bg-slate-50 dark:even:bg-slate-800/50">{children}</tr>
+    ),
+}
+
+interface ReportViewerProps {
+    /** 传入后进入历史报告模式，不读取 store */
+    reportData?: ReportDetail
+}
+
+export default function ReportViewer({ reportData }: ReportViewerProps = {}) {
+    const { report, streamingSections, isAnalyzing } = useAnalysisStore()
     const [expandedSections, setExpandedSections] = useState<string[]>([])
+    const isHistorical = !!reportData
 
-    const hasReport = report && Object.values(report).some(v => v && typeof v === 'string' && v.length > 0)
+    // 历史模式：自动展开有内容的前两节；实时模式：自动展开正在流式传输的节
+    useEffect(() => {
+        if (isHistorical) {
+            const withContent = REPORT_SECTIONS
+                .filter(s => !!reportData?.[s.key as keyof ReportDetail])
+                .map(s => s.key)
+            setExpandedSections(withContent.slice(0, 2))
+            return
+        }
+        const streamingKeys = Object.entries(streamingSections)
+            .filter(([, state]) => state.isTyping || state.isComplete)
+            .map(([key]) => key)
+        if (streamingKeys.length > 0) {
+            setExpandedSections(prev => {
+                const next = [...prev]
+                streamingKeys.forEach(k => { if (!next.includes(k)) next.push(k) })
+                return next
+            })
+        }
+    }, [streamingSections, isHistorical, reportData])
 
-    const toggleSection = (key: string) => {
-        setExpandedSections(prev =>
-            prev.includes(key)
-                ? prev.filter(k => k !== key)
-                : [...prev, key]
-        )
+    const getSectionContent = (key: string): string => {
+        if (isHistorical) {
+            return (reportData?.[key as keyof ReportDetail] as string | undefined) || ''
+        }
+        const s = streamingSections[key]
+        return s?.displayed || (report?.[key as keyof typeof report] as string | undefined) || ''
     }
 
+    const getSectionState = (key: string) => {
+        if (isHistorical) return { isStreaming: false, isComplete: true }
+        const s = streamingSections[key]
+        return {
+            isStreaming: s?.isTyping || false,
+            isComplete: s?.isComplete || !!(report?.[key as keyof typeof report]),
+        }
+    }
+
+    const hasAnyContent = isHistorical
+        ? REPORT_SECTIONS.some(s => !!reportData?.[s.key as keyof ReportDetail])
+        : Object.keys(streamingSections).length > 0 || (report && Object.values(report).some(v => typeof v === 'string' && v.length > 0))
+
+    const toggleSection = (key: string) =>
+        setExpandedSections(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
+
     const handleExport = () => {
-        if (!report) return
-
-        const reportText = REPORT_SECTIONS
-            .filter(section => report[section.key as keyof typeof report])
-            .map(section => `## ${section.title}\n\n${report[section.key as keyof typeof report]}`)
+        const source = isHistorical ? reportData : report
+        if (!source) return
+        const text = REPORT_SECTIONS
+            .filter(s => source[s.key as keyof typeof source])
+            .map(s => `## ${s.title}\n\n${source[s.key as keyof typeof source]}`)
             .join('\n\n---\n\n')
-
-        const blob = new Blob([reportText], { type: 'text/markdown' })
+        const blob = new Blob([text], { type: 'text/markdown' })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `analysis-report-${report.symbol || 'unknown'}.md`
+        a.download = `analysis-${isHistorical ? reportData?.symbol : report?.symbol || 'report'}.md`
         document.body.appendChild(a)
         a.click()
         document.body.removeChild(a)
         URL.revokeObjectURL(url)
     }
 
-    if (!hasReport && !isAnalyzing) {
+    if (!hasAnyContent && !isAnalyzing) {
         return (
-            <div className="card flex items-center justify-center py-12">
+            <div className="flex items-center justify-center py-12">
                 <div className="text-center">
                     <FileText className="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-4" />
                     <p className="text-slate-500 dark:text-slate-400">暂无分析报告</p>
-                    <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">
-                        开始分析后将在此显示报告
-                    </p>
+                    <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">开始分析后将在此显示报告</p>
                 </div>
             </div>
         )
     }
 
     return (
-        <div className="card flex-1 flex flex-col min-h-0">
+        <div className={isHistorical ? 'space-y-2' : 'card flex-1 flex flex-col min-h-0'}>
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                     <FileText className="w-5 h-5 text-blue-500" />
                     <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">分析报告</h2>
-                    {isAnalyzing && (
+                    {!isHistorical && isAnalyzing && (
                         <span className="badge-orange animate-pulse">生成中</span>
                     )}
                 </div>
-                {hasReport && (
+                {hasAnyContent && (
                     <button
                         onClick={handleExport}
                         className="btn-secondary flex items-center gap-2 text-sm py-1.5 px-3"
@@ -82,75 +139,56 @@ export default function ReportViewer() {
                 )}
             </div>
 
-            <div className="flex-1 overflow-y-auto space-y-2 min-h-0">
+            <div className={`space-y-2 ${isHistorical ? '' : 'flex-1 overflow-y-auto min-h-0'}`}>
                 {REPORT_SECTIONS.map((section) => {
-                    const content = report?.[section.key as keyof typeof report]
-                    if (!content || typeof content !== 'string' || content.length === 0) {
-                        return null
-                    }
+                    const content = getSectionContent(section.key)
+                    const { isStreaming, isComplete } = getSectionState(section.key)
+                    const hasContent = content.length > 0
+
+                    if (!hasContent && !isStreaming && !isAnalyzing) return null
 
                     const isExpanded = expandedSections.includes(section.key)
 
                     return (
-                        <div
-                            key={section.key}
-                            className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden"
-                        >
+                        <div key={section.key} className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
                             <button
                                 onClick={() => toggleSection(section.key)}
                                 className="w-full flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                             >
                                 <div className="flex items-center gap-2">
-                                    {isExpanded ? (
-                                        <ChevronDown className="w-4 h-4 text-slate-400" />
-                                    ) : (
-                                        <ChevronRight className="w-4 h-4 text-slate-400" />
-                                    )}
-                                    <span className="font-medium text-slate-900 dark:text-slate-100">
-                                        {section.title}
-                                    </span>
-                                    <span className="text-xs text-slate-500 dark:text-slate-400">
-                                        {section.team}
-                                    </span>
+                                    {isExpanded
+                                        ? <ChevronDown className="w-4 h-4 text-slate-400" />
+                                        : <ChevronRight className="w-4 h-4 text-slate-400" />}
+                                    <span className="font-medium text-slate-900 dark:text-slate-100">{section.title}</span>
+                                    <span className="text-xs text-slate-500 dark:text-slate-400">{section.team}</span>
                                 </div>
-                                <span className="text-xs text-green-500">✓</span>
+                                <div className="flex items-center gap-2">
+                                    {isStreaming && <Loader2 className="w-3 h-3 animate-spin text-blue-500" />}
+                                    {isComplete
+                                        ? <span className="text-xs text-green-500">✓</span>
+                                        : isStreaming
+                                            ? <span className="text-xs text-blue-500">输入中...</span>
+                                            : <span className="text-xs text-slate-400">等待中</span>
+                                    }
+                                </div>
                             </button>
 
                             {isExpanded && (
                                 <div className="p-4 bg-white dark:bg-slate-800/30">
                                     <div className="prose dark:prose-invert prose-sm max-w-none">
-                                        <ReactMarkdown
-                                            remarkPlugins={[remarkGfm]}
-                                            components={{
-                                                table: ({ children }) => (
-                                                    <table className="w-full border-collapse border border-slate-300 dark:border-slate-600 my-4">
-                                                        {children}
-                                                    </table>
-                                                ),
-                                                thead: ({ children }) => (
-                                                    <thead className="bg-slate-100 dark:bg-slate-700">
-                                                        {children}
-                                                    </thead>
-                                                ),
-                                                th: ({ children }) => (
-                                                    <th className="border border-slate-300 dark:border-slate-600 px-3 py-2 text-left font-semibold text-slate-700 dark:text-slate-300">
-                                                        {children}
-                                                    </th>
-                                                ),
-                                                td: ({ children }) => (
-                                                    <td className="border border-slate-300 dark:border-slate-600 px-3 py-2 text-slate-600 dark:text-slate-400">
-                                                        {children}
-                                                    </td>
-                                                ),
-                                                tr: ({ children }) => (
-                                                    <tr className="even:bg-slate-50 dark:even:bg-slate-800/50">
-                                                        {children}
-                                                    </tr>
-                                                ),
-                                            }}
-                                        >
-                                            {content}
-                                        </ReactMarkdown>
+                                        {hasContent ? (
+                                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
+                                                {content}
+                                            </ReactMarkdown>
+                                        ) : (
+                                            <div className="flex items-center justify-center py-8 text-slate-400">
+                                                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                                                等待分析数据...
+                                            </div>
+                                        )}
+                                        {isStreaming && (
+                                            <span className="inline-block w-2 h-4 bg-blue-500 animate-pulse ml-1" />
+                                        )}
                                     </div>
                                 </div>
                             )}
@@ -158,7 +196,7 @@ export default function ReportViewer() {
                     )
                 })}
 
-                {isAnalyzing && !hasReport && (
+                {!isHistorical && isAnalyzing && !hasAnyContent && (
                     <div className="flex items-center justify-center py-12">
                         <div className="text-center">
                             <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />

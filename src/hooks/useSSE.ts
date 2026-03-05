@@ -1,8 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import type { AnalysisReport } from '@/types'
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+import { getBaseUrl } from '@/services/api'
 
 export function useSSE(jobId: string | null) {
     const eventSourceRef = useRef<EventSource | null>(null)
@@ -21,7 +20,7 @@ export function useSSE(jobId: string | null) {
     const connect = useCallback(() => {
         if (!jobId || eventSourceRef.current) return
 
-        const url = `${API_BASE_URL}/v1/jobs/${jobId}/events`
+        const url = `${getBaseUrl()}/v1/jobs/${jobId}/events`
         const eventSource = new EventSource(url)
         eventSourceRef.current = eventSource
 

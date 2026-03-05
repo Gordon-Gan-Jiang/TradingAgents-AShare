@@ -197,7 +197,7 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
     }, [range.end, range.start, symbol])
 
     return (
-        <section className="card h-[340px] flex flex-col min-h-0 overflow-hidden">
+        <section className="card h-full flex flex-col overflow-hidden">
             <div className="flex items-center justify-between mb-3 shrink-0">
                 <div className="flex items-center gap-2">
                     <CandlestickChart className="w-5 h-5 text-cyan-500" />

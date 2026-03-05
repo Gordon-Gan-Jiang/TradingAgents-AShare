@@ -1,21 +1,22 @@
-import { FormEvent, useMemo, useState } from 'react'
-import { Bot, Loader2, Send, Sparkles, Settings2, ChevronDown, ChevronUp } from 'lucide-react'
+import { FormEvent, useState, useRef, useEffect } from 'react'
+import { Bot, Loader2, Send, Sparkles, Settings2, ChevronDown, ChevronUp, FileText } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '@/services/api'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import type {
-    AgentMessageEvent,
     AgentReportEvent,
     AgentSnapshotEvent,
     AgentStatusEvent,
-    AgentToolCallEvent,
     AnalysisReport,
-    LogEntry,
+    ReportChunkEvent,
+    AgentWritingEvent,
+    AgentToolCallDisplayEvent,
 } from '@/types'
 
 interface ChatCopilotPanelProps {
     onSymbolDetected: (symbol: string) => void
+    onShowReport?: () => void
 }
 
 const ANALYST_OPTIONS = [
@@ -24,13 +25,6 @@ const ANALYST_OPTIONS = [
     { id: 'news', label: '新闻分析', description: '财经新闻' },
     { id: 'fundamentals', label: '基本面', description: '财务估值' },
 ]
-
-interface ChatBubble {
-    id: string
-    role: 'user' | 'assistant'
-    content: string
-    timestamp: string
-}
 
 interface StreamEvent {
     event: string
@@ -43,36 +37,42 @@ const PRESET_PROMPTS = [
     '分析宁德时代300750.SZ，给出交易建议',
 ]
 
-export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelProps) {
+// 报告章节标题映射
+const REPORT_SECTION_TITLES: Record<string, string> = {
+    market_report: '## 市场分析报告',
+    sentiment_report: '## 舆情分析报告',
+    news_report: '## 新闻分析报告',
+    fundamentals_report: '## 基本面分析报告',
+    investment_plan: '## 投资计划',
+    trader_investment_plan: '## 交易计划',
+    final_trade_decision: '## 最终交易决策',
+}
+
+export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: ChatCopilotPanelProps) {
     const [input, setInput] = useState('')
     const [streaming, setStreaming] = useState(false)
     const [showConfig, setShowConfig] = useState(false)
     const [selectedAnalysts, setSelectedAnalysts] = useState<string[]>(['market', 'social', 'news', 'fundamentals'])
-    const [chat, setChat] = useState<ChatBubble[]>([
-        {
-            id: 'init',
-            role: 'assistant',
-            content: '我是你的 A 股多智能体投研助手。直接告诉我你想分析的标的和日期。',
-            timestamp: new Date().toISOString(),
-        },
-    ])
+    const [streamingReport, setStreamingReport] = useState<Record<string, string>>({})
+    const messagesEndRef = useRef<HTMLDivElement>(null)
 
     const {
-        logs,
+        chatMessages,
         setCurrentJobId,
         setIsAnalyzing,
         setIsConnected,
         updateAgentStatus,
         updateAgentSnapshot,
-        addAgentMessage,
-        addAgentToolCall,
         addAgentReport,
-        addLog,
+        addChatMessage,
         setReport,
         reset,
     } = useAnalysisStore()
 
-    const timelineLogs = useMemo(() => [...logs].reverse(), [logs])
+    // Auto-scroll to bottom
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }, [chatMessages, streamingReport])
 
     const toggleAnalyst = (id: string) => {
         setSelectedAnalysts((prev) =>
@@ -81,15 +81,28 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
     }
 
     const pushAssistant = (content: string) => {
-        setChat((prev) => [
+        addChatMessage({
+            id: `${Date.now()}-${Math.random()}`,
+            role: 'assistant',
+            content,
+            timestamp: new Date().toISOString(),
+        })
+    }
+
+    const pushSystem = (content: string) => {
+        addChatMessage({
+            id: `${Date.now()}-${Math.random()}`,
+            role: 'system',
+            content,
+            timestamp: new Date().toISOString(),
+        })
+    }
+
+    const updateStreamingReport = (section: string, chunk: string) => {
+        setStreamingReport((prev) => ({
             ...prev,
-            {
-                id: `${Date.now()}-${Math.random()}`,
-                role: 'assistant',
-                content,
-                timestamp: new Date().toISOString(),
-            },
-        ])
+            [section]: (prev[section] || '') + chunk,
+        }))
     }
 
     const parseAndDispatch = (event: StreamEvent) => {
@@ -104,7 +117,8 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
                 const tradeDate = String(data.trade_date || '')
                 if (jobId) setCurrentJobId(jobId)
                 if (symbol) onSymbolDetected(symbol)
-                pushAssistant(`已启动任务：${symbol} @ ${tradeDate}`)
+                pushSystem(`已启动分析：${symbol} @ ${tradeDate}`)
+                setStreamingReport({})
                 break
             }
             case 'job.running':
@@ -113,11 +127,11 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
             case 'job.completed':
                 setIsAnalyzing(false)
                 setReport((data.result || null) as AnalysisReport | null)
-                pushAssistant(`分析完成，最终建议：${String(data.decision || 'HOLD')}`)
+                pushAssistant(`**分析完成**\n\n最终建议：**${String(data.decision || 'HOLD')}**`)
                 break
             case 'job.failed':
                 setIsAnalyzing(false)
-                pushAssistant(`任务失败：${String(data.error || 'unknown error')}`)
+                pushAssistant(`分析失败：${String(data.error || 'unknown error')}`)
                 break
             case 'agent.status':
                 updateAgentStatus(data as unknown as AgentStatusEvent)
@@ -125,15 +139,32 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
             case 'agent.snapshot':
                 updateAgentSnapshot(data as unknown as AgentSnapshotEvent)
                 break
-            case 'agent.message':
-                addAgentMessage(data as unknown as AgentMessageEvent)
-                break
-            case 'agent.tool_call':
-                addAgentToolCall(data as unknown as AgentToolCallEvent)
-                break
             case 'agent.report':
                 addAgentReport(data as unknown as AgentReportEvent)
                 break
+            case 'agent.report.chunk': {
+                const chunkData = data as unknown as ReportChunkEvent
+                updateStreamingReport(chunkData.section, chunkData.chunk)
+                break
+            }
+            case 'agent.tool_call': {
+                const toolData = data as unknown as AgentToolCallDisplayEvent
+                const description = toolData.description || toolData.tool
+                pushSystem(`${toolData.agent}：${description}`)
+                break
+            }
+            case 'agent.writing': {
+                const writingData = data as unknown as AgentWritingEvent
+                pushSystem(`${writingData.agent}：正在撰写${writingData.report_name}...`)
+                break
+            }
+            case 'agent.milestone': {
+                const { stage, title, summary } = data as { stage: string; title: string; summary: string }
+                if (stage === 'final_decision') {
+                    pushAssistant(`**${title}**\n\n${summary}`)
+                }
+                break
+            }
             default:
                 break
         }
@@ -187,12 +218,7 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
                     const data = JSON.parse(dataLine) as Record<string, unknown>
                     parseAndDispatch({ event: currentEvent, data })
                 } catch {
-                    addLog({
-                        id: `${Date.now()}-${Math.random()}`,
-                        timestamp: new Date().toISOString(),
-                        type: 'error',
-                        content: `SSE解析失败: ${dataLine.slice(0, 120)}`,
-                    } as LogEntry)
+                    console.error('SSE解析失败:', dataLine.slice(0, 120))
                 }
             }
         }
@@ -207,37 +233,23 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
         if (!prompt || streaming) return
 
         setInput('')
-        setChat((prev) => [
-            ...prev,
-            {
-                id: `${Date.now()}-${Math.random()}`,
-                role: 'user',
-                content: prompt,
-                timestamp: new Date().toISOString(),
-            },
-        ])
+        addChatMessage({
+            id: `${Date.now()}-${Math.random()}`,
+            role: 'user',
+            content: prompt,
+            timestamp: new Date().toISOString(),
+        })
 
         reset()
         setStreaming(true)
         setIsAnalyzing(true)
         setIsConnected(false)
-        addLog({
-            id: `${Date.now()}-${Math.random()}`,
-            timestamp: new Date().toISOString(),
-            type: 'system',
-            content: '正在连接实时事件流...',
-        })
+        setStreamingReport({})
 
         try {
             await streamChat(prompt)
         } catch (error) {
             pushAssistant(`请求失败：${error instanceof Error ? error.message : 'unknown error'}`)
-            addLog({
-                id: `${Date.now()}-${Math.random()}`,
-                timestamp: new Date().toISOString(),
-                type: 'error',
-                content: error instanceof Error ? error.message : '请求失败',
-            })
             setIsAnalyzing(false)
             setIsConnected(false)
         } finally {
@@ -250,14 +262,25 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
             <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                     <Bot className="w-5 h-5 text-cyan-500" />
-                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">智能对话</h2>
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">智能分析</h2>
                 </div>
-                {streaming && (
-                    <span className="badge-blue inline-flex items-center gap-1">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        分析中
-                    </span>
-                )}
+                <div className="flex items-center gap-2">
+                    {onShowReport && Object.keys(streamingReport).length > 0 && (
+                        <button
+                            onClick={onShowReport}
+                            className="text-xs px-2 py-1 rounded bg-blue-100 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-500/30 transition-colors flex items-center gap-1"
+                        >
+                            <FileText className="w-3 h-3" />
+                            查看报告
+                        </button>
+                    )}
+                    {streaming && (
+                        <span className="badge-blue inline-flex items-center gap-1">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            分析中
+                        </span>
+                    )}
+                </div>
             </div>
 
             <div className="text-xs text-slate-500 dark:text-slate-400 mb-3 flex items-center gap-1">
@@ -316,13 +339,16 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
 
             {/* 聊天内容 */}
             <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1">
-                {chat.map((msg) => (
+                {chatMessages.map((msg) => (
                     <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                         <div
-                            className={`max-w-[92%] rounded-xl px-3 py-2 text-sm leading-relaxed ${msg.role === 'user'
-                                ? 'bg-blue-100 dark:bg-blue-500/20 border border-blue-300 dark:border-blue-500/30 text-slate-900 dark:text-slate-100'
-                                : 'bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
-                                }`}
+                            className={`max-w-[92%] rounded-xl px-3 py-2 text-sm leading-relaxed ${
+                                msg.role === 'user'
+                                    ? 'bg-blue-100 dark:bg-blue-500/20 border border-blue-300 dark:border-blue-500/30 text-slate-900 dark:text-slate-100'
+                                    : msg.role === 'system'
+                                        ? 'bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 italic'
+                                        : 'bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                            }`}
                         >
                             {msg.role === 'user' ? (
                                 msg.content
@@ -366,18 +392,24 @@ export default function ChatCopilotPanel({ onSymbolDetected }: ChatCopilotPanelP
                     </div>
                 ))}
 
-                <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
-                    <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">思考流程</p>
-                    <div className="space-y-1.5">
-                        {timelineLogs.slice(-120).map((log) => (
-                            <div key={log.id} className="text-xs text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 rounded-md px-2 py-1">
-                                <span className="text-slate-400 dark:text-slate-500 mr-2">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                                {log.agent && <span className="text-cyan-500 mr-2">{log.agent}</span>}
-                                <span>{log.content}</span>
+                {/* 流式报告预览 */}
+                {Object.entries(streamingReport).map(([section, content]) => {
+                    if (!content.trim()) return null
+                    const reportContent = `${REPORT_SECTION_TITLES[section] || '## 分析报告'}\n\n${content}`
+                    return (
+                        <div key={section} className="flex justify-start">
+                            <div className="max-w-[92%] rounded-xl px-3 py-2 text-sm leading-relaxed bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 text-slate-700 dark:text-slate-300">
+                                <div className="prose dark:prose-invert prose-sm max-w-none">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                        {reportContent}
+                                    </ReactMarkdown>
+                                </div>
                             </div>
-                        ))}
-                    </div>
-                </div>
+                        </div>
+                    )
+                })}
+
+                <div ref={messagesEndRef} />
             </div>
 
             {/* 输入框 */}

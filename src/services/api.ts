@@ -1,10 +1,22 @@
 import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse } from '@/types'
 
+export function getBaseUrl(): string {
+    try {
+        const stored = localStorage.getItem('tradingagents-settings')
+        if (stored) {
+            const settings = JSON.parse(stored) as { apiUrl?: string }
+            if (settings.apiUrl) return settings.apiUrl.replace(/\/$/, '')
+        }
+    } catch {}
+    return (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000'
+}
+
+// Kept for backward compatibility
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 class ApiService {
     private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
-        const url = `${API_BASE_URL}${endpoint}`
+        const url = `${getBaseUrl()}${endpoint}`
         const response = await fetch(url, {
             ...options,
             headers: {
@@ -48,7 +60,7 @@ class ApiService {
         stream = true,
         selectedAnalysts?: string[],
     ) {
-        const response = await fetch(`${API_BASE_URL}/v1/chat/completions`, {
+        const response = await fetch(`${getBaseUrl()}/v1/chat/completions`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

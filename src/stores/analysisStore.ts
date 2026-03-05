@@ -8,8 +8,19 @@ import type {
     AgentMessageEvent,
     AgentToolCallEvent,
     AgentReportEvent,
-    AgentSnapshotEvent
+    AgentSnapshotEvent,
+    ReportChunkEvent,
+    AgentMilestoneEvent,
+    StreamingSectionState,
+    MilestoneMessage
 } from '@/types'
+
+export interface ChatMessage {
+    id: string
+    role: 'user' | 'assistant' | 'system'
+    content: string
+    timestamp: string
+}
 
 interface AnalysisState {
     // Current Job
@@ -22,7 +33,16 @@ interface AnalysisState {
     // Report
     report: AnalysisReport | null
 
-    // Logs
+    // Streaming Report State (for typewriter effect)
+    streamingSections: Record<string, StreamingSectionState>
+
+    // Milestones for chat display
+    milestones: MilestoneMessage[]
+
+    // Chat messages (persisted across route changes)
+    chatMessages: ChatMessage[]
+
+    // Logs (kept for system messages only)
     logs: LogEntry[]
 
     // Loading States
@@ -37,10 +57,14 @@ interface AnalysisState {
     addAgentMessage: (event: AgentMessageEvent) => void
     addAgentToolCall: (event: AgentToolCallEvent) => void
     addAgentReport: (event: AgentReportEvent) => void
+    addReportChunk: (event: ReportChunkEvent) => void
+    addMilestone: (event: AgentMilestoneEvent) => void
     addLog: (log: LogEntry) => void
     setReport: (report: AnalysisReport | null) => void
     setIsAnalyzing: (isAnalyzing: boolean) => void
     setIsConnected: (isConnected: boolean) => void
+    addChatMessage: (message: ChatMessage) => void
+    clearChatMessages: () => void
     reset: () => void
 }
 
@@ -68,17 +92,21 @@ const initialAgents: Agent[] = [
     { id: 'portfolio_manager', name: 'Portfolio Manager', team: 'Portfolio Management', status: 'pending' },
 ]
 
-const truncateLog = (content: string, max = 420) => {
-    if (!content) return ''
-    if (content.length <= max) return content
-    return `${content.slice(0, max)}...`
-}
-
 export const useAnalysisStore = create<AnalysisState>((set) => ({
     currentJobId: null,
     jobStatus: null,
     agents: initialAgents,
     report: null,
+    streamingSections: {},
+    milestones: [],
+    chatMessages: [
+        {
+            id: 'init',
+            role: 'assistant',
+            content: '我是你的 A 股多智能体投研助手。直接告诉我你想分析的标的和日期。',
+            timestamp: new Date().toISOString(),
+        },
+    ],
     logs: [],
     isAnalyzing: false,
     isConnected: false,
@@ -105,30 +133,14 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
         }
     }),
 
-    addAgentMessage: (event) => set((state) => {
-        const summarized = event.message_type === 'tool'
-            ? truncateLog(event.content, 240)
-            : truncateLog(event.content, 420)
-        const log: LogEntry = {
-            id: `${Date.now()}-${Math.random()}`,
-            timestamp: new Date().toISOString(),
-            type: 'agent',
-            content: summarized,
-            agent: event.agent || undefined
-        }
-        return { logs: [log, ...state.logs].slice(0, 100) }
-    }),
+    // 不再将消息和工具调用添加到日志（已移至后端）
+    addAgentMessage: () => {
+        // 消息已移至后端日志，前端不再显示
+    },
 
-    addAgentToolCall: (event) => set((state) => {
-        const log: LogEntry = {
-            id: `${Date.now()}-${Math.random()}`,
-            timestamp: new Date().toISOString(),
-            type: 'tool',
-            content: truncateLog(`${event.tool_call.name}: ${JSON.stringify(event.tool_call.args)}`, 260),
-            agent: event.agent || undefined
-        }
-        return { logs: [log, ...state.logs].slice(0, 100) }
-    }),
+    addAgentToolCall: () => {
+        // 工具调用已移至后端日志，前端不再显示
+    },
 
     addAgentReport: (event) => set((state) => ({
         report: {
@@ -136,6 +148,79 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
             [event.section]: event.content
         } as AnalysisReport
     })),
+
+    // 处理报告分片（支持打字机效果）
+    addReportChunk: (event) => set((state) => {
+        const { section, chunk, is_complete } = event
+        const current = state.streamingSections[section] || {
+            buffer: '',
+            displayed: '',
+            isTyping: false,
+            isComplete: false
+        }
+
+        if (is_complete) {
+            // 完成时，确保显示完整内容
+            return {
+                streamingSections: {
+                    ...state.streamingSections,
+                    [section]: {
+                        ...current,
+                        buffer: current.buffer,
+                        displayed: current.buffer,
+                        isTyping: false,
+                        isComplete: true
+                    }
+                }
+            }
+        }
+
+        // 追加到缓冲区
+        const newBuffer = current.buffer + chunk
+        return {
+            streamingSections: {
+                ...state.streamingSections,
+                [section]: {
+                    ...current,
+                    buffer: newBuffer,
+                    displayed: newBuffer, // 直接显示完整缓冲区（打字机效果由组件控制）
+                    isTyping: true,
+                    isComplete: false
+                }
+            }
+        }
+    }),
+
+    // 添加里程碑消息（用于对话框显示）
+    addMilestone: (event) => set((state) => {
+        const milestone: MilestoneMessage = {
+            id: `${Date.now()}-${Math.random()}`,
+            stage: event.stage,
+            title: event.title,
+            summary: event.summary,
+            timestamp: event.timestamp
+        }
+        return {
+            milestones: [...state.milestones, milestone]
+        }
+    }),
+
+    // 添加聊天记录（持久化）
+    addChatMessage: (message) => set((state) => ({
+        chatMessages: [...state.chatMessages, message]
+    })),
+
+    // 清空聊天记录
+    clearChatMessages: () => set({
+        chatMessages: [
+            {
+                id: 'init',
+                role: 'assistant',
+                content: '我是你的 A 股多智能体投研助手。直接告诉我你想分析的标的和日期。',
+                timestamp: new Date().toISOString(),
+            },
+        ]
+    }),
 
     addLog: (log) => set((state) => ({
         logs: [log, ...state.logs].slice(0, 100)
@@ -152,6 +237,9 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
         jobStatus: null,
         agents: initialAgents.map(a => ({ ...a, status: 'pending' })),
         report: null,
+        streamingSections: {},
+        milestones: [],
+        // 注意：reset时不清空chatMessages，保持对话历史
         logs: [],
         isAnalyzing: false,
         isConnected: false

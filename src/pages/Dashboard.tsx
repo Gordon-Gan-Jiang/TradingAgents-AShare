@@ -1,11 +1,22 @@
-import { TrendingUp, Activity, Clock, CheckCircle } from 'lucide-react'
+import { TrendingUp, Activity, FileText, CheckCircle } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAnalysisStore } from '@/stores/analysisStore'
+import { api } from '@/services/api'
 
 export default function Dashboard() {
     const { agents, logs, isAnalyzing, isConnected } = useAnalysisStore()
+    const [reportTotal, setReportTotal] = useState<number | null>(null)
+    const navigate = useNavigate()
 
     const completedAgents = agents.filter(a => a.status === 'completed').length
     const inProgressAgents = agents.filter(a => a.status === 'in_progress').length
+
+    useEffect(() => {
+        api.getReports(undefined, 0, 1)
+            .then(res => setReportTotal(res.total))
+            .catch(() => setReportTotal(null))
+    }, [])
 
     return (
         <div className="space-y-6">
@@ -42,18 +53,18 @@ export default function Dashboard() {
                     color={isAnalyzing ? 'orange' : 'green'}
                 />
                 <StatCard
-                    icon={Clock}
+                    icon={FileText}
+                    label="累计报告"
+                    value={reportTotal !== null ? `${reportTotal}` : '-'}
+                    subValue="份分析报告"
+                    color="purple"
+                />
+                <StatCard
+                    icon={TrendingUp}
                     label="系统状态"
                     value="正常"
                     subValue="所有服务运行中"
                     color="green"
-                />
-                <StatCard
-                    icon={TrendingUp}
-                    label="今日分析"
-                    value="0"
-                    subValue="只股票"
-                    color="purple"
                 />
             </div>
 
@@ -65,19 +76,19 @@ export default function Dashboard() {
                         title="开始新分析"
                         description="输入股票代码，启动多 Agent 智能分析"
                         action="开始分析"
-                        href="/analysis"
+                        onClick={() => navigate('/analysis')}
                     />
                     <QuickActionCard
                         title="查看历史报告"
                         description="浏览已完成的分析报告"
                         action="查看报告"
-                        href="/reports"
+                        onClick={() => navigate('/reports')}
                     />
                     <QuickActionCard
                         title="系统设置"
                         description="配置 API 和分析参数"
                         action="打开设置"
-                        href="/settings"
+                        onClick={() => navigate('/settings')}
                     />
                 </div>
             </div>
@@ -152,20 +163,20 @@ interface QuickActionCardProps {
     title: string
     description: string
     action: string
-    href: string
+    onClick: () => void
 }
 
-function QuickActionCard({ title, description, action, href }: QuickActionCardProps) {
+function QuickActionCard({ title, description, action, onClick }: QuickActionCardProps) {
     return (
-        <a
-            href={href}
-            className="block p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/30 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-all duration-200"
+        <button
+            onClick={onClick}
+            className="block w-full text-left p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/30 hover:border-blue-400 dark:hover:border-blue-500 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-all duration-200"
         >
             <h3 className="font-medium text-slate-900 dark:text-slate-100">{title}</h3>
             <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">{description}</p>
-            <span className="inline-block mt-3 text-sm text-blue-600 dark:text-blue-400 hover:underline">
+            <span className="inline-block mt-3 text-sm text-blue-600 dark:text-blue-400">
                 {action} →
             </span>
-        </a>
+        </button>
     )
 }
