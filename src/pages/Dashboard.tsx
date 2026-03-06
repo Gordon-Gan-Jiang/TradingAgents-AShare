@@ -1,20 +1,25 @@
-import { TrendingUp, Activity, FileText, CheckCircle } from 'lucide-react'
+import { TrendingUp, Activity, FileText, CheckCircle, ArrowRight } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { api } from '@/services/api'
+import type { Report } from '@/types'
 
 export default function Dashboard() {
-    const { agents, logs, isAnalyzing, isConnected } = useAnalysisStore()
+    const { agents, isAnalyzing, isConnected } = useAnalysisStore()
     const [reportTotal, setReportTotal] = useState<number | null>(null)
+    const [recentReports, setRecentReports] = useState<Report[]>([])
     const navigate = useNavigate()
 
     const completedAgents = agents.filter(a => a.status === 'completed').length
     const inProgressAgents = agents.filter(a => a.status === 'in_progress').length
 
     useEffect(() => {
-        api.getReports(undefined, 0, 1)
-            .then(res => setReportTotal(res.total))
+        api.getReports(undefined, 0, 5)
+            .then(res => {
+                setReportTotal(res.total)
+                setRecentReports(res.reports)
+            })
             .catch(() => setReportTotal(null))
     }, [])
 
@@ -93,34 +98,61 @@ export default function Dashboard() {
                 </div>
             </div>
 
-            {/* Recent Activity */}
+            {/* Recent Reports */}
             <div className="card">
-                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 mb-4">最近活动</h2>
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                    {logs.length === 0 ? (
-                        <p className="text-slate-400 dark:text-slate-500 text-center py-8">暂无活动记录</p>
-                    ) : (
-                        logs.slice(0, 20).map((log) => (
-                            <div
-                                key={log.id}
-                                className="flex items-start gap-3 p-3 rounded-lg bg-slate-100 dark:bg-slate-800/50"
-                            >
-                                <div className={`w-2 h-2 rounded-full mt-2 flex-shrink-0 ${log.type === 'error' ? 'bg-red-500' :
-                                    log.type === 'system' ? 'bg-blue-500' :
-                                        log.type === 'tool' ? 'bg-orange-500' :
-                                            'bg-green-500'
-                                    }`} />
-                                <div className="flex-1 min-w-0">
-                                    <p className="text-sm text-slate-900 dark:text-slate-100">{log.content}</p>
-                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                                        {new Date(log.timestamp).toLocaleTimeString()}
-                                        {log.agent && ` · ${log.agent}`}
-                                    </p>
-                                </div>
-                            </div>
-                        ))
+                <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">最近分析</h2>
+                    {recentReports.length > 0 && (
+                        <button
+                            onClick={() => navigate('/reports')}
+                            className="text-sm text-blue-600 dark:text-blue-400 hover:underline flex items-center gap-1"
+                        >
+                            查看全部 <ArrowRight className="w-3.5 h-3.5" />
+                        </button>
                     )}
                 </div>
+
+                {recentReports.length === 0 ? (
+                    <p className="text-slate-400 dark:text-slate-500 text-center py-8">暂无分析记录，<button onClick={() => navigate('/analysis')} className="text-blue-500 hover:underline">开始新分析</button></p>
+                ) : (
+                    <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                        {recentReports.map(report => {
+                            const decisionColor = report.decision?.toUpperCase().includes('BUY') || report.decision?.includes('增持')
+                                ? 'text-green-600 dark:text-green-400'
+                                : report.decision?.toUpperCase().includes('SELL') || report.decision?.includes('减持')
+                                    ? 'text-red-600 dark:text-red-400'
+                                    : 'text-slate-500 dark:text-slate-400'
+                            return (
+                                <div
+                                    key={report.id}
+                                    className="flex items-center justify-between py-3 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 -mx-4 px-4 transition-colors"
+                                    onClick={() => navigate('/reports')}
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <div className="w-8 h-8 rounded-lg bg-blue-100 dark:bg-blue-500/10 flex items-center justify-center">
+                                            <FileText className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                                        </div>
+                                        <div>
+                                            <p className="font-medium text-slate-900 dark:text-slate-100 text-sm">{report.symbol}</p>
+                                            <p className="text-xs text-slate-400 dark:text-slate-500">{report.trade_date}</p>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center gap-4">
+                                        <span className={`text-sm font-medium ${decisionColor}`}>
+                                            {report.decision || '-'}
+                                        </span>
+                                        {report.confidence != null && (
+                                            <span className="text-xs text-slate-400">{report.confidence}%</span>
+                                        )}
+                                        <p className="text-xs text-slate-400 dark:text-slate-500 hidden sm:block">
+                                            {report.created_at ? new Date(report.created_at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
+                                        </p>
+                                    </div>
+                                </div>
+                            )
+                        })}
+                    </div>
+                )}
             </div>
         </div>
     )

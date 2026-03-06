@@ -14,7 +14,7 @@ export default function RiskRadar() {
     const risks: RiskItem[] = riskItems
 
     return (
-        <div className="card bg-slate-900/50 border-slate-700/50 p-4">
+        <div className="card p-4">
             <div className="flex items-center gap-2 mb-4">
                 <div className="p-1.5 rounded-lg bg-amber-500/20">
                     <AlertTriangle className="w-4 h-4 text-amber-400" />
@@ -34,7 +34,7 @@ export default function RiskRadar() {
                         return (
                             <div
                                 key={i}
-                                className="flex items-start justify-between p-2.5 rounded-lg bg-slate-800/50 border border-slate-700/50 gap-2"
+                                className="flex items-start justify-between p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/50 gap-2"
                             >
                                 <div className="flex-1 min-w-0">
                                     <span className="text-sm text-slate-300 block truncate">{risk.name}</span>

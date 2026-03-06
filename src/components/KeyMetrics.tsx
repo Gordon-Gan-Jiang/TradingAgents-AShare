@@ -14,7 +14,7 @@ export default function KeyMetrics() {
     const metrics: KeyMetric[] = keyMetrics
 
     return (
-        <div className="card bg-slate-900/50 border-slate-700/50 p-4">
+        <div className="card p-4">
             <div className="flex items-center gap-2 mb-4">
                 <div className="p-1.5 rounded-lg bg-blue-500/20">
                     <BarChart3 className="w-4 h-4 text-blue-400" />
@@ -32,7 +32,7 @@ export default function KeyMetrics() {
                     {metrics.map((metric) => (
                         <div
                             key={metric.name}
-                            className="flex items-center justify-between py-2 border-b border-slate-700/30 last:border-0"
+                            className="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-700/30 last:border-0"
                         >
                             <span className="text-sm text-slate-400">{metric.name}</span>
                             <span className={`text-sm font-medium ${STATUS_COLOR[metric.status]}`}>

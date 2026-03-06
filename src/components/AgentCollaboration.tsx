@@ -63,7 +63,7 @@ export default function AgentCollaboration() {
 
     if (!hasAnyActive && !isAnalyzing) {
         return (
-            <div className="card bg-slate-900/50 border-slate-700/50 flex items-center justify-center py-12">
+            <div className="card flex items-center justify-center py-12">
                 <div className="text-center">
                     <Users className="w-10 h-10 text-slate-600 mx-auto mb-3" />
                     <p className="text-sm text-slate-400">多智能体待命中</p>
@@ -74,7 +74,7 @@ export default function AgentCollaboration() {
     }
 
     return (
-        <div className="card bg-slate-900/50 border-slate-700/50">
+        <div className="card">
             {/* 头部 */}
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
@@ -121,14 +121,14 @@ export default function AgentCollaboration() {
                                 <div className={`
                                     p-3 rounded-xl border transition-all duration-300
                                     ${isActive
-                                        ? 'bg-slate-800/80 border-blue-500/30'
+                                        ? 'bg-blue-50 dark:bg-slate-800/80 border-blue-400 dark:border-blue-500/30'
                                         : isCompleted
-                                            ? 'bg-slate-800/50 border-slate-700/50'
-                                            : 'bg-slate-800/30 border-slate-800'
+                                            ? 'bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700/50'
+                                            : 'bg-slate-50 dark:bg-slate-800/30 border-slate-200 dark:border-slate-800'
                                     }
                                 `}>
                                     <div className="flex items-center gap-2 mb-1">
-                                        <span className="text-sm font-medium text-slate-200">{agent.name}</span>
+                                        <span className="text-sm font-medium text-slate-800 dark:text-slate-200">{agent.name}</span>
                                         {isCompleted && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
                                     </div>
                                     <p className={`text-xs leading-relaxed ${isActive ? 'text-blue-300' : 'text-slate-400'}`}>
@@ -148,12 +148,12 @@ export default function AgentCollaboration() {
 
             {/* 分析师共识进度 */}
             {completedCount > 0 && (
-                <div className="mt-4 pt-3 border-t border-slate-700/50">
+                <div className="mt-4 pt-3 border-t border-slate-200 dark:border-slate-700/50">
                     <div className="flex items-center justify-between text-xs">
-                        <span className="text-slate-400">智能体完成进度</span>
+                        <span className="text-slate-500 dark:text-slate-400">智能体完成进度</span>
                         <span className="text-emerald-400 font-medium">{completedCount}/{totalCount}</span>
                     </div>
-                    <div className="mt-1.5 h-1 bg-slate-700 rounded-full overflow-hidden">
+                    <div className="mt-1.5 h-1 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
                         <div
                             className="h-full bg-emerald-500 rounded-full transition-all duration-500"
                             style={{ width: `${(completedCount / totalCount) * 100}%` }}

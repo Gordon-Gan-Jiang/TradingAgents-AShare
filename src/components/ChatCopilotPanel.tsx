@@ -85,11 +85,11 @@ function ReportCard({
     return (
         <button
             onClick={onOpen}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-slate-800/60 border border-slate-700/50 hover:border-blue-500/40 hover:bg-slate-800 transition-all text-left group"
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/50 hover:border-blue-400 dark:hover:border-blue-500/40 hover:bg-blue-50 dark:hover:bg-slate-800 transition-all text-left group"
         >
             <span className="text-base shrink-0">{icon}</span>
             <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-slate-200 group-hover:text-blue-300 transition-colors">{title}</p>
+                <p className="text-sm font-medium text-slate-700 dark:text-slate-200 group-hover:text-blue-600 dark:group-hover:text-blue-300 transition-colors">{title}</p>
                 <p className="text-xs text-slate-500 truncate mt-0.5">{preview}...</p>
             </div>
             <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-blue-400 shrink-0 transition-colors" />

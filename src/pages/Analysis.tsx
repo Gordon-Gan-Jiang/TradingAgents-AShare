@@ -104,10 +104,10 @@ export default function Analysis() {
                 </div>
 
                 {showReport ? (
-                    <div className="flex-1 min-h-0 relative card bg-slate-900/50 border-slate-700/50 overflow-y-auto">
+                    <div className="flex-1 min-h-0 relative card overflow-y-auto">
                         <button
                             onClick={() => setShowReport(false)}
-                            className="absolute top-2 right-2 z-10 p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 transition-colors"
+                            className="absolute top-2 right-2 z-10 p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-500 dark:text-slate-400 transition-colors"
                         >
                             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -116,7 +116,7 @@ export default function Analysis() {
                         <ReportViewer activeSection={activeSection} />
                     </div>
                 ) : (
-                    <div className="flex-1 min-h-0 flex items-center justify-center text-slate-400 text-sm card bg-slate-900/30 border-slate-700/30">
+                    <div className="flex-1 min-h-0 flex items-center justify-center text-slate-400 text-sm card">
                         <span>点击左侧"查看报告"按钮查看完整分析</span>
                     </div>
                 )}
