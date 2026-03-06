@@ -5,6 +5,7 @@ import Analysis from './pages/Analysis'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 import Portfolio from './pages/Portfolio'
+import Backtest from './pages/Backtest'
 
 function App() {
   return (
@@ -15,6 +16,7 @@ function App() {
           <Route path="/analysis" element={<Analysis />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/portfolio" element={<Portfolio />} />
+          <Route path="/backtest" element={<Backtest />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </Layout>

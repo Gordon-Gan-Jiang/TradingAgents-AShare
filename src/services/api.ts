@@ -108,8 +108,8 @@ class ApiService {
         })
     }
 
-    async getHotStocks(limit = 30): Promise<{ stocks: HotStock[]; total: number }> {
-        return this.request<{ stocks: HotStock[]; total: number }>(`/v1/market/hot-stocks?limit=${limit}`)
+    async getHotStocks(limit = 30, source = 'em'): Promise<{ stocks: HotStock[]; total: number }> {
+        return this.request<{ stocks: HotStock[]; total: number }>(`/v1/market/hot-stocks?limit=${limit}&source=${source}`)
     }
 
     async getConfig(): Promise<RuntimeConfig> {

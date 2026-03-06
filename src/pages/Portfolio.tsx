@@ -47,6 +47,7 @@ export default function Portfolio() {
     const [latestReports, setLatestReports] = useState<Record<string, Report>>({})
     const [hotStocks, setHotStocks] = useState<HotStock[]>([])
     const [hotLoading, setHotLoading] = useState(false)
+    const [hotSource, setHotSource] = useState<'em' | 'xq' | 'ths'>('em')
     const navigate = useNavigate()
 
     useEffect(() => {
@@ -59,15 +60,15 @@ export default function Portfolio() {
         })
     }, [holdings])
 
-    const fetchHotStocks = () => {
+    const fetchHotStocks = (source = hotSource) => {
         setHotLoading(true)
-        api.getHotStocks(30)
+        api.getHotStocks(30, source)
             .then(res => setHotStocks(res.stocks))
             .catch(() => {})
             .finally(() => setHotLoading(false))
     }
 
-    useEffect(() => { fetchHotStocks() }, [])
+    useEffect(() => { fetchHotStocks(hotSource) }, [hotSource])
 
     const addHolding = (symbol?: string, notes?: string) => {
         const sym = (symbol ?? newSymbol).trim().toUpperCase()
@@ -182,18 +183,32 @@ export default function Portfolio() {
 
                 {/* Right: Hot stocks */}
                 <div className="card">
-                    <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-2">
                             <Flame className="w-5 h-5 text-orange-500" />
-                            <h2 className="font-semibold text-slate-900 dark:text-slate-100">东方财富热榜</h2>
+                            <h2 className="font-semibold text-slate-900 dark:text-slate-100">热榜选股</h2>
                         </div>
                         <button
-                            onClick={fetchHotStocks}
+                            onClick={() => fetchHotStocks()}
                             disabled={hotLoading}
                             className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors disabled:opacity-40"
                         >
                             <RefreshCw className={`w-4 h-4 ${hotLoading ? 'animate-spin' : ''}`} />
                         </button>
+                    </div>
+                    <div className="flex gap-1 mb-3">
+                        {(['em', 'xq', 'ths'] as const).map(src => (
+                            <button
+                                key={src}
+                                onClick={() => setHotSource(src)}
+                                className={`px-2.5 py-1 text-xs rounded-full border transition-colors ${hotSource === src
+                                    ? 'bg-orange-500 border-orange-500 text-white'
+                                    : 'border-slate-300 dark:border-slate-600 text-slate-500 dark:text-slate-400 hover:border-orange-400'
+                                }`}
+                            >
+                                {src === 'em' ? '东方财富' : src === 'xq' ? '雪球热门' : '同花顺连涨'}
+                            </button>
+                        ))}
                     </div>
 
                     {hotStocks.length === 0 ? (
