@@ -11,10 +11,10 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta
 from threading import Lock
+from fastapi import Body
 from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
-from pydantic import field_serializer
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends, Query
@@ -63,6 +63,9 @@ app.add_middleware(
 _executor = ThreadPoolExecutor(max_workers=2)
 _jobs_lock = Lock()
 _jobs: Dict[str, Dict[str, Any]] = {}
+
+# Runtime config overrides via PATCH /v1/config
+_global_config_overrides: Dict[str, Any] = {}
 _job_events: Dict[str, "queue.Queue[Dict[str, Any]]"] = {}
 
 FIXED_TEAMS = {
@@ -159,17 +162,12 @@ class ReportResponse(BaseModel):
     confidence: Optional[int]
     target_price: Optional[float]
     stop_loss_price: Optional[float]
-    created_at: Optional[str]
-    updated_at: Optional[str]
-    
-    @field_serializer('created_at', 'updated_at')
-    def serialize_datetime(self, value):
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return value
-    
-    class Config:
-        from_attributes = True
+    risk_items: Optional[List[Dict[str, Any]]] = None
+    key_metrics: Optional[List[Dict[str, Any]]] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
 
 
 class ReportDetailResponse(ReportResponse):
@@ -216,6 +214,9 @@ def _build_runtime_config(overrides: Dict[str, Any]) -> Dict[str, Any]:
         "news_data": "cn_akshare,cn_baostock,yfinance",
     }
 
+    # Apply global config overrides (from PATCH /v1/config)
+    if _global_config_overrides:
+        config = _deep_merge(config, dict(_global_config_overrides))
     if overrides:
         config = _deep_merge(config, overrides)
     return config
@@ -670,6 +671,20 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, 
             if status not in ("completed", "skipped"):
                 tracker._set_status(agent, "completed")
         
+        # LLM 结构化提取（非阻塞，失败不影响主流程）
+        structured = None
+        try:
+            structured = report_service.extract_structured_data(
+                final_trade_decision=result.get("final_trade_decision", ""),
+                fundamentals_report=result.get("fundamentals_report", ""),
+                config=config,
+            )
+        except Exception as e:
+            print(f"Structured extraction failed (non-fatal): {e}")
+
+        risk_items = [r.model_dump() for r in structured.risks] if structured else []
+        key_metrics = [m.model_dump() for m in structured.key_metrics] if structured else []
+
         # 自动保存报告到数据库
         if save_report:
             db = SessionLocal()
@@ -681,16 +696,30 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, 
                     decision=decision,
                     result_data=result,
                     user_id=None,  # TODO: 后续添加用户认证后传入 user_id
+                    risk_items=risk_items or None,
+                    key_metrics=key_metrics or None,
+                    confidence_override=structured.confidence if structured else None,
+                    target_price_override=structured.target_price if structured else None,
+                    stop_loss_override=structured.stop_loss_price if structured else None,
                 )
             except Exception as e:
                 print(f"Failed to save report: {e}")
             finally:
                 db.close()
-        
+
         _emit_job_event(
             job_id,
             "job.completed",
-            {"job_id": job_id, "decision": decision, "result": result},
+            {
+                "job_id": job_id,
+                "decision": decision,
+                "result": result,
+                "risk_items": risk_items,
+                "key_metrics": key_metrics,
+                "confidence": structured.confidence if structured else None,
+                "target_price": structured.target_price if structured else None,
+                "stop_loss_price": structured.stop_loss_price if structured else None,
+            },
         )
     except Exception as exc:
         _set_job(
@@ -1109,6 +1138,29 @@ def delete_report_endpoint(
     if not success:
         raise HTTPException(status_code=404, detail="报告不存在")
     return {"message": "报告已删除"}
+
+
+# ─── Runtime Config Endpoints ────────────────────────────────────────────────
+
+_CONFIG_ALLOWED_KEYS = {
+    "llm_provider", "deep_think_llm", "quick_think_llm",
+    "backend_url", "max_debate_rounds", "max_risk_discuss_rounds",
+}
+
+
+@app.get("/v1/config")
+def get_runtime_config():
+    """获取当前运行时配置（含环境变量和动态覆盖）."""
+    cfg = _build_runtime_config({})
+    return {k: cfg[k] for k in _CONFIG_ALLOWED_KEYS if k in cfg}
+
+
+@app.patch("/v1/config")
+def update_runtime_config(updates: Dict[str, Any] = Body(...)):
+    """更新运行时配置，下次分析时生效."""
+    filtered = {k: v for k, v in updates.items() if k in _CONFIG_ALLOWED_KEYS}
+    _global_config_overrides.update(filtered)
+    return {"message": "配置已更新", "applied": filtered, "current": get_runtime_config()}
 
 
 def run() -> None:
