@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import type { AgentStatus } from '@/types'
 import {
@@ -35,14 +34,9 @@ const AGENTS: AgentInfo[] = [
 
 export default function AgentCollaboration() {
     const { agents, isAnalyzing, streamingSections } = useAnalysisStore()
-    const [completedCount, setCompletedCount] = useState(0)
 
-    useEffect(() => {
-        const analystAgents = agents.filter(a =>
-            ['Market Analyst', 'Social Analyst', 'News Analyst', 'Fundamentals Analyst'].includes(a.name)
-        )
-        setCompletedCount(analystAgents.filter(a => a.status === 'completed').length)
-    }, [agents])
+    const completedCount = agents.filter(a => a.status === 'completed' || a.status === 'skipped').length
+    const totalCount = agents.length
 
     const getAgentStatus = (agentId: string): AgentStatus => {
         if (agentId === 'Risk Analyst') {
@@ -156,13 +150,13 @@ export default function AgentCollaboration() {
             {completedCount > 0 && (
                 <div className="mt-4 pt-3 border-t border-slate-700/50">
                     <div className="flex items-center justify-between text-xs">
-                        <span className="text-slate-400">分析师完成进度</span>
-                        <span className="text-emerald-400 font-medium">{completedCount}/4</span>
+                        <span className="text-slate-400">智能体完成进度</span>
+                        <span className="text-emerald-400 font-medium">{completedCount}/{totalCount}</span>
                     </div>
                     <div className="mt-1.5 h-1 bg-slate-700 rounded-full overflow-hidden">
                         <div
                             className="h-full bg-emerald-500 rounded-full transition-all duration-500"
-                            style={{ width: `${(completedCount / 4) * 100}%` }}
+                            style={{ width: `${(completedCount / totalCount) * 100}%` }}
                         />
                     </div>
                 </div>
