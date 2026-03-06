@@ -880,6 +880,36 @@ def get_kline(
     )
 
 
+@app.get("/v1/market/hot-stocks")
+def get_hot_stocks(limit: int = 30) -> Dict:
+    """Return today's hot A-share stocks from EastMoney hot rank."""
+    try:
+        import akshare as ak
+        df = ak.stock_hot_rank_em()
+        df = df.head(limit)
+        stocks = []
+        for _, row in df.iterrows():
+            code = str(row.get("代码", ""))
+            # Normalize code: SH601xxx → 601xxx.SH, SZ002xxx → 002xxx.SZ
+            if code.startswith("SH") or code.startswith("sh"):
+                normalized = f"{code[2:]}.SH"
+            elif code.startswith("SZ") or code.startswith("sz"):
+                normalized = f"{code[2:]}.SZ"
+            else:
+                normalized = code
+            stocks.append({
+                "rank": int(row.get("当前排名", 0)),
+                "symbol": normalized,
+                "name": str(row.get("股票名称", "")),
+                "price": float(row.get("最新价", 0) or 0),
+                "change": float(row.get("涨跌额", 0) or 0),
+                "change_pct": float(row.get("涨跌幅", 0) or 0),
+            })
+        return {"stocks": stocks, "total": len(stocks)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
 def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
     job_id = uuid4().hex
