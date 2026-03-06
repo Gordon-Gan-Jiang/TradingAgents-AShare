@@ -880,32 +880,82 @@ def get_kline(
     )
 
 
+def _normalize_ths_code(code: str) -> str:
+    """Convert THS/XQ code like SH601xxx → 601xxx.SH"""
+    code = str(code).strip()
+    if code.upper().startswith("SH"):
+        return f"{code[2:]}.SH"
+    if code.upper().startswith("SZ"):
+        return f"{code[2:]}.SZ"
+    if code.upper().startswith("BJ") or code.upper().startswith("NQ"):
+        return f"{code[2:]}.BJ"
+    # Bare 6-digit code — guess exchange
+    if code.startswith(("6", "5")):
+        return f"{code}.SH"
+    if code.startswith(("0", "3", "2")):
+        return f"{code}.SZ"
+    return code
+
+
 @app.get("/v1/market/hot-stocks")
-def get_hot_stocks(limit: int = 30) -> Dict:
-    """Return today's hot A-share stocks from EastMoney hot rank."""
+def get_hot_stocks(source: str = "em", limit: int = 30) -> Dict:
+    """Return hot A-share stocks.
+    source: 'em' = EastMoney热榜, 'xq' = 雪球热门, 'ths' = 同花顺连涨榜
+    """
     try:
         import akshare as ak
-        df = ak.stock_hot_rank_em()
-        df = df.head(limit)
         stocks = []
-        for _, row in df.iterrows():
-            code = str(row.get("代码", ""))
-            # Normalize code: SH601xxx → 601xxx.SH, SZ002xxx → 002xxx.SZ
-            if code.startswith("SH") or code.startswith("sh"):
-                normalized = f"{code[2:]}.SH"
-            elif code.startswith("SZ") or code.startswith("sz"):
-                normalized = f"{code[2:]}.SZ"
-            else:
-                normalized = code
-            stocks.append({
-                "rank": int(row.get("当前排名", 0)),
-                "symbol": normalized,
-                "name": str(row.get("股票名称", "")),
-                "price": float(row.get("最新价", 0) or 0),
-                "change": float(row.get("涨跌额", 0) or 0),
-                "change_pct": float(row.get("涨跌幅", 0) or 0),
-            })
-        return {"stocks": stocks, "total": len(stocks)}
+
+        if source == "em":
+            # EastMoney real-time hot rank
+            df = ak.stock_hot_rank_em().head(limit)
+            for i, (_, row) in enumerate(df.iterrows()):
+                stocks.append({
+                    "rank": i + 1,
+                    "symbol": _normalize_ths_code(str(row.get("代码", ""))),
+                    "name": str(row.get("股票名称", "")),
+                    "price": float(row.get("最新价", 0) or 0),
+                    "change": float(row.get("涨跌额", 0) or 0),
+                    "change_pct": float(row.get("涨跌幅", 0) or 0),
+                    "extra": "",
+                })
+
+        elif source == "xq":
+            # Xueqiu most-followed stocks
+            df = ak.stock_hot_follow_xq(symbol="最热门").head(limit)
+            for i, (_, row) in enumerate(df.iterrows()):
+                stocks.append({
+                    "rank": i + 1,
+                    "symbol": _normalize_ths_code(str(row.get("股票代码", ""))),
+                    "name": str(row.get("股票简称", "")),
+                    "price": float(row.get("最新价", 0) or 0),
+                    "change": 0.0,
+                    "change_pct": 0.0,
+                    "extra": f"关注 {int(row.get('关注', 0)):,}",
+                })
+
+        elif source == "ths":
+            # THS consecutive-rise ranking (连涨榜 — stocks rising N days in a row)
+            df = ak.stock_rank_lxsz_ths().head(limit)
+            for i, (_, row) in enumerate(df.iterrows()):
+                days = int(row.get("连涨天数", 0) or 0)
+                change_pct = float(row.get("连续涨跌幅", 0) or 0)
+                stocks.append({
+                    "rank": i + 1,
+                    "symbol": _normalize_ths_code(str(row.get("股票代码", ""))),
+                    "name": str(row.get("股票简称", "")),
+                    "price": float(row.get("收盘价", 0) or 0),
+                    "change": 0.0,
+                    "change_pct": change_pct,
+                    "extra": f"连涨{days}天",
+                })
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown source: {source}")
+
+        return {"stocks": stocks, "total": len(stocks), "source": source}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1168,6 +1218,61 @@ def delete_report_endpoint(
     if not success:
         raise HTTPException(status_code=404, detail="报告不存在")
     return {"message": "报告已删除"}
+
+
+# ─── Backtest Endpoints ───────────────────────────────────────────────────────
+
+from api.services import backtest_service as _bt
+
+
+class BacktestRequest(BaseModel):
+    symbol: str
+    start_date: str
+    end_date: str
+    selected_analysts: List[str] = ["market", "news", "fundamentals", "sentiment"]
+    hold_days: int = 5
+    sample_interval: int = 7
+    config_overrides: Optional[Dict[str, Any]] = None
+
+
+@app.post("/v1/backtest")
+def submit_backtest(request: BacktestRequest) -> Dict:
+    """提交历史回测任务，返回 job_id."""
+    config = _build_runtime_config(request.config_overrides or {})
+    job_id = _bt.submit(
+        symbol=request.symbol,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        selected_analysts=request.selected_analysts,
+        hold_days=request.hold_days,
+        sample_interval=request.sample_interval,
+        config=config,
+    )
+    return {"job_id": job_id, "status": "pending"}
+
+
+@app.get("/v1/backtest")
+def list_backtests() -> Dict:
+    """列出所有回测任务."""
+    jobs = _bt.list_jobs()
+    return {"jobs": jobs, "total": len(jobs)}
+
+
+@app.get("/v1/backtest/{job_id}")
+def get_backtest(job_id: str) -> Dict:
+    """获取回测任务状态和结果."""
+    job = _bt.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="回测任务不存在")
+    return job
+
+
+@app.delete("/v1/backtest/{job_id}")
+def delete_backtest(job_id: str) -> Dict:
+    """删除回测任务."""
+    if not _bt.delete_job(job_id):
+        raise HTTPException(status_code=404, detail="回测任务不存在")
+    return {"message": "已删除"}
 
 
 # ─── Runtime Config Endpoints ────────────────────────────────────────────────

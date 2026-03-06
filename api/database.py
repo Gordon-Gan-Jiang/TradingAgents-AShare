@@ -60,7 +60,11 @@ class ReportDB(Base):
     
     # Full analysis results stored as JSON
     result_data = Column(JSON, nullable=True)
-    
+
+    # LLM-extracted structured data
+    risk_items = Column(JSON, nullable=True)   # [{"name": "...", "level": "high|medium|low", "description": "..."}]
+    key_metrics = Column(JSON, nullable=True)  # [{"name": "...", "value": "...", "status": "good|neutral|bad"}]
+
     # Individual reports (for quick access)
     market_report = Column(Text, nullable=True)
     sentiment_report = Column(Text, nullable=True)
@@ -86,6 +90,8 @@ class ReportDB(Base):
             "target_price": self.target_price,
             "stop_loss_price": self.stop_loss_price,
             "result_data": self.result_data,
+            "risk_items": self.risk_items,
+            "key_metrics": self.key_metrics,
             "market_report": self.market_report,
             "sentiment_report": self.sentiment_report,
             "news_report": self.news_report,

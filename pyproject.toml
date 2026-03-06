@@ -35,6 +35,7 @@ dependencies = [
     "baostock>=0.8.9",
     "fastapi>=0.116.1",
     "uvicorn>=0.35.0",
+    "playwright>=1.58.0",
 ]
 
 [project.scripts]
