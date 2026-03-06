@@ -1,5 +1,5 @@
 import { FormEvent, useState, useRef, useEffect } from 'react'
-import { Bot, Loader2, Send, Sparkles, Settings2, ChevronDown, ChevronUp, FileText } from 'lucide-react'
+import { Bot, Loader2, Send, Sparkles, Settings2, ChevronDown, ChevronUp, FileText, ChevronRight } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '@/services/api'
@@ -16,7 +16,7 @@ import type {
 
 interface ChatCopilotPanelProps {
     onSymbolDetected: (symbol: string) => void
-    onShowReport?: () => void
+    onShowReport?: (section?: string) => void
 }
 
 const ANALYST_OPTIONS = [
@@ -37,15 +37,64 @@ const PRESET_PROMPTS = [
     '分析宁德时代300750.SZ，给出交易建议',
 ]
 
-// 报告章节标题映射
 const REPORT_SECTION_TITLES: Record<string, string> = {
-    market_report: '## 市场分析报告',
-    sentiment_report: '## 舆情分析报告',
-    news_report: '## 新闻分析报告',
-    fundamentals_report: '## 基本面分析报告',
-    investment_plan: '## 投资计划',
-    trader_investment_plan: '## 交易计划',
-    final_trade_decision: '## 最终交易决策',
+    market_report: '市场分析报告',
+    sentiment_report: '舆情分析报告',
+    news_report: '新闻分析报告',
+    fundamentals_report: '基本面分析报告',
+    investment_plan: '研究团队投资计划',
+    trader_investment_plan: '交易员计划',
+    final_trade_decision: '最终交易决策',
+}
+
+const SECTION_ICONS: Record<string, string> = {
+    market_report: '📈',
+    sentiment_report: '💬',
+    news_report: '📰',
+    fundamentals_report: '📊',
+    investment_plan: '🧠',
+    trader_investment_plan: '💼',
+    final_trade_decision: '⚖️',
+}
+
+function ReportCard({
+    section,
+    content,
+    streaming,
+    onOpen,
+}: {
+    section: string
+    content: string
+    streaming: boolean
+    onOpen: () => void
+}) {
+    const title = REPORT_SECTION_TITLES[section] || section
+    const icon = SECTION_ICONS[section] || '📄'
+    const preview = content.replace(/^#+\s*/gm, '').replace(/\*\*/g, '').slice(0, 80)
+
+    if (streaming) {
+        return (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-sm">
+                <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin shrink-0" />
+                <span className="text-blue-300 font-medium">{icon} {title}</span>
+                <span className="text-slate-500 text-xs ml-auto">撰写中...</span>
+            </div>
+        )
+    }
+
+    return (
+        <button
+            onClick={onOpen}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-slate-800/60 border border-slate-700/50 hover:border-blue-500/40 hover:bg-slate-800 transition-all text-left group"
+        >
+            <span className="text-base shrink-0">{icon}</span>
+            <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-slate-200 group-hover:text-blue-300 transition-colors">{title}</p>
+                <p className="text-xs text-slate-500 truncate mt-0.5">{preview}...</p>
+            </div>
+            <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-blue-400 shrink-0 transition-colors" />
+        </button>
+    )
 }
 
 export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: ChatCopilotPanelProps) {
@@ -53,7 +102,8 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
     const [streaming, setStreaming] = useState(false)
     const [showConfig, setShowConfig] = useState(false)
     const [selectedAnalysts, setSelectedAnalysts] = useState<string[]>(['market', 'social', 'news', 'fundamentals'])
-    const [streamingReport, setStreamingReport] = useState<Record<string, string>>({})
+    // track which section IDs have been added to chatMessages and whether they're done
+    const streamingReportIds = useRef<Map<string, boolean>>(new Map()) // section → isComplete
     const messagesEndRef = useRef<HTMLDivElement>(null)
 
     const {
@@ -65,14 +115,15 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
         updateAgentSnapshot,
         addAgentReport,
         addChatMessage,
+        appendToChatMessage,
         setReport,
+        setStructuredData,
         reset,
     } = useAnalysisStore()
 
-    // Auto-scroll to bottom
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }, [chatMessages, streamingReport])
+    }, [chatMessages])
 
     const toggleAnalyst = (id: string) => {
         setSelectedAnalysts((prev) =>
@@ -98,13 +149,6 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
         })
     }
 
-    const updateStreamingReport = (section: string, chunk: string) => {
-        setStreamingReport((prev) => ({
-            ...prev,
-            [section]: (prev[section] || '') + chunk,
-        }))
-    }
-
     const parseAndDispatch = (event: StreamEvent) => {
         const { event: eventName, data } = event
         switch (eventName) {
@@ -118,7 +162,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
                 if (jobId) setCurrentJobId(jobId)
                 if (symbol) onSymbolDetected(symbol)
                 pushSystem(`已启动分析：${symbol} @ ${tradeDate}`)
-                setStreamingReport({})
+                streamingReportIds.current.clear()
                 break
             }
             case 'job.running':
@@ -127,6 +171,13 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
             case 'job.completed':
                 setIsAnalyzing(false)
                 setReport((data.result || null) as AnalysisReport | null)
+                setStructuredData({
+                    riskItems: data.risk_items as never,
+                    keyMetrics: data.key_metrics as never,
+                    confidence: data.confidence as number | null,
+                    targetPrice: data.target_price as number | null,
+                    stopLoss: data.stop_loss_price as number | null,
+                })
                 pushAssistant(`**分析完成**\n\n最终建议：**${String(data.decision || 'HOLD')}**`)
                 break
             case 'job.failed':
@@ -144,7 +195,36 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
                 break
             case 'agent.report.chunk': {
                 const chunkData = data as unknown as ReportChunkEvent
-                updateStreamingReport(chunkData.section, chunkData.chunk)
+                const { section, chunk, is_complete } = chunkData
+                const msgId = `stream:${section}`
+
+                if (!streamingReportIds.current.has(section)) {
+                    // First chunk → create new report message in the flow
+                    streamingReportIds.current.set(section, false)
+                    addChatMessage({
+                        id: msgId,
+                        role: 'report',
+                        section,
+                        content: chunk,
+                        complete: false,
+                        timestamp: new Date().toISOString(),
+                    })
+                } else if (!is_complete) {
+                    // Subsequent chunks → append
+                    appendToChatMessage(msgId, chunk)
+                }
+
+                if (is_complete) {
+                    streamingReportIds.current.set(section, true)
+                    // Mark the message as complete in the store
+                    // We update by replacing the message content isn't needed —
+                    // we track completion via a local completed set
+                    useAnalysisStore.setState(state => ({
+                        chatMessages: state.chatMessages.map(m =>
+                            m.id === msgId ? { ...m, complete: true } : m
+                        )
+                    }))
+                }
                 break
             }
             case 'agent.tool_call': {
@@ -155,7 +235,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
             }
             case 'agent.writing': {
                 const writingData = data as unknown as AgentWritingEvent
-                pushSystem(`${writingData.agent}：正在撰写${writingData.report_name}...`)
+                pushSystem(`${writingData.agent}：正在撰写 ${writingData.report_name}...`)
                 break
             }
             case 'agent.milestone': {
@@ -177,9 +257,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
             selectedAnalysts,
         )
 
-        if (!response.body) {
-            throw new Error('SSE stream unavailable')
-        }
+        if (!response.body) throw new Error('SSE stream unavailable')
 
         const reader = response.body.getReader()
         const decoder = new TextDecoder()
@@ -200,11 +278,8 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
                 for (const raw of lines) {
                     const line = raw.trim()
                     if (!line) continue
-                    if (line.startsWith('event:')) {
-                        currentEvent = line.slice(6).trim()
-                    } else if (line.startsWith('data:')) {
-                        dataLine = line.slice(5).trim()
-                    }
+                    if (line.startsWith('event:')) currentEvent = line.slice(6).trim()
+                    else if (line.startsWith('data:')) dataLine = line.slice(5).trim()
                 }
 
                 if (!dataLine) continue
@@ -241,10 +316,10 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
         })
 
         reset()
+        streamingReportIds.current.clear()
         setStreaming(true)
         setIsAnalyzing(true)
         setIsConnected(false)
-        setStreamingReport({})
 
         try {
             await streamChat(prompt)
@@ -257,6 +332,8 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
         }
     }
 
+    const hasAnyReport = chatMessages.some(m => m.role === 'report')
+
     return (
         <aside className="card h-full min-h-0 flex flex-col overflow-hidden">
             <div className="flex items-center justify-between mb-3">
@@ -265,9 +342,9 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
                     <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">智能分析</h2>
                 </div>
                 <div className="flex items-center gap-2">
-                    {onShowReport && Object.keys(streamingReport).length > 0 && (
+                    {onShowReport && hasAnyReport && (
                         <button
-                            onClick={onShowReport}
+                            onClick={() => onShowReport()}
                             className="text-xs px-2 py-1 rounded bg-blue-100 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 hover:bg-blue-200 dark:hover:bg-blue-500/30 transition-colors flex items-center gap-1"
                         >
                             <FileText className="w-3 h-3" />
@@ -338,77 +415,65 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
             </div>
 
             {/* 聊天内容 */}
-            <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1">
-                {chatMessages.map((msg) => (
-                    <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                        <div
-                            className={`max-w-[92%] rounded-xl px-3 py-2 text-sm leading-relaxed ${
-                                msg.role === 'user'
-                                    ? 'bg-blue-100 dark:bg-blue-500/20 border border-blue-300 dark:border-blue-500/30 text-slate-900 dark:text-slate-100'
-                                    : msg.role === 'system'
-                                        ? 'bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 italic'
-                                        : 'bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
-                            }`}
-                        >
-                            {msg.role === 'user' ? (
-                                msg.content
-                            ) : (
-                                <div className="prose dark:prose-invert prose-sm max-w-none">
-                                    <ReactMarkdown
-                                        remarkPlugins={[remarkGfm]}
-                                        components={{
-                                            table: ({ children }) => (
-                                                <table className="w-full border-collapse border border-slate-300 dark:border-slate-600 my-2 text-xs">
-                                                    {children}
-                                                </table>
-                                            ),
-                                            thead: ({ children }) => (
-                                                <thead className="bg-slate-100 dark:bg-slate-700">
-                                                    {children}
-                                                </thead>
-                                            ),
-                                            th: ({ children }) => (
-                                                <th className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-left font-semibold text-slate-700 dark:text-slate-300">
-                                                    {children}
-                                                </th>
-                                            ),
-                                            td: ({ children }) => (
-                                                <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-slate-600 dark:text-slate-400">
-                                                    {children}
-                                                </td>
-                                            ),
-                                            tr: ({ children }) => (
-                                                <tr className="even:bg-slate-50 dark:even:bg-slate-800/50">
-                                                    {children}
-                                                </tr>
-                                            ),
-                                        }}
-                                    >
-                                        {msg.content}
-                                    </ReactMarkdown>
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                ))}
+            <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
+                {chatMessages.map((msg) => {
+                    // Report card
+                    if (msg.role === 'report' && msg.section) {
+                        return (
+                            <ReportCard
+                                key={msg.id}
+                                section={msg.section}
+                                content={msg.content}
+                                streaming={!msg.complete}
+                                onOpen={() => onShowReport?.(msg.section)}
+                            />
+                        )
+                    }
 
-                {/* 流式报告预览 */}
-                {Object.entries(streamingReport).map(([section, content]) => {
-                    if (!content.trim()) return null
-                    const reportContent = `${REPORT_SECTION_TITLES[section] || '## 分析报告'}\n\n${content}`
+                    // Normal messages
                     return (
-                        <div key={section} className="flex justify-start">
-                            <div className="max-w-[92%] rounded-xl px-3 py-2 text-sm leading-relaxed bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/20 text-slate-700 dark:text-slate-300">
-                                <div className="prose dark:prose-invert prose-sm max-w-none">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                        {reportContent}
-                                    </ReactMarkdown>
-                                </div>
+                        <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                            <div
+                                className={`max-w-[92%] rounded-xl px-3 py-2 text-sm leading-relaxed ${
+                                    msg.role === 'user'
+                                        ? 'bg-blue-100 dark:bg-blue-500/20 border border-blue-300 dark:border-blue-500/30 text-slate-900 dark:text-slate-100'
+                                        : msg.role === 'system'
+                                            ? 'bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700 text-slate-500 dark:text-slate-400 italic text-xs'
+                                            : 'bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300'
+                                }`}
+                            >
+                                {msg.role === 'user' ? (
+                                    msg.content
+                                ) : (
+                                    <div className="prose dark:prose-invert prose-sm max-w-none">
+                                        <ReactMarkdown
+                                            remarkPlugins={[remarkGfm]}
+                                            components={{
+                                                table: ({ children }) => (
+                                                    <table className="w-full border-collapse border border-slate-300 dark:border-slate-600 my-2 text-xs">{children}</table>
+                                                ),
+                                                thead: ({ children }) => (
+                                                    <thead className="bg-slate-100 dark:bg-slate-700">{children}</thead>
+                                                ),
+                                                th: ({ children }) => (
+                                                    <th className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-left font-semibold text-slate-700 dark:text-slate-300">{children}</th>
+                                                ),
+                                                td: ({ children }) => (
+                                                    <td className="border border-slate-300 dark:border-slate-600 px-2 py-1 text-slate-600 dark:text-slate-400">{children}</td>
+                                                ),
+                                                tr: ({ children }) => (
+                                                    <tr className="even:bg-slate-50 dark:even:bg-slate-800/50">{children}</tr>
+                                                ),
+                                            }}
+                                        >
+                                            {msg.content}
+                                        </ReactMarkdown>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     )
                 })}
-
                 <div ref={messagesEndRef} />
             </div>
 

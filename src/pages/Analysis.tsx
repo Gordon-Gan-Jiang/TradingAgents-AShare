@@ -35,7 +35,13 @@ export default function Analysis() {
     const [searchParams] = useSearchParams()
     const [activeSymbol, setActiveSymbol] = useState('000001.SH')
     const [showReport, setShowReport] = useState(false)
+    const [activeSection, setActiveSection] = useState<string | undefined>()
     const { report, jobConfidence, jobTargetPrice, jobStopLoss } = useAnalysisStore()
+
+    const handleShowReport = (section?: string) => {
+        setShowReport(true)
+        setActiveSection(section)
+    }
 
     useEffect(() => {
         const querySymbol = (searchParams.get('symbol') || '').trim()
@@ -73,7 +79,7 @@ export default function Analysis() {
                 <div className="flex-1 min-h-0">
                     <ChatCopilotPanel
                         onSymbolDetected={setActiveSymbol}
-                        onShowReport={() => setShowReport(true)}
+                        onShowReport={handleShowReport}
                     />
                 </div>
             </div>
@@ -107,7 +113,7 @@ export default function Analysis() {
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                             </svg>
                         </button>
-                        <ReportViewer />
+                        <ReportViewer activeSection={activeSection} />
                     </div>
                 ) : (
                     <div className="flex-1 min-h-0 flex items-center justify-center text-slate-400 text-sm card bg-slate-900/30 border-slate-700/30">

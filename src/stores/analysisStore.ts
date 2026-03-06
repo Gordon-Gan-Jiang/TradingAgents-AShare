@@ -19,9 +19,11 @@ import type {
 
 export interface ChatMessage {
     id: string
-    role: 'user' | 'assistant' | 'system'
+    role: 'user' | 'assistant' | 'system' | 'report'
     content: string
     timestamp: string
+    section?: string    // only for role='report'
+    complete?: boolean  // only for role='report'
 }
 
 interface AnalysisState {
@@ -80,6 +82,7 @@ interface AnalysisState {
     setIsAnalyzing: (isAnalyzing: boolean) => void
     setIsConnected: (isConnected: boolean) => void
     addChatMessage: (message: ChatMessage) => void
+    appendToChatMessage: (id: string, chunk: string) => void
     clearChatMessages: () => void
     reset: () => void
 }
@@ -229,6 +232,13 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     // 添加聊天记录（持久化）
     addChatMessage: (message) => set((state) => ({
         chatMessages: [...state.chatMessages, message]
+    })),
+
+    // 追加内容到已有消息（用于流式报告 chunk 更新）
+    appendToChatMessage: (id, chunk) => set((state) => ({
+        chatMessages: state.chatMessages.map(m =>
+            m.id === id ? { ...m, content: m.content + chunk } : m
+        )
     })),
 
     // 清空聊天记录

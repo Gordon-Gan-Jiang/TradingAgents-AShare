@@ -36,9 +36,11 @@ const MD_COMPONENTS = {
 interface ReportViewerProps {
     /** 传入后进入历史报告模式，不读取 store */
     reportData?: ReportDetail
+    /** 自动展开并滚动到指定章节 */
+    activeSection?: string
 }
 
-export default function ReportViewer({ reportData }: ReportViewerProps = {}) {
+export default function ReportViewer({ reportData, activeSection }: ReportViewerProps = {}) {
     const { report, streamingSections, isAnalyzing } = useAnalysisStore()
     const [expandedSections, setExpandedSections] = useState<string[]>([])
     const isHistorical = !!reportData
@@ -84,6 +86,15 @@ export default function ReportViewer({ reportData }: ReportViewerProps = {}) {
     const hasAnyContent = isHistorical
         ? REPORT_SECTIONS.some(s => !!reportData?.[s.key as keyof ReportDetail])
         : Object.keys(streamingSections).length > 0 || (report && Object.values(report).some(v => typeof v === 'string' && v.length > 0))
+
+    // When activeSection changes, expand and scroll to it
+    useEffect(() => {
+        if (!activeSection) return
+        setExpandedSections(prev => prev.includes(activeSection) ? prev : [...prev, activeSection])
+        setTimeout(() => {
+            document.getElementById(`section-${activeSection}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        }, 100)
+    }, [activeSection])
 
     const toggleSection = (key: string) =>
         setExpandedSections(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -150,7 +161,7 @@ export default function ReportViewer({ reportData }: ReportViewerProps = {}) {
                     const isExpanded = expandedSections.includes(section.key)
 
                     return (
-                        <div key={section.key} className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+                        <div key={section.key} id={`section-${section.key}`} className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
                             <button
                                 onClick={() => toggleSection(section.key)}
                                 className="w-full flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
