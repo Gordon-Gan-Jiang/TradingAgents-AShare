@@ -140,11 +140,13 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     setJobStatus: (status) => set({ jobStatus: status }),
 
     updateAgentStatus: (event) => set((state) => ({
-        agents: state.agents.map(agent =>
-            agent.name === event.agent
-                ? { ...agent, status: event.status }
-                : agent
-        )
+        agents: state.agents.map(agent => {
+            if (agent.name !== event.agent) return agent
+            const updates: Partial<Agent> = { status: event.status }
+            if (event.status === 'in_progress' && !agent.startedAt) updates.startedAt = Date.now()
+            if ((event.status === 'completed' || event.status === 'skipped') && !agent.finishedAt) updates.finishedAt = Date.now()
+            return { ...agent, ...updates }
+        })
     })),
 
     updateAgentSnapshot: (event) => set((state) => {

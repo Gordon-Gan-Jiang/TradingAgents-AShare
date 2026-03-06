@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
-import { Save, Server, Key, Database, Loader2 } from 'lucide-react'
+import { Save, Server, Key, Database, Loader2, MessageSquare } from 'lucide-react'
 import { api } from '@/services/api'
 
 export default function Settings() {
     const [apiUrl, setApiUrl] = useState('http://localhost:8000')
     const [apiKey, setApiKey] = useState('')
     const [defaultAnalysts, setDefaultAnalysts] = useState(['market', 'social', 'news', 'fundamentals'])
+    const [customPrompt, setCustomPrompt] = useState('')
 
     // LLM config (synced with backend)
     const [llmProvider, setLlmProvider] = useState('openai')
@@ -32,6 +33,7 @@ export default function Settings() {
                 if (s.apiUrl) setApiUrl(s.apiUrl)
                 if (s.apiKey) setApiKey(s.apiKey)
                 if (s.defaultAnalysts) setDefaultAnalysts(s.defaultAnalysts)
+                if (typeof (s as Record<string, unknown>).customPrompt === 'string') setCustomPrompt((s as Record<string, unknown>).customPrompt as string)
             }
         } catch {}
     }, [])
@@ -61,7 +63,9 @@ export default function Settings() {
             apiUrl,
             apiKey,
             defaultAnalysts,
+            customPrompt,
         }))
+        localStorage.setItem('ta-custom-prompt', customPrompt)
         // Push LLM config to backend
         try {
             await api.updateConfig({
@@ -260,6 +264,27 @@ export default function Settings() {
                             </label>
                         ))}
                     </div>
+                </div>
+            </div>
+
+            {/* Custom Analysis Prompt */}
+            <div className="card space-y-4">
+                <div className="flex items-center gap-2">
+                    <MessageSquare className="w-5 h-5 text-cyan-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">自定义分析提示</h2>
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
+                        追加到每次分析请求
+                    </label>
+                    <textarea
+                        value={customPrompt}
+                        onChange={e => setCustomPrompt(e.target.value)}
+                        className="input w-full min-h-[100px] resize-y"
+                        placeholder="例如：请特别关注技术面支撑位，并结合量价关系分析。尽量给出明确的买卖点建议。"
+                        maxLength={500}
+                    />
+                    <p className="text-xs text-slate-400 mt-1">{customPrompt.length}/500 · 留空则不追加额外提示</p>
                 </div>
             </div>
 

@@ -1,4 +1,4 @@
-import { FileText, Download, Trash2, Search, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react'
+import { FileText, Download, Trash2, Search, ChevronLeft, ChevronRight, Loader2, History } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
 import { api } from '@/services/api'
 import type { Report, ReportDetail } from '@/types'
@@ -57,6 +57,7 @@ export default function Reports() {
     const [detailLoading, setDetailLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [deleting, setDeleting] = useState<string | null>(null)
+    const [symbolHistory, setSymbolHistory] = useState<Report[]>([])
 
     const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -98,9 +99,14 @@ export default function Reports() {
 
     const handleSelectReport = async (report: Report) => {
         setDetailLoading(true)
+        setSymbolHistory([])
         try {
-            const detail = await api.getReport(report.id)
+            const [detail, history] = await Promise.all([
+                api.getReport(report.id),
+                api.getReports(report.symbol, 0, 20),
+            ])
             setSelectedReport(detail)
+            setSymbolHistory(history.reports)
         } catch (err) {
             alert(err instanceof Error ? err.message : '获取报告详情失败')
         } finally {
@@ -128,6 +134,7 @@ export default function Reports() {
             <div className="space-y-6">
                 {/* 返回按钮 + 标题 */}
                 <div className="flex items-center gap-4">
+
                     <button
                         onClick={() => setSelectedReport(null)}
                         className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
@@ -152,6 +159,34 @@ export default function Reports() {
                     <span>分析日期：{selectedReport.trade_date}</span>
                     <span>生成时间：{selectedReport.created_at ? new Date(selectedReport.created_at).toLocaleString('zh-CN') : '-'}</span>
                 </div>
+
+                {/* 历史决策时间线 */}
+                {symbolHistory.length > 1 && (
+                    <div className="card">
+                        <div className="flex items-center gap-2 mb-3">
+                            <History className="w-4 h-4 text-slate-400" />
+                            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">{selectedReport.symbol} 历史决策</h3>
+                        </div>
+                        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                            {symbolHistory.slice().reverse().map(r => {
+                                const { action: a } = parseDecision(r.decision)
+                                const color = a === 'add' ? 'bg-green-500' : a === 'reduce' ? 'bg-red-500' : 'bg-slate-400'
+                                const isCurrent = r.id === selectedReport.id
+                                return (
+                                    <button
+                                        key={r.id}
+                                        onClick={() => !isCurrent && handleSelectReport(r)}
+                                        className={`flex flex-col items-center gap-1 shrink-0 px-2 py-1.5 rounded-lg transition-colors ${isCurrent ? 'bg-blue-50 dark:bg-blue-500/10' : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'}`}
+                                    >
+                                        <div className={`w-3 h-3 rounded-full ${color}`} />
+                                        <span className="text-xs text-slate-500 dark:text-slate-400 whitespace-nowrap">{r.trade_date}</span>
+                                        {r.confidence != null && <span className="text-xs text-slate-400">{r.confidence}%</span>}
+                                    </button>
+                                )
+                            })}
+                        </div>
+                    </div>
+                )}
 
                 {/* 主体：左列决策卡 + K线，右列报告全文 */}
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">

@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'react'
-import { Bell, Monitor, Moon, Sun } from 'lucide-react'
+import { Bell, BellOff, Monitor, Moon, Sun } from 'lucide-react'
 
 type ThemeMode = 'system' | 'light' | 'dark'
 
 export default function Header() {
     const [themeMode, setThemeMode] = useState<ThemeMode>('system')
+    const [notifPermission, setNotifPermission] = useState<NotificationPermission>('default')
 
     useEffect(() => {
         const saved = (localStorage.getItem('ta-theme') || 'system') as ThemeMode
         const mode: ThemeMode = ['system', 'light', 'dark'].includes(saved) ? saved : 'system'
         setThemeMode(mode)
         applyTheme(mode)
+        if ('Notification' in window) setNotifPermission(Notification.permission)
     }, [])
 
     const applyTheme = (mode: ThemeMode) => {
@@ -34,6 +36,16 @@ export default function Header() {
         applyTheme(next)
     }
 
+    const toggleNotifications = async () => {
+        if (!('Notification' in window)) return
+        if (Notification.permission === 'denied') {
+            alert('通知权限已被浏览器拒绝，请在浏览器设置中手动开启')
+            return
+        }
+        const perm = await Notification.requestPermission()
+        setNotifPermission(perm)
+    }
+
     const themeLabel = themeMode === 'system' ? '系统' : themeMode === 'light' ? '浅色' : '深色'
     const ThemeIcon = themeMode === 'system' ? Monitor : themeMode === 'light' ? Sun : Moon
 
@@ -49,9 +61,15 @@ export default function Header() {
                     <span className="text-sm">{themeLabel}</span>
                 </button>
 
-                <button className="relative p-2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800">
-                    <Bell className="w-5 h-5" />
-                    <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full" />
+                <button
+                    onClick={toggleNotifications}
+                    title={notifPermission === 'granted' ? '通知已启用' : notifPermission === 'denied' ? '通知被拒绝' : '点击启用分析完成通知'}
+                    className="relative p-2 text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                    {notifPermission === 'denied' ? <BellOff className="w-5 h-5" /> : <Bell className="w-5 h-5" />}
+                    <span className={`absolute top-1.5 right-1.5 w-2 h-2 rounded-full ${
+                        notifPermission === 'granted' ? 'bg-green-500' : notifPermission === 'denied' ? 'bg-red-500' : 'bg-slate-400'
+                    }`} />
                 </button>
             </div>
         </header>

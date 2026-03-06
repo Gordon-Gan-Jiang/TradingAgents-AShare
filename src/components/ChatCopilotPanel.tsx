@@ -17,6 +17,7 @@ import type {
 interface ChatCopilotPanelProps {
     onSymbolDetected: (symbol: string) => void
     onShowReport?: (section?: string) => void
+    initialInput?: string
 }
 
 const ANALYST_OPTIONS = [
@@ -97,8 +98,8 @@ function ReportCard({
     )
 }
 
-export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: ChatCopilotPanelProps) {
-    const [input, setInput] = useState('')
+export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initialInput }: ChatCopilotPanelProps) {
+    const [input, setInput] = useState(initialInput || '')
     const [streaming, setStreaming] = useState(false)
     const [showConfig, setShowConfig] = useState(false)
     const [selectedAnalysts, setSelectedAnalysts] = useState<string[]>(['market', 'social', 'news', 'fundamentals'])
@@ -179,6 +180,12 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
                     stopLoss: data.stop_loss_price as number | null,
                 })
                 pushAssistant(`**分析完成**\n\n最终建议：**${String(data.decision || 'HOLD')}**`)
+                if ('Notification' in window && Notification.permission === 'granted') {
+                    new Notification('TradingAgents 分析完成', {
+                        body: data.decision ? `建议：${String(data.decision)}` : '点击查看完整报告',
+                        icon: '/favicon.ico',
+                    })
+                }
                 break
             case 'job.failed':
                 setIsAnalyzing(false)
@@ -307,6 +314,10 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
         const prompt = input.trim()
         if (!prompt || streaming) return
 
+        // Inject custom analysis prompt from settings if set
+        const customPrompt = localStorage.getItem('ta-custom-prompt')?.trim() || ''
+        const fullPrompt = customPrompt ? `${prompt}\n\n[分析要求] ${customPrompt}` : prompt
+
         setInput('')
         addChatMessage({
             id: `${Date.now()}-${Math.random()}`,
@@ -322,7 +333,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
         setIsConnected(false)
 
         try {
-            await streamChat(prompt)
+            await streamChat(fullPrompt)
         } catch (error) {
             pushAssistant(`请求失败：${error instanceof Error ? error.message : 'unknown error'}`)
             setIsAnalyzing(false)
@@ -483,8 +494,15 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport }: Cha
                     <input
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={(e) => {
+                            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                                e.preventDefault()
+                                handleSubmit(e as unknown as FormEvent)
+                            }
+                        }}
                         placeholder="直接描述你的分析需求..."
                         className="input flex-1"
+                        title="Enter 发送，Ctrl+Enter 也可发送"
                     />
                     <button
                         type="submit"

@@ -7,6 +7,8 @@ export interface Agent {
     team: string
     status: AgentStatus
     description?: string
+    startedAt?: number
+    finishedAt?: number
 }
 
 export interface AgentTeam {
@@ -241,6 +243,16 @@ export interface ReportDetail extends Report {
 export interface ReportListResponse {
     total: number
     reports: Report[]
+}
+
+// Hot stock from market hot rank
+export interface HotStock {
+    rank: number
+    symbol: string
+    name: string
+    price: number
+    change: number
+    change_pct: number
 }
 
 // Runtime config

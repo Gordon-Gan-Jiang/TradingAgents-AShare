@@ -1,5 +1,5 @@
 import { useAnalysisStore } from '@/stores/analysisStore'
-import type { AgentStatus } from '@/types'
+import type { AgentStatus, Agent } from '@/types'
 import {
     TrendingUp,
     MessageCircle,
@@ -10,7 +10,8 @@ import {
     Briefcase,
     CheckCircle2,
     Loader2,
-    Users
+    Users,
+    Clock
 } from 'lucide-react'
 
 interface AgentInfo {
@@ -32,11 +33,26 @@ const AGENTS: AgentInfo[] = [
     { id: 'Portfolio Manager', name: '组合经理', title: '最终投资决策', icon: <CheckCircle2 className="w-4 h-4" />, color: 'bg-rose-500' },
 ]
 
+function formatDuration(startedAt?: number, finishedAt?: number): string | null {
+    if (!startedAt) return null
+    const end = finishedAt ?? Date.now()
+    const secs = Math.round((end - startedAt) / 1000)
+    if (secs < 60) return `${secs}s`
+    return `${Math.floor(secs / 60)}m${secs % 60}s`
+}
+
 export default function AgentCollaboration() {
     const { agents, isAnalyzing, streamingSections } = useAnalysisStore()
 
     const completedCount = agents.filter(a => a.status === 'completed' || a.status === 'skipped').length
     const totalCount = agents.length
+
+    const getStoreAgent = (agentId: string): Agent | undefined => {
+        if (agentId === 'Risk Analyst') {
+            return agents.find(a => ['Aggressive Analyst', 'Neutral Analyst', 'Conservative Analyst'].includes(a.name))
+        }
+        return agents.find(a => a.name === agentId)
+    }
 
     const getAgentStatus = (agentId: string): AgentStatus => {
         if (agentId === 'Risk Analyst') {
@@ -101,6 +117,9 @@ export default function AgentCollaboration() {
 
                     if (status === 'pending') return null
 
+                    const storeAgent = getStoreAgent(agent.id)
+                    const duration = formatDuration(storeAgent?.startedAt, storeAgent?.finishedAt)
+
                     return (
                         <div key={agent.id} className="flex gap-3">
                             {/* 头像 */}
@@ -130,6 +149,12 @@ export default function AgentCollaboration() {
                                     <div className="flex items-center gap-2 mb-1">
                                         <span className="text-sm font-medium text-slate-800 dark:text-slate-200">{agent.name}</span>
                                         {isCompleted && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />}
+                                        {duration && (
+                                            <span className="ml-auto flex items-center gap-0.5 text-xs text-slate-400">
+                                                <Clock className="w-3 h-3" />
+                                                {duration}
+                                            </span>
+                                        )}
                                     </div>
                                     <p className={`text-xs leading-relaxed ${isActive ? 'text-blue-300' : 'text-slate-400'}`}>
                                         {isActive

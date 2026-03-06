@@ -1,4 +1,4 @@
-import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, HotStock } from '@/types'
 
 export function getBaseUrl(): string {
     try {
@@ -106,6 +106,10 @@ class ApiService {
             method: 'POST',
             body: JSON.stringify(report),
         })
+    }
+
+    async getHotStocks(limit = 30): Promise<{ stocks: HotStock[]; total: number }> {
+        return this.request<{ stocks: HotStock[]; total: number }>(`/v1/market/hot-stocks?limit=${limit}`)
     }
 
     async getConfig(): Promise<RuntimeConfig> {

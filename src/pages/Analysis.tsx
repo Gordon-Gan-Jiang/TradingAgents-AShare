@@ -43,16 +43,26 @@ export default function Analysis() {
         setActiveSection(section)
     }
 
+    const querySymbol = (searchParams.get('symbol') || '').trim().toUpperCase()
+    const initialChatInput = querySymbol ? `分析 ${querySymbol} 今日走势` : undefined
+
     useEffect(() => {
-        const querySymbol = (searchParams.get('symbol') || '').trim()
-        if (!querySymbol) return
-        setActiveSymbol(querySymbol.toUpperCase())
-    }, [searchParams])
+        if (querySymbol) setActiveSymbol(querySymbol)
+    }, [querySymbol])
 
     // 分析完成后自动展开报告面板
     useEffect(() => {
         if (report) setShowReport(true)
     }, [report])
+
+    // Esc 关闭报告面板
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setShowReport(false)
+        }
+        document.addEventListener('keydown', onKeyDown)
+        return () => document.removeEventListener('keydown', onKeyDown)
+    }, [])
 
     const finalDecision = report?.final_trade_decision
     // Prefer LLM-extracted structured values, fall back to regex parsing
@@ -80,6 +90,7 @@ export default function Analysis() {
                     <ChatCopilotPanel
                         onSymbolDetected={setActiveSymbol}
                         onShowReport={handleShowReport}
+                        initialInput={initialChatInput}
                     />
                 </div>
             </div>
