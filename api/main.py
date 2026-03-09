@@ -67,14 +67,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="TradingAgents-AShare API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:5174",
-        "http://localhost:5174",
-        "http://127.0.0.1:5175",
-        "http://localhost:5175",
-        "http://127.0.0.1:5173",
-        "http://localhost:5173",
-    ],
+    allow_origins=_cors_allow_origins(),
+    allow_origin_regex=_cors_allow_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -919,65 +913,106 @@ def _normalize_ths_code(code: str) -> str:
 
 @app.get("/v1/market/hot-stocks")
 def get_hot_stocks(source: str = "em", limit: int = 30) -> Dict:
-    """Return hot A-share stocks.
-    source: 'em' = EastMoney热榜, 'xq' = 雪球热门, 'ths' = 同花顺连涨榜
+    """Return hot A-share stocks from different sources.
+    
+    Args:
+        source: Data source selection
+            - 'em': 东方财富热榜 (EastMoney hot stocks)
+            - 'xq': 雪球热门 (Xueqiu most-followed stocks)
+            - 'ths': 连涨榜 (Consecutive rising stocks, not general hot list)
+        limit: Maximum number of stocks to return
+    
+    Returns:
+        Dict with stocks list, total count, source info, and fallback status
     """
-    try:
-        import akshare as ak
-        stocks = []
+    import akshare as ak
 
-        if source == "em":
-            # EastMoney real-time hot rank
-            df = ak.stock_hot_rank_em().head(limit)
-            for i, (_, row) in enumerate(df.iterrows()):
-                stocks.append({
-                    "rank": i + 1,
-                    "symbol": _normalize_ths_code(str(row.get("代码", ""))),
-                    "name": str(row.get("股票名称", "")),
-                    "price": float(row.get("最新价", 0) or 0),
-                    "change": float(row.get("涨跌额", 0) or 0),
-                    "change_pct": float(row.get("涨跌幅", 0) or 0),
-                    "extra": "",
-                })
+    # 定义数据源尝试顺序（如果主数据源失败，自动尝试备用源）
+    source_configs = {
+        "em": ("stock_hot_rank_em", None, "东方财富热榜"),
+        "xq": ("stock_hot_follow_xq", "最热门", "雪球热门"),
+        "ths": ("stock_rank_lxsz_ths", None, "连涨榜"),
+    }
 
-        elif source == "xq":
-            # Xueqiu most-followed stocks
-            df = ak.stock_hot_follow_xq(symbol="最热门").head(limit)
-            for i, (_, row) in enumerate(df.iterrows()):
-                stocks.append({
-                    "rank": i + 1,
-                    "symbol": _normalize_ths_code(str(row.get("股票代码", ""))),
-                    "name": str(row.get("股票简称", "")),
-                    "price": float(row.get("最新价", 0) or 0),
-                    "change": 0.0,
-                    "change_pct": 0.0,
-                    "extra": f"关注 {int(row.get('关注', 0)):,}",
-                })
+    if source not in source_configs:
+        raise HTTPException(status_code=400, detail=f"Unknown source: {source}")
 
-        elif source == "ths":
-            # THS consecutive-rise ranking (连涨榜 — stocks rising N days in a row)
-            df = ak.stock_rank_lxsz_ths().head(limit)
-            for i, (_, row) in enumerate(df.iterrows()):
-                days = int(row.get("连涨天数", 0) or 0)
-                change_pct = float(row.get("连续涨跌幅", 0) or 0)
-                stocks.append({
-                    "rank": i + 1,
-                    "symbol": _normalize_ths_code(str(row.get("股票代码", ""))),
-                    "name": str(row.get("股票简称", "")),
-                    "price": float(row.get("收盘价", 0) or 0),
-                    "change": 0.0,
-                    "change_pct": change_pct,
-                    "extra": f"连涨{days}天",
-                })
+    # 尝试主数据源，失败则尝试其他源
+    sources_to_try = [source] + [s for s in ["xq", "em", "ths"] if s != source]
+    last_error = None
 
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown source: {source}")
+    for src in sources_to_try:
+        try:
+            func_name, param, desc = source_configs[src]
+            func = getattr(ak, func_name)
 
-        return {"stocks": stocks, "total": len(stocks), "source": source}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            # 调用 akshare 函数
+            if param:
+                df = func(symbol=param).head(limit)
+            else:
+                df = func().head(limit)
+
+            stocks = []
+
+            if src == "em":
+                for i, (_, row) in enumerate(df.iterrows()):
+                    stocks.append({
+                        "rank": i + 1,
+                        "symbol": _normalize_ths_code(str(row.get("代码", ""))),
+                        "name": str(row.get("股票名称", "")),
+                        "price": float(row.get("最新价", 0) or 0),
+                        "change": float(row.get("涨跌额", 0) or 0),
+                        "change_pct": float(row.get("涨跌幅", 0) or 0),
+                        "extra": "",
+                    })
+
+            elif src == "xq":
+                for i, (_, row) in enumerate(df.iterrows()):
+                    stocks.append({
+                        "rank": i + 1,
+                        "symbol": _normalize_ths_code(str(row.get("股票代码", ""))),
+                        "name": str(row.get("股票简称", "")),
+                        "price": float(row.get("最新价", 0) or 0),
+                        "change": 0.0,
+                        "change_pct": 0.0,
+                        "extra": f"关注 {int(row.get('关注', 0)):,}",
+                    })
+
+            elif src == "ths":
+                for i, (_, row) in enumerate(df.iterrows()):
+                    days = int(row.get("连涨天数", 0) or 0)
+                    change_pct = float(row.get("连续涨跌幅", 0) or 0)
+                    stocks.append({
+                        "rank": i + 1,
+                        "symbol": _normalize_ths_code(str(row.get("股票代码", ""))),
+                        "name": str(row.get("股票简称", "")),
+                        "price": float(row.get("收盘价", 0) or 0),
+                        "change": 0.0,
+                        "change_pct": change_pct,
+                        "extra": f"连涨{days}天",
+                    })
+
+            # 成功获取数据
+            fallback_msg = f" (fallback from {source_configs[source][2]})" if src != source else ""
+            print(f"Hot stocks: successfully fetched from {desc}{fallback_msg}")
+            return {
+                "stocks": stocks,
+                "total": len(stocks),
+                "source": src,
+                "requested_source": source,
+                "fallback": src != source,
+            }
+
+        except Exception as e:
+            last_error = e
+            print(f"Hot stocks: {desc} failed - {type(e).__name__}: {str(e)[:100]}")
+            continue
+
+    # 所有数据源都失败
+    raise HTTPException(
+        status_code=503,
+        detail=f"All data sources failed. Last error: {type(last_error).__name__}: {str(last_error)[:200]}"
+    )
 
 
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
