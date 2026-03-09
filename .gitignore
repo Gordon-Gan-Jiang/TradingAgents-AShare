@@ -225,3 +225,9 @@ results/
 
 # Private dirs (not open-source for now)
 docs/
+
+# Local development artifacts
+.DS_Store
+.vscode/
+plans/
+tradingagents.db
