@@ -29,6 +29,12 @@
 ## 项目文档
 - 英文原版：`README.en.md`
 - 变更记录：`CHANGELOG.md`
+- 许可边界：`LICENSING.md`
+
+## 许可说明
+- 上游衍生与混合修改部分继续适用 `Apache-2.0`。
+- 本仓库新增的前端、部署脚本与部分文档采用 `PolyForm Noncommercial 1.0.0`，仅允许非商业用途。
+- 如需商业化运营、托管 SaaS、付费 API 或再分发商业版本，请单独联系维护者授权。
 
 ## 新闻
 - [2026-02] 发布 **TradingAgents v0.2.0**：支持多 LLM 提供方（GPT-5.x、Gemini 3.x、Claude 4.x、Grok 4.x），并改进系统架构。

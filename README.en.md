@@ -4,6 +4,11 @@
 - This repository is a derivative and localized extension based on [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents).
 - Thanks to the original authors for open-sourcing the framework and research.
 
+## Licensing
+- Upstream-derived and mixed derivative parts remain under `Apache-2.0`.
+- Original additions in this fork, especially `frontend/`, `deploy/`, and selected documentation, are licensed under `PolyForm Noncommercial 1.0.0`.
+- See `LICENSING.md` for the directory-level license map.
+
 ## News
 - [2026-02] **TradingAgents v0.2.0** released with multi-provider LLM support (GPT-5.x, Gemini 3.x, Claude 4.x, Grok 4.x) and improved system architecture.
 - [2026-01] **Trading-R1** [Technical Report](https://arxiv.org/abs/2509.11420) released, with [Terminal](https://github.com/TauricResearch/Trading-R1) expected to land soon.
