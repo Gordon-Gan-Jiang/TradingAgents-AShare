@@ -1,10 +1,12 @@
 import { FileText, Download, Trash2, Search, ChevronLeft, ChevronRight, Loader2, History } from 'lucide-react'
 import { useState, useEffect, useCallback } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '@/services/api'
 import type { Report, ReportDetail } from '@/types'
 import DecisionCard from '@/components/DecisionCard'
 import ReportViewer from '@/components/ReportViewer'
 import KlinePanel from '@/components/KlinePanel'
+import { useAuthStore } from '@/stores/authStore'
 
 const parseDecision = (decisionText?: string): { action: 'add' | 'reduce' | 'hold'; label: string } => {
     if (!decisionText) return { action: 'hold', label: '观望' }
@@ -47,6 +49,8 @@ function exportReport(report: ReportDetail) {
 }
 
 export default function Reports() {
+    const { user } = useAuthStore()
+    const [searchParams, setSearchParams] = useSearchParams()
     const PAGE_SIZE = 20
     const [searchQuery, setSearchQuery] = useState('')
     const [page, setPage] = useState(0)
@@ -97,7 +101,7 @@ export default function Reports() {
         }
     }
 
-    const handleSelectReport = async (report: Report) => {
+    const handleSelectReport = async (report: Pick<Report, 'id' | 'symbol'>) => {
         setDetailLoading(true)
         setSymbolHistory([])
         try {
@@ -107,12 +111,29 @@ export default function Reports() {
             ])
             setSelectedReport(detail)
             setSymbolHistory(history.reports)
+            setSearchParams({ report: report.id })
         } catch (err) {
             alert(err instanceof Error ? err.message : '获取报告详情失败')
         } finally {
             setDetailLoading(false)
         }
     }
+
+    useEffect(() => {
+        const reportId = searchParams.get('report')
+        if (!reportId || selectedReport?.id === reportId) return
+        setDetailLoading(true)
+        api.getReport(reportId)
+            .then(async (detail) => {
+                setSelectedReport(detail)
+                const history = await api.getReports(detail.symbol, 0, 20)
+                setSymbolHistory(history.reports)
+            })
+            .catch(err => {
+                alert(err instanceof Error ? err.message : '获取报告详情失败')
+            })
+            .finally(() => setDetailLoading(false))
+    }, [searchParams, selectedReport?.id])
 
     const filteredReports = reports.filter(r =>
         r.symbol.toLowerCase().includes(searchQuery.toLowerCase())
@@ -136,7 +157,10 @@ export default function Reports() {
                 <div className="flex items-center gap-4">
 
                     <button
-                        onClick={() => setSelectedReport(null)}
+                        onClick={() => {
+                            setSelectedReport(null)
+                            setSearchParams({})
+                        }}
                         className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
                     >
                         <ChevronLeft className="w-4 h-4" />
@@ -219,7 +243,7 @@ export default function Reports() {
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">历史报告</h1>
                     <p className="text-slate-500 dark:text-slate-400 mt-1">
-                        共 {total} 份分析报告
+                        {user?.email ? `${user.email} 的私有分析记录 · 共 ${total} 份` : `共 ${total} 份分析报告`}
                     </p>
                 </div>
             </div>

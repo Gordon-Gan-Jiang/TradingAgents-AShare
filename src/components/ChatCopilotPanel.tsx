@@ -110,6 +110,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
     const {
         chatMessages,
         setCurrentJobId,
+        setCurrentSymbol,
         setIsAnalyzing,
         setIsConnected,
         updateAgentStatus,
@@ -162,7 +163,10 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                 const symbol = String(data.symbol || '')
                 const tradeDate = String(data.trade_date || '')
                 if (jobId) setCurrentJobId(jobId)
-                if (symbol) onSymbolDetected(symbol)
+                if (symbol) {
+                    setCurrentSymbol(symbol)
+                    onSymbolDetected(symbol)
+                }
                 pushSystem(`已启动分析：${symbol} @ ${tradeDate}`)
                 streamingReportIds.current.clear()
                 break
@@ -172,6 +176,13 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                 break
             case 'job.completed':
                 setIsAnalyzing(false)
+                if (typeof data.result === 'object' && data.result && 'symbol' in data.result) {
+                    const symbol = String((data.result as Record<string, unknown>).symbol || '')
+                    if (symbol) {
+                        setCurrentSymbol(symbol)
+                        onSymbolDetected(symbol)
+                    }
+                }
                 setReport((data.result || null) as AnalysisReport | null)
                 setStructuredData({
                     riskItems: data.risk_items as never,

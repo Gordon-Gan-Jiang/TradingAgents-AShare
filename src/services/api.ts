@@ -1,13 +1,6 @@
-import type { AnalysisRequest, AnalysisResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, HotStock } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, HotStock } from '@/types'
 
 export function getBaseUrl(): string {
-    try {
-        const stored = localStorage.getItem('tradingagents-settings')
-        if (stored) {
-            const settings = JSON.parse(stored) as { apiUrl?: string }
-            if (settings.apiUrl) return settings.apiUrl.replace(/\/$/, '')
-        }
-    } catch {}
     const envUrl = (import.meta.env.VITE_API_URL as string) || ''
     if (envUrl) return envUrl.replace(/\/$/, '')
     if (typeof window !== 'undefined' && window.location?.origin) {
@@ -19,13 +12,23 @@ export function getBaseUrl(): string {
 // Kept for backward compatibility
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
+function getAuthToken(): string | null {
+    try {
+        return localStorage.getItem('ta-access-token')
+    } catch {
+        return null
+    }
+}
+
 class ApiService {
     private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
         const url = `${getBaseUrl()}${endpoint}`
+        const token = getAuthToken()
         const response = await fetch(url, {
             ...options,
             headers: {
                 'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
                 ...options?.headers,
             },
         })
@@ -67,7 +70,10 @@ class ApiService {
     ) {
         const response = await fetch(`${getBaseUrl()}/v1/chat/completions`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json',
+                ...(getAuthToken() ? { Authorization: `Bearer ${getAuthToken()}` } : {}),
+            },
             body: JSON.stringify({
                 messages,
                 stream,
@@ -121,11 +127,29 @@ class ApiService {
         return this.request<RuntimeConfig>('/v1/config')
     }
 
-    async updateConfig(updates: Partial<RuntimeConfig>): Promise<{ message: string; applied: Partial<RuntimeConfig>; current: RuntimeConfig }> {
-        return this.request('/v1/config', {
+    async updateConfig(updates: RuntimeConfigUpdate): Promise<RuntimeConfigUpdateResponse> {
+        return this.request<RuntimeConfigUpdateResponse>('/v1/config', {
             method: 'PATCH',
             body: JSON.stringify(updates),
         })
+    }
+
+    async requestLoginCode(email: string): Promise<{ message: string; dev_code?: string }> {
+        return this.request('/v1/auth/request-code', {
+            method: 'POST',
+            body: JSON.stringify({ email }),
+        })
+    }
+
+    async verifyLoginCode(email: string, code: string): Promise<AuthVerifyResponse> {
+        return this.request('/v1/auth/verify-code', {
+            method: 'POST',
+            body: JSON.stringify({ email, code }),
+        })
+    }
+
+    async getMe(): Promise<AuthUser> {
+        return this.request('/v1/auth/me')
     }
 }
 

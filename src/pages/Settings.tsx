@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react'
-import { Save, Server, Key, Database, Loader2, MessageSquare } from 'lucide-react'
+import { Save, Key, Database, Loader2, MessageSquare, User, Trash2 } from 'lucide-react'
 import { api } from '@/services/api'
+import { useAuthStore } from '@/stores/authStore'
 
 export default function Settings() {
-    const [apiUrl, setApiUrl] = useState('http://localhost:8000')
-    const [apiKey, setApiKey] = useState('')
+    const { user } = useAuthStore()
     const [defaultAnalysts, setDefaultAnalysts] = useState(['market', 'social', 'news', 'fundamentals'])
     const [customPrompt, setCustomPrompt] = useState('')
+    const [llmApiKey, setLlmApiKey] = useState('')
+    const [hasStoredApiKey, setHasStoredApiKey] = useState(false)
 
     // LLM config (synced with backend)
     const [llmProvider, setLlmProvider] = useState('openai')
@@ -25,15 +27,15 @@ export default function Settings() {
         try {
             const stored = localStorage.getItem('tradingagents-settings')
             if (stored) {
-                const s = JSON.parse(stored) as {
-                    apiUrl?: string
-                    apiKey?: string
+                const s = JSON.parse(stored) as Record<string, unknown> & {
                     defaultAnalysts?: string[]
                 }
-                if (s.apiUrl) setApiUrl(s.apiUrl)
-                if (s.apiKey) setApiKey(s.apiKey)
+                if ('apiUrl' in s) {
+                    delete s.apiUrl
+                    localStorage.setItem('tradingagents-settings', JSON.stringify(s))
+                }
                 if (s.defaultAnalysts) setDefaultAnalysts(s.defaultAnalysts)
-                if (typeof (s as Record<string, unknown>).customPrompt === 'string') setCustomPrompt((s as Record<string, unknown>).customPrompt as string)
+                if (typeof s.customPrompt === 'string') setCustomPrompt(s.customPrompt)
             }
         } catch {}
     }, [])
@@ -49,36 +51,54 @@ export default function Settings() {
                 setQuickThinkLlm(cfg.quick_think_llm)
                 setMaxDebateRounds(cfg.max_debate_rounds)
                 setMaxRiskRounds(cfg.max_risk_discuss_rounds)
+                setHasStoredApiKey(!!cfg.has_api_key)
             })
             .catch(err => {
                 setConfigError(err instanceof Error ? err.message : '无法连接到后端')
             })
             .finally(() => setConfigLoading(false))
-    }, [apiUrl])
+    }, [])
 
     const handleSave = async () => {
         setSaving(true)
         // Save local settings
         localStorage.setItem('tradingagents-settings', JSON.stringify({
-            apiUrl,
-            apiKey,
             defaultAnalysts,
             customPrompt,
         }))
         localStorage.setItem('ta-custom-prompt', customPrompt)
         // Push LLM config to backend
         try {
-            await api.updateConfig({
+            const response = await api.updateConfig({
                 llm_provider: llmProvider,
                 deep_think_llm: deepThinkLlm,
                 quick_think_llm: quickThinkLlm,
                 max_debate_rounds: maxDebateRounds,
                 max_risk_discuss_rounds: maxRiskRounds,
+                api_key: llmApiKey || undefined,
             })
+            setHasStoredApiKey(!!response.has_api_key)
+            setLlmApiKey('')
             setSaved(true)
             setTimeout(() => setSaved(false), 2000)
         } catch (err) {
             alert(err instanceof Error ? err.message : '保存配置失败')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    const handleClearApiKey = async () => {
+        if (!hasStoredApiKey) return
+        setSaving(true)
+        try {
+            const response = await api.updateConfig({ clear_api_key: true })
+            setHasStoredApiKey(!!response.has_api_key)
+            setLlmApiKey('')
+            setSaved(true)
+            setTimeout(() => setSaved(false), 2000)
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '清除密钥失败')
         } finally {
             setSaving(false)
         }
@@ -94,46 +114,17 @@ export default function Settings() {
         <div className="space-y-6 max-w-3xl">
             <div>
                 <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">系统设置</h1>
-                <p className="text-slate-500 dark:text-slate-400 mt-1">配置 API 连接和分析参数</p>
+                <p className="text-slate-500 dark:text-slate-400 mt-1">配置当前账户的分析参数与私有模型</p>
             </div>
 
-            {/* API Connection */}
-            <div className="card space-y-4">
+            <div className="card space-y-3">
                 <div className="flex items-center gap-2">
-                    <Server className="w-5 h-5 text-blue-500" />
-                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">API 配置</h2>
+                    <User className="w-5 h-5 text-cyan-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">账户空间</h2>
                 </div>
-
-                <div>
-                    <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
-                        API 地址
-                    </label>
-                    <input
-                        type="text"
-                        value={apiUrl}
-                        onChange={e => setApiUrl(e.target.value)}
-                        className="input w-full"
-                        placeholder="http://localhost:8000"
-                    />
-                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                        TradingAgents FastAPI 后端服务地址
-                    </p>
-                </div>
-
-                <div>
-                    <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
-                        API Key（可选）
-                    </label>
-                    <div className="relative">
-                        <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                            type="password"
-                            value={apiKey}
-                            onChange={e => setApiKey(e.target.value)}
-                            className="input w-full pl-10"
-                            placeholder="输入 API Key"
-                        />
-                    </div>
+                <div className="text-sm text-slate-600 dark:text-slate-300">
+                    <div>当前登录：{user?.email || '-'}</div>
+                    <div className="mt-1 text-slate-500 dark:text-slate-400">报告历史、分析任务和模型配置仅当前账户可见。</div>
                 </div>
             </div>
 
@@ -194,6 +185,37 @@ export default function Settings() {
                             placeholder="e.g. gpt-4o-mini"
                             disabled={configLoading}
                         />
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
+                            用户模型 Key
+                        </label>
+                        <div className="relative">
+                            <Key className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                            <input
+                                type="password"
+                                value={llmApiKey}
+                                onChange={e => setLlmApiKey(e.target.value)}
+                                className="input w-full pl-10"
+                                placeholder={hasStoredApiKey ? '已保存，留空则保持不变' : '输入你的模型 API Key'}
+                                disabled={configLoading}
+                            />
+                        </div>
+                        {hasStoredApiKey && (
+                            <div className="mt-1 flex items-center justify-between gap-3">
+                                <p className="text-xs text-emerald-500">当前账户已保存私有模型密钥</p>
+                                <button
+                                    type="button"
+                                    onClick={handleClearApiKey}
+                                    disabled={saving}
+                                    className="inline-flex items-center gap-1 text-xs text-rose-500 hover:text-rose-600 disabled:opacity-50"
+                                >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                    清除密钥
+                                </button>
+                            </div>
+                        )}
                     </div>
 
                     <div>

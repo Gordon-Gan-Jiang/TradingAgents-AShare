@@ -33,22 +33,28 @@ function extractPrice(text: string | undefined, type: 'target' | 'stop'): number
 
 export default function Analysis() {
     const [searchParams] = useSearchParams()
-    const [activeSymbol, setActiveSymbol] = useState('000001.SH')
+    const querySymbol = (searchParams.get('symbol') || '').trim().toUpperCase()
+    const [activeSymbol, setActiveSymbol] = useState(() => querySymbol || useAnalysisStore.getState().currentSymbol || '000001.SH')
     const [activeSection, setActiveSection] = useState<string | undefined>()
     const reportRef = useRef<HTMLDivElement | null>(null)
-    const { report, jobConfidence, jobTargetPrice, jobStopLoss } = useAnalysisStore()
+    const { report, currentSymbol, setCurrentSymbol, jobConfidence, jobTargetPrice, jobStopLoss } = useAnalysisStore()
 
     const handleShowReport = (section?: string) => {
         setActiveSection(section)
         reportRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
 
-    const querySymbol = (searchParams.get('symbol') || '').trim().toUpperCase()
     const initialChatInput = querySymbol ? `分析 ${querySymbol} 今日走势` : undefined
 
     useEffect(() => {
         if (querySymbol) setActiveSymbol(querySymbol)
     }, [querySymbol])
+
+    useEffect(() => {
+        if (currentSymbol) {
+            setActiveSymbol(currentSymbol)
+        }
+    }, [currentSymbol])
 
     const finalDecision = report?.final_trade_decision
     // Prefer LLM-extracted structured values, fall back to regex parsing
@@ -61,7 +67,10 @@ export default function Analysis() {
             <aside className="h-[calc(100vh-5rem)] sticky top-0 flex flex-col gap-4">
                 <div className="min-h-0 flex-1">
                     <ChatCopilotPanel
-                        onSymbolDetected={setActiveSymbol}
+                        onSymbolDetected={(symbol) => {
+                            setActiveSymbol(symbol)
+                            setCurrentSymbol(symbol)
+                        }}
                         onShowReport={handleShowReport}
                         initialInput={initialChatInput}
                     />
@@ -72,7 +81,10 @@ export default function Analysis() {
                 <div className="h-[360px]">
                     <KlinePanel
                         symbol={activeSymbol}
-                        onSymbolChange={setActiveSymbol}
+                        onSymbolChange={(symbol) => {
+                            setActiveSymbol(symbol)
+                            setCurrentSymbol(symbol)
+                        }}
                     />
                 </div>
 

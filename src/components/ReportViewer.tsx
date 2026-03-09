@@ -208,11 +208,8 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
                 })}
 
                 {!isHistorical && isAnalyzing && !hasAnyContent && (
-                    <div className="flex items-center justify-center py-12">
-                        <div className="text-center">
-                            <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-                            <p className="text-slate-500 dark:text-slate-400">正在生成报告...</p>
-                        </div>
+                    <div className="flex items-center justify-center py-10 text-sm text-slate-400 dark:text-slate-500">
+                        等待首个章节输出...
                     </div>
                 )}
             </div>

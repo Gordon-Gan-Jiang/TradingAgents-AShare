@@ -29,6 +29,7 @@ export interface ChatMessage {
 interface AnalysisState {
     // Current Job
     currentJobId: string | null
+    currentSymbol: string
     jobStatus: JobStatus | null
 
     // Agents
@@ -62,6 +63,7 @@ interface AnalysisState {
 
     // Actions
     setCurrentJobId: (jobId: string | null) => void
+    setCurrentSymbol: (symbol: string) => void
     setJobStatus: (status: JobStatus | null) => void
     updateAgentStatus: (event: AgentStatusEvent) => void
     updateAgentSnapshot: (event: AgentSnapshotEvent) => void
@@ -84,6 +86,7 @@ interface AnalysisState {
     addChatMessage: (message: ChatMessage) => void
     appendToChatMessage: (id: string, chunk: string) => void
     clearChatMessages: () => void
+    clearSession: () => void
     reset: () => void
 }
 
@@ -113,6 +116,7 @@ const initialAgents: Agent[] = [
 
 export const useAnalysisStore = create<AnalysisState>((set) => ({
     currentJobId: null,
+    currentSymbol: '000001.SH',
     jobStatus: null,
     agents: initialAgents,
     report: null,
@@ -136,6 +140,8 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     isConnected: false,
 
     setCurrentJobId: (jobId) => set({ currentJobId: jobId }),
+
+    setCurrentSymbol: (symbol) => set({ currentSymbol: symbol }),
 
     setJobStatus: (status) => set({ jobStatus: status }),
 
@@ -255,11 +261,40 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
         ]
     }),
 
+    clearSession: () => set({
+        currentJobId: null,
+        currentSymbol: '000001.SH',
+        jobStatus: null,
+        agents: initialAgents.map(a => ({ ...a, status: 'pending' })),
+        report: null,
+        riskItems: [],
+        keyMetrics: [],
+        jobConfidence: null,
+        jobTargetPrice: null,
+        jobStopLoss: null,
+        streamingSections: {},
+        milestones: [],
+        chatMessages: [
+            {
+                id: 'init',
+                role: 'assistant',
+                content: '我是你的 A 股多智能体投研助手。直接告诉我你想分析的标的和日期。',
+                timestamp: new Date().toISOString(),
+            },
+        ],
+        logs: [],
+        isAnalyzing: false,
+        isConnected: false,
+    }),
+
     addLog: (log) => set((state) => ({
         logs: [log, ...state.logs].slice(0, 100)
     })),
 
-    setReport: (report) => set({ report }),
+    setReport: (report) => set((state) => ({
+        report,
+        currentSymbol: report?.symbol || state.currentSymbol,
+    })),
 
     setStructuredData: (data) => set({
         riskItems: data.riskItems ?? [],
@@ -273,8 +308,9 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
 
     setIsConnected: (isConnected) => set({ isConnected }),
 
-    reset: () => set({
+    reset: () => set((state) => ({
         currentJobId: null,
+        currentSymbol: state.currentSymbol,
         jobStatus: null,
         agents: initialAgents.map(a => ({ ...a, status: 'pending' })),
         report: null,
@@ -289,5 +325,5 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
         logs: [],
         isAnalyzing: false,
         isConnected: false
-    })
+    }))
 }))

@@ -264,4 +264,36 @@ export interface RuntimeConfig {
     backend_url: string
     max_debate_rounds: number
     max_risk_discuss_rounds: number
+    has_api_key?: boolean
+}
+
+export interface RuntimeConfigUpdateResponse {
+    message: string
+    applied: RuntimeConfigUpdate
+    has_api_key: boolean
+    current: RuntimeConfig
+}
+
+export interface RuntimeConfigUpdate {
+    llm_provider?: string
+    deep_think_llm?: string
+    quick_think_llm?: string
+    backend_url?: string
+    max_debate_rounds?: number
+    max_risk_discuss_rounds?: number
+    api_key?: string
+    clear_api_key?: boolean
+}
+
+export interface AuthUser {
+    id: string
+    email: string
+    created_at?: string
+    last_login_at?: string
+}
+
+export interface AuthVerifyResponse {
+    access_token: string
+    token_type: string
+    user: AuthUser
 }

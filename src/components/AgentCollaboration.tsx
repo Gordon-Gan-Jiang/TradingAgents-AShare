@@ -55,27 +55,36 @@ interface AgentCollaborationProps {
 }
 
 export default function AgentCollaboration({ onSelectSection }: AgentCollaborationProps) {
-    const { agents, isAnalyzing } = useAnalysisStore()
+    const { agents, isAnalyzing, streamingSections, report } = useAnalysisStore()
 
     const cards = useMemo(() => {
         return META.map((meta) => {
             const agent = agents.find(item => item.name === meta.name)
+            const streamingState = meta.section ? streamingSections[meta.section] : undefined
+            const reportContent = meta.section ? (report?.[meta.section as keyof typeof report] as string | undefined) : undefined
+            const previewSource = streamingState?.displayed || reportContent || ''
+            const preview = previewSource
+                .replace(/^#+\s*/gm, '')
+                .replace(/\*\*/g, '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 52)
             return {
                 ...meta,
                 status: agent?.status || 'pending',
+                isSectionStreaming: !!streamingState?.isTyping,
+                hasSectionContent: !!previewSource,
+                preview,
             }
         })
-    }, [agents])
+    }, [agents, report, streamingSections])
 
     const completedCount = cards.filter(card => card.status === 'completed' || card.status === 'skipped').length
 
     return (
         <section className="card">
             <div className="flex items-center justify-between mb-3">
-                <div>
-                    <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">多智能体协作</h3>
-                    <p className="text-sm text-slate-500 dark:text-slate-400">状态层，不抢占主视图</p>
-                </div>
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">研究进程</h3>
                 <div className="flex items-center gap-3">
                     <span className="text-sm text-slate-500 dark:text-slate-400">{completedCount}/12</span>
                     {isAnalyzing && (
@@ -109,6 +118,23 @@ export default function AgentCollaboration({ onSelectSection }: AgentCollaborati
                             </div>
                             <div className="text-sm font-medium text-slate-900 dark:text-slate-100">{card.label}</div>
                             <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{card.short}</div>
+
+                            {(card.isSectionStreaming || card.hasSectionContent) && (
+                                <div className={`mt-3 rounded-xl border px-2.5 py-2 text-[11px] leading-5 ${
+                                    card.isSectionStreaming
+                                        ? 'border-blue-200 bg-blue-50/80 text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300'
+                                        : 'border-slate-200 bg-slate-50 text-slate-600 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300'
+                                }`}>
+                                    {card.isSectionStreaming ? (
+                                        <div className="flex items-center gap-1.5">
+                                            <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                                            <span>{card.preview || '正在生成报告...'}</span>
+                                        </div>
+                                    ) : (
+                                        <span>{card.preview || '报告已生成'}</span>
+                                    )}
+                                </div>
+                            )}
                         </button>
                     )
                 })}

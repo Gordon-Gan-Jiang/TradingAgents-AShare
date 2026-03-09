@@ -4,9 +4,11 @@ import { useNavigate } from 'react-router-dom'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { api } from '@/services/api'
 import type { Report } from '@/types'
+import { useAuthStore } from '@/stores/authStore'
 
 export default function Dashboard() {
     const { agents, isAnalyzing, isConnected } = useAnalysisStore()
+    const { user } = useAuthStore()
     const [reportTotal, setReportTotal] = useState<number | null>(null)
     const [recentReports, setRecentReports] = useState<Report[]>([])
     const navigate = useNavigate()
@@ -21,7 +23,7 @@ export default function Dashboard() {
                 setRecentReports(res.reports)
             })
             .catch(() => setReportTotal(null))
-    }, [])
+    }, [user?.id])
 
     return (
         <div className="space-y-6">
@@ -30,7 +32,7 @@ export default function Dashboard() {
                 <div>
                     <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">控制台</h1>
                     <p className="text-slate-500 dark:text-slate-400 mt-1">
-                        欢迎使用 TradingAgents 智能分析系统
+                        {user?.email ? `当前账户：${user.email}` : '欢迎使用 TradingAgents 智能分析系统'}
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -126,7 +128,7 @@ export default function Dashboard() {
                                 <div
                                     key={report.id}
                                     className="flex items-center justify-between py-3 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50 -mx-4 px-4 transition-colors"
-                                    onClick={() => navigate('/reports')}
+                                    onClick={() => navigate(`/reports?report=${report.id}`)}
                                 >
                                     <div className="flex items-center gap-3">
                                         <div className="w-8 h-8 rounded-lg bg-blue-100 dark:bg-blue-500/10 flex items-center justify-center">
