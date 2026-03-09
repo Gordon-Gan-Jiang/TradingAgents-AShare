@@ -8,7 +8,12 @@ export function getBaseUrl(): string {
             if (settings.apiUrl) return settings.apiUrl.replace(/\/$/, '')
         }
     } catch {}
-    return (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000'
+    const envUrl = (import.meta.env.VITE_API_URL as string) || ''
+    if (envUrl) return envUrl.replace(/\/$/, '')
+    if (typeof window !== 'undefined' && window.location?.origin) {
+        return window.location.origin.replace(/\/$/, '')
+    }
+    return 'http://localhost:8000'
 }
 
 // Kept for backward compatibility
