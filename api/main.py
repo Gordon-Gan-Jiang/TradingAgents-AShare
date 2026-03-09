@@ -36,6 +36,26 @@ from tradingagents.dataflows.interface import route_to_vendor
 load_dotenv()
 
 
+def _cors_allow_origins() -> list[str]:
+    raw = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+    default_origins = [
+        "http://127.0.0.1:5174",
+        "http://localhost:5174",
+        "http://127.0.0.1:5175",
+        "http://localhost:5175",
+        "http://127.0.0.1:5173",
+        "http://localhost:5173",
+    ]
+    if not raw:
+        return default_origins
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _cors_allow_origin_regex() -> str | None:
+    raw = os.getenv("CORS_ALLOW_ORIGIN_REGEX", "").strip()
+    return raw or None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup."""

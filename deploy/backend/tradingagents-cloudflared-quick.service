@@ -1,0 +1,15 @@
+[Unit]
+Description=TradingAgents A-Share Quick Cloudflare Tunnel
+After=network-online.target tradingagents-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=box
+WorkingDirectory=/home/box/tradingagents-ashare
+ExecStart=/usr/local/bin/cloudflared tunnel --url http://127.0.0.1:8000 --no-autoupdate
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=TradingAgents A-Share API
+After=network.target
+
+[Service]
+Type=simple
+User=box
+WorkingDirectory=/home/box/tradingagents-ashare
+EnvironmentFile=/home/box/tradingagents-ashare/.env.production
+ExecStart=/home/box/tradingagents-ashare/.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
