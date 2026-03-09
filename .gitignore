@@ -231,3 +231,4 @@ docs/
 .vscode/
 plans/
 tradingagents.db
+deploy/deploy.env
