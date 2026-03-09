@@ -35,6 +35,10 @@ dependencies = [
     "baostock>=0.8.9",
     "fastapi>=0.116.1",
     "uvicorn>=0.35.0",
+    "sqlalchemy>=2.0.48",
+    "alembic>=1.18.4",
+    "python-jose[cryptography]>=3.5.0",
+    "passlib[bcrypt]>=1.7.4",
     "playwright>=1.58.0",
 ]
 

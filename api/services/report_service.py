@@ -55,6 +55,7 @@ def extract_structured_data(
             provider=config.get("llm_provider", "openai"),
             model=config.get("quick_think_llm", "gpt-4o-mini"),
             base_url=config.get("backend_url"),
+            api_key=config.get("api_key"),
         )
         llm = client.get_llm()
         structured_llm = llm.with_structured_output(StructuredReport)
@@ -185,8 +186,11 @@ def create_report(
     return db_report
 
 
-def get_report(db: Session, report_id: str) -> Optional[ReportDB]:
-    return db.query(ReportDB).filter(ReportDB.id == report_id).first()
+def get_report(db: Session, report_id: str, user_id: Optional[str] = None) -> Optional[ReportDB]:
+    query = db.query(ReportDB).filter(ReportDB.id == report_id)
+    if user_id:
+        query = query.filter(ReportDB.user_id == user_id)
+    return query.first()
 
 
 def get_reports_by_user(
@@ -206,16 +210,22 @@ def get_reports_by_user(
 
 def count_reports(
     db: Session,
+    user_id: Optional[str] = None,
     symbol: Optional[str] = None,
 ) -> int:
     query = db.query(func.count(ReportDB.id))
+    if user_id:
+        query = query.filter(ReportDB.user_id == user_id)
     if symbol:
         query = query.filter(ReportDB.symbol == symbol)
     return query.scalar() or 0
 
 
-def delete_report(db: Session, report_id: str) -> bool:
-    report = db.query(ReportDB).filter(ReportDB.id == report_id).first()
+def delete_report(db: Session, report_id: str, user_id: Optional[str] = None) -> bool:
+    query = db.query(ReportDB).filter(ReportDB.id == report_id)
+    if user_id:
+        query = query.filter(ReportDB.user_id == user_id)
+    report = query.first()
     if report:
         db.delete(report)
         db.commit()

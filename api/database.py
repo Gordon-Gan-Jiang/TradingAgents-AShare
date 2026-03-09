@@ -4,7 +4,7 @@ import os
 from datetime import datetime, timezone
 from typing import Generator
 
-from sqlalchemy import create_engine, Column, String, DateTime, Text, Integer, Float, JSON
+from sqlalchemy import Boolean, create_engine, Column, String, DateTime, Text, Integer, Float, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 # Database URL - default to SQLite for simplicity
@@ -102,3 +102,41 @@ class ReportDB(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class UserDB(Base):
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, index=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    last_login_at = Column(DateTime, nullable=True)
+
+
+class EmailVerificationCodeDB(Base):
+    __tablename__ = "email_verification_codes"
+
+    id = Column(String(36), primary_key=True, index=True)
+    email = Column(String(255), index=True, nullable=False)
+    code_hash = Column(String(255), nullable=False)
+    purpose = Column(String(50), default="login", nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    consumed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class UserLLMConfigDB(Base):
+    __tablename__ = "user_llm_configs"
+
+    user_id = Column(String(36), primary_key=True, index=True)
+    llm_provider = Column(String(50), nullable=True)
+    backend_url = Column(String(500), nullable=True)
+    quick_think_llm = Column(String(255), nullable=True)
+    deep_think_llm = Column(String(255), nullable=True)
+    max_debate_rounds = Column(Integer, nullable=True)
+    max_risk_discuss_rounds = Column(Integer, nullable=True)
+    api_key_encrypted = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

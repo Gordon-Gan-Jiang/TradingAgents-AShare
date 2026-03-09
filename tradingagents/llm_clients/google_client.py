@@ -41,6 +41,8 @@ class GoogleClient(BaseLLMClient):
         for key in ("timeout", "max_retries", "google_api_key", "callbacks"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+        if "api_key" in self.kwargs and "google_api_key" not in llm_kwargs:
+            llm_kwargs["google_api_key"] = self.kwargs["api_key"]
 
         # Map thinking_level to appropriate API param based on model
         # Gemini 3 Pro: low, high

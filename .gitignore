@@ -232,3 +232,5 @@ docs/
 plans/
 tradingagents.db
 deploy/deploy.env
+
+tradingagents.db.bak.*

@@ -17,15 +17,16 @@ from uuid import uuid4
 
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Query
+from fastapi import FastAPI, HTTPException, Depends, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import pandas as pd
 
-from api.database import init_db, get_db, SessionLocal
-from api.services import report_service
+from api.database import UserDB, init_db, get_db, SessionLocal
+from api.services import auth_service, report_service
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -81,6 +82,7 @@ _jobs: Dict[str, Dict[str, Any]] = {}
 # Runtime config overrides via PATCH /v1/config
 _global_config_overrides: Dict[str, Any] = {}
 _job_events: Dict[str, "queue.Queue[Dict[str, Any]]"] = {}
+_auth_scheme = HTTPBearer(auto_error=False)
 
 FIXED_TEAMS = {
     "Analyst Team": [
@@ -200,6 +202,51 @@ class ReportListResponse(BaseModel):
     reports: List[ReportResponse]
 
 
+class UserResponse(BaseModel):
+    id: str
+    email: str
+    created_at: Optional[datetime] = None
+    last_login_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class AuthRequestCodeRequest(BaseModel):
+    email: str
+
+
+class AuthVerifyCodeRequest(BaseModel):
+    email: str
+    code: str
+
+
+class AuthVerifyCodeResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
+class UserRuntimeConfigResponse(BaseModel):
+    llm_provider: str
+    deep_think_llm: str
+    quick_think_llm: str
+    backend_url: str
+    max_debate_rounds: int
+    max_risk_discuss_rounds: int
+    has_api_key: bool = False
+
+
+class UserRuntimeConfigUpdateRequest(BaseModel):
+    llm_provider: Optional[str] = None
+    deep_think_llm: Optional[str] = None
+    quick_think_llm: Optional[str] = None
+    backend_url: Optional[str] = None
+    max_debate_rounds: Optional[int] = None
+    max_risk_discuss_rounds: Optional[int] = None
+    api_key: Optional[str] = None
+    clear_api_key: bool = False
+
+
 def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in overrides.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -209,7 +256,35 @@ def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, An
     return base
 
 
-def _build_runtime_config(overrides: Dict[str, Any]) -> Dict[str, Any]:
+def _user_config_overrides(user_id: Optional[str]) -> Dict[str, Any]:
+    if not user_id:
+        return {}
+    db = SessionLocal()
+    try:
+        user_cfg = auth_service.get_user_llm_config(db, user_id)
+        if not user_cfg:
+            return {}
+        overrides: Dict[str, Any] = {}
+        for key in (
+            "llm_provider",
+            "backend_url",
+            "quick_think_llm",
+            "deep_think_llm",
+            "max_debate_rounds",
+            "max_risk_discuss_rounds",
+        ):
+            value = getattr(user_cfg, key, None)
+            if value is not None:
+                overrides[key] = value
+        api_key = auth_service.decrypt_secret(user_cfg.api_key_encrypted)
+        if api_key:
+            overrides["api_key"] = api_key
+        return overrides
+    finally:
+        db.close()
+
+
+def _build_runtime_config(overrides: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     config = deepcopy(DEFAULT_CONFIG)
 
     # Env defaults (align with main.py behavior)
@@ -219,6 +294,7 @@ def _build_runtime_config(overrides: Dict[str, Any]) -> Dict[str, Any]:
     config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", config["deep_think_llm"])
     config["max_debate_rounds"] = int(os.getenv("MAX_DEBATE_ROUNDS", "1"))
     config["max_risk_discuss_rounds"] = int(os.getenv("MAX_RISK_DISCUSS_ROUNDS", "1"))
+    config["api_key"] = os.getenv("OPENAI_API_KEY", config.get("api_key"))
 
     # Default CN-first provider chain
     config["data_vendors"] = {
@@ -231,9 +307,45 @@ def _build_runtime_config(overrides: Dict[str, Any]) -> Dict[str, Any]:
     # Apply global config overrides (from PATCH /v1/config)
     if _global_config_overrides:
         config = _deep_merge(config, dict(_global_config_overrides))
+    user_overrides = _user_config_overrides(user_id)
+    if user_overrides:
+        config = _deep_merge(config, user_overrides)
     if overrides:
         config = _deep_merge(config, overrides)
     return config
+
+
+def _require_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_auth_scheme),
+    db: Session = Depends(get_db),
+) -> UserDB:
+    if not credentials:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
+    try:
+        payload = auth_service.decode_access_token(credentials.credentials)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录状态已失效")
+    user_id = str(payload.get("sub") or "")
+    user = auth_service.get_user_by_id(db, user_id)
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已停用")
+    return user
+
+
+def _optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_auth_scheme),
+    db: Session = Depends(get_db),
+) -> Optional[UserDB]:
+    if not credentials:
+        return None
+    try:
+        payload = auth_service.decode_access_token(credentials.credentials)
+    except Exception:
+        return None
+    user_id = str(payload.get("sub") or "")
+    if not user_id:
+        return None
+    return auth_service.get_user_by_id(db, user_id)
 
 
 def _set_job(job_key: str, **kwargs) -> None:
@@ -566,7 +678,13 @@ def _generate_tool_description(tool_name: str, tool_args: Dict[str, Any]) -> str
     return f"调用 {tool_name}"
 
 
-def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, save_report: bool = True) -> None:
+def _run_job(
+    job_id: str,
+    request: AnalyzeRequest,
+    stream_events: bool = False,
+    save_report: bool = True,
+    user_id: Optional[str] = None,
+) -> None:
     _set_job(job_id, status="running", started_at=datetime.now().isoformat())
     _emit_job_event(
         job_id,
@@ -576,7 +694,7 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, 
     tracker = AgentProgressTracker(request.selected_analysts, job_id)
     _emit_job_event(job_id, "agent.snapshot", tracker.snapshot())
     try:
-        config = _build_runtime_config(request.config_overrides)
+        config = _build_runtime_config(request.config_overrides, user_id=user_id)
         if request.dry_run:
             result = {
                 "mode": "dry_run",
@@ -723,7 +841,7 @@ def _run_job(job_id: str, request: AnalyzeRequest, stream_events: bool = False, 
                     trade_date=request.trade_date,
                     decision=decision,
                     result_data=result,
-                    user_id=None,  # TODO: 后续添加用户认证后传入 user_id
+                    user_id=user_id,
                     risk_items=risk_items or None,
                     key_metrics=key_metrics or None,
                     confidence_override=structured.confidence if structured else None,
@@ -1030,12 +1148,16 @@ def get_hot_stocks(source: str = "em", limit: int = 30) -> Dict:
 
 
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
-def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
+def analyze(
+    request: AnalyzeRequest,
+    current_user: UserDB = Depends(_require_user),
+) -> AnalyzeResponse:
     job_id = uuid4().hex
     now = datetime.now().isoformat()
     _set_job(
         job_id,
         job_id=job_id,
+        user_id=current_user.id,
         status="pending",
         created_at=now,
         started_at=None,
@@ -1052,16 +1174,24 @@ def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
         "job.created",
         {"job_id": job_id, "symbol": request.symbol, "trade_date": request.trade_date},
     )
-    _executor.submit(_run_job, job_id, request, True)
+    _executor.submit(_run_job, job_id, request, True, True, current_user.id)
     return AnalyzeResponse(job_id=job_id, status="pending", created_at=now)
 
 
-@app.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
-def get_job_status(job_id: str) -> JobStatusResponse:
+def _require_job_owner(job_id: str, current_user: UserDB) -> Dict[str, Any]:
     with _jobs_lock:
         job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
+    owner_id = job.get("user_id")
+    if owner_id and owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@app.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
+def get_job_status(job_id: str, current_user: UserDB = Depends(_require_user)) -> JobStatusResponse:
+    job = _require_job_owner(job_id, current_user)
     return JobStatusResponse(
         job_id=job["job_id"],
         status=job["status"],
@@ -1075,11 +1205,8 @@ def get_job_status(job_id: str) -> JobStatusResponse:
 
 
 @app.get("/v1/jobs/{job_id}/result")
-def get_job_result(job_id: str) -> Dict[str, Any]:
-    with _jobs_lock:
-        job = _jobs.get(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="job not found")
+def get_job_result(job_id: str, current_user: UserDB = Depends(_require_user)) -> Dict[str, Any]:
+    job = _require_job_owner(job_id, current_user)
     if job["status"] != "completed":
         raise HTTPException(status_code=409, detail=f"job status is {job['status']}")
     return {
@@ -1092,10 +1219,8 @@ def get_job_result(job_id: str) -> Dict[str, Any]:
 
 
 @app.get("/v1/jobs/{job_id}/events")
-def stream_job_events(job_id: str):
-    with _jobs_lock:
-        if job_id not in _jobs:
-            raise HTTPException(status_code=404, detail="job not found")
+def stream_job_events(job_id: str, current_user: UserDB = Depends(_require_user)):
+    _require_job_owner(job_id, current_user)
     return StreamingResponse(
         _stream_job_events(job_id),
         media_type="text/event-stream",
@@ -1113,6 +1238,7 @@ def _ai_extract_symbol_and_date(text: str, config: Dict[str, Any]) -> tuple[Opti
             provider=config.get("llm_provider", "openai"),
             model=config.get("quick_think_llm", "gpt-4o-mini"),
             base_url=config.get("backend_url"),
+            api_key=config.get("api_key"),
         )
 
         # 2. Craft a strict extraction prompt
@@ -1148,9 +1274,12 @@ def _ai_extract_symbol_and_date(text: str, config: Dict[str, Any]) -> tuple[Opti
     return None, None
 
 @app.post("/v1/chat/completions")
-def chat_completions(request: ChatCompletionRequest):
+def chat_completions(
+    request: ChatCompletionRequest,
+    current_user: UserDB = Depends(_require_user),
+):
     text = _extract_chat_text(request.messages)
-    config = _build_runtime_config(request.config_overrides)
+    config = _build_runtime_config(request.config_overrides, user_id=current_user.id)
 
     # 仅使用 LLM 解析，避免本地正则误判后缀
     symbol, trade_date = _ai_extract_symbol_and_date(text, config)
@@ -1181,6 +1310,7 @@ def chat_completions(request: ChatCompletionRequest):
     _set_job(
         job_id,
         job_id=job_id,
+        user_id=current_user.id,
         status="pending",
         created_at=now,
         started_at=None,
@@ -1197,7 +1327,7 @@ def chat_completions(request: ChatCompletionRequest):
         "job.created",
         {"job_id": job_id, "symbol": analyze_req.symbol, "trade_date": analyze_req.trade_date},
     )
-    _executor.submit(_run_job, job_id, analyze_req, True)
+    _executor.submit(_run_job, job_id, analyze_req, True, True, current_user.id)
 
     if request.stream:
         return StreamingResponse(
@@ -1233,6 +1363,7 @@ def chat_completions(request: ChatCompletionRequest):
 def create_report_endpoint(
     request: ReportCreateRequest,
     db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
 ):
     """手动创建报告（通常由系统自动调用）."""
     report = report_service.create_report(
@@ -1241,7 +1372,7 @@ def create_report_endpoint(
         trade_date=request.trade_date,
         decision=request.decision,
         result_data=request.result_data,
-        user_id=None,  # TODO: 后续添加用户认证后从 token 中提取
+        user_id=current_user.id,
     )
     return report
 
@@ -1252,12 +1383,13 @@ def list_reports(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
 ):
     """获取报告列表."""
-    total = report_service.count_reports(db=db, symbol=symbol)
+    total = report_service.count_reports(db=db, user_id=current_user.id, symbol=symbol)
     reports = report_service.get_reports_by_user(
         db=db,
-        user_id=None,  # TODO: 后续添加用户认证后从 token 中提取
+        user_id=current_user.id,
         symbol=symbol,
         skip=skip,
         limit=limit,
@@ -1269,9 +1401,10 @@ def list_reports(
 def get_report_endpoint(
     report_id: str,
     db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
 ):
     """获取报告详情."""
-    report = report_service.get_report(db, report_id)
+    report = report_service.get_report(db, report_id, user_id=current_user.id)
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
     return report
@@ -1281,9 +1414,10 @@ def get_report_endpoint(
 def delete_report_endpoint(
     report_id: str,
     db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
 ):
     """删除报告."""
-    success = report_service.delete_report(db, report_id)
+    success = report_service.delete_report(db, report_id, user_id=current_user.id)
     if not success:
         raise HTTPException(status_code=404, detail="报告不存在")
     return {"message": "报告已删除"}
@@ -1352,19 +1486,88 @@ _CONFIG_ALLOWED_KEYS = {
 }
 
 
-@app.get("/v1/config")
-def get_runtime_config():
-    """获取当前运行时配置（含环境变量和动态覆盖）."""
-    cfg = _build_runtime_config({})
-    return {k: cfg[k] for k in _CONFIG_ALLOWED_KEYS if k in cfg}
+def _config_response_for_user(user: Optional[UserDB], db: Session) -> UserRuntimeConfigResponse:
+    cfg = _build_runtime_config({}, user_id=user.id if user else None)
+    user_cfg = auth_service.get_user_llm_config(db, user.id) if user else None
+    return UserRuntimeConfigResponse(
+        llm_provider=cfg["llm_provider"],
+        deep_think_llm=cfg["deep_think_llm"],
+        quick_think_llm=cfg["quick_think_llm"],
+        backend_url=cfg["backend_url"],
+        max_debate_rounds=cfg["max_debate_rounds"],
+        max_risk_discuss_rounds=cfg["max_risk_discuss_rounds"],
+        has_api_key=bool(user_cfg and user_cfg.api_key_encrypted),
+    )
+
+
+@app.post("/v1/auth/request-code")
+def request_login_code(request: AuthRequestCodeRequest, db: Session = Depends(get_db)):
+    email = auth_service.normalize_email(request.email)
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        raise HTTPException(status_code=400, detail="邮箱格式不正确")
+    code = auth_service.upsert_login_code(db, email)
+    dev_code = auth_service.send_login_code(email, code)
+    response = {"message": "验证码已发送"}
+    if dev_code:
+        response["dev_code"] = dev_code
+    return response
+
+
+@app.post("/v1/auth/verify-code", response_model=AuthVerifyCodeResponse)
+def verify_login_code(request: AuthVerifyCodeRequest, db: Session = Depends(get_db)):
+    user = auth_service.verify_login_code(db, request.email, request.code)
+    if not user:
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    access_token = auth_service.create_access_token(user)
+    return AuthVerifyCodeResponse(access_token=access_token, user=user)
+
+
+@app.get("/v1/auth/me", response_model=UserResponse)
+def get_me(current_user: UserDB = Depends(_require_user)):
+    return current_user
+
+
+@app.get("/v1/config", response_model=UserRuntimeConfigResponse)
+def get_runtime_config(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
+):
+    """获取当前用户运行时配置。"""
+    return _config_response_for_user(current_user, db)
 
 
 @app.patch("/v1/config")
-def update_runtime_config(updates: Dict[str, Any] = Body(...)):
-    """更新运行时配置，下次分析时生效."""
-    filtered = {k: v for k, v in updates.items() if k in _CONFIG_ALLOWED_KEYS}
-    _global_config_overrides.update(filtered)
-    return {"message": "配置已更新", "applied": filtered, "current": get_runtime_config()}
+def update_runtime_config(
+    updates: UserRuntimeConfigUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
+):
+    """更新当前用户运行时配置，下次分析时生效。"""
+    row = auth_service.upsert_user_llm_config(
+        db,
+        current_user.id,
+        llm_provider=updates.llm_provider,
+        deep_think_llm=updates.deep_think_llm,
+        quick_think_llm=updates.quick_think_llm,
+        backend_url=updates.backend_url,
+        max_debate_rounds=updates.max_debate_rounds,
+        max_risk_discuss_rounds=updates.max_risk_discuss_rounds,
+        api_key=updates.api_key,
+        clear_api_key=updates.clear_api_key,
+    )
+    filtered = {
+        k: v
+        for k, v in updates.model_dump().items()
+        if v is not None
+        and k != "api_key"
+        and (k in _CONFIG_ALLOWED_KEYS or (k == "clear_api_key" and bool(v)))
+    }
+    return {
+        "message": "用户配置已更新",
+        "applied": filtered,
+        "has_api_key": bool(row.api_key_encrypted),
+        "current": _config_response_for_user(current_user, db),
+    }
 
 
 def run() -> None:
