@@ -528,9 +528,23 @@ def _extract_message_text(content: Any) -> str:
 def _generate_tool_description(tool_name: str, tool_args: Dict[str, Any]) -> str:
     """生成工具调用的可读描述"""
     if tool_name == "get_indicators":
-        indicators = tool_args.get("indicators", [])
-        if indicators:
-            return f"计算 {', '.join(indicators[:3])}{' 等' if len(indicators) > 3 else ''} 指标"
+        indicator = tool_args.get("indicator")
+        if isinstance(indicator, str) and indicator:
+            indicator_map = {
+                "close_50_sma": "50日均线",
+                "close_200_sma": "200日均线",
+                "close_10_ema": "10日EMA",
+                "close_20_ema": "20日EMA",
+                "rsi": "RSI",
+                "macd": "MACD",
+                "boll": "布林中轨",
+                "boll_ub": "布林上轨",
+                "boll_lb": "布林下轨",
+                "atr": "ATR波动率",
+                "vwma": "VWMA量价均线",
+                "obv": "OBV能量潮",
+            }
+            return f"计算 {indicator_map.get(indicator, indicator)}"
         return "获取技术指标"
     elif tool_name == "get_stock_data":
         return "获取股票历史数据"
