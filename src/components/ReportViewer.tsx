@@ -6,13 +6,13 @@ import { useAnalysisStore } from '@/stores/analysisStore'
 import type { ReportDetail } from '@/types'
 
 const REPORT_SECTIONS = [
-    { key: 'market_report', title: '市场分析报告', team: 'Analyst Team' },
-    { key: 'sentiment_report', title: '舆情分析报告', team: 'Analyst Team' },
-    { key: 'news_report', title: '新闻分析报告', team: 'Analyst Team' },
-    { key: 'fundamentals_report', title: '基本面分析报告', team: 'Analyst Team' },
-    { key: 'investment_plan', title: '研究团队决策', team: 'Research Team' },
-    { key: 'trader_investment_plan', title: '交易团队计划', team: 'Trading Team' },
-    { key: 'final_trade_decision', title: '最终交易决策', team: 'Portfolio Management' },
+    { key: 'market_report', title: '市场分析报告', team: '分析团队' },
+    { key: 'sentiment_report', title: '舆情分析报告', team: '分析团队' },
+    { key: 'news_report', title: '新闻分析报告', team: '分析团队' },
+    { key: 'fundamentals_report', title: '基本面分析报告', team: '分析团队' },
+    { key: 'investment_plan', title: '研究团队决策', team: '研究团队' },
+    { key: 'trader_investment_plan', title: '交易团队计划', team: '交易团队' },
+    { key: 'final_trade_decision', title: '最终交易决策', team: '组合管理' },
 ]
 
 const MD_COMPONENTS = {

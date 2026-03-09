@@ -115,6 +115,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
         updateAgentStatus,
         updateAgentSnapshot,
         addAgentReport,
+        addReportChunk,
         addChatMessage,
         appendToChatMessage,
         setReport,
@@ -204,6 +205,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                 const chunkData = data as unknown as ReportChunkEvent
                 const { section, chunk, is_complete } = chunkData
                 const msgId = `stream:${section}`
+                addReportChunk(chunkData)
 
                 if (!streamingReportIds.current.has(section)) {
                     // First chunk → create new report message in the flow

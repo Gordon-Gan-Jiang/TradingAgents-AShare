@@ -19,7 +19,7 @@ export default function KeyMetrics() {
                 <div className="p-1.5 rounded-lg bg-blue-500/20">
                     <BarChart3 className="w-4 h-4 text-blue-400" />
                 </div>
-                <h3 className="text-sm font-semibold text-slate-100">关键指标速览</h3>
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">关键指标速览</h3>
             </div>
 
             {metrics.length === 0 ? (

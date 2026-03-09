@@ -19,7 +19,7 @@ export default function RiskRadar() {
                 <div className="p-1.5 rounded-lg bg-amber-500/20">
                     <AlertTriangle className="w-4 h-4 text-amber-400" />
                 </div>
-                <h3 className="text-sm font-semibold text-slate-100">风险雷达</h3>
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">风险雷达</h3>
             </div>
 
             {risks.length === 0 ? (
@@ -37,7 +37,7 @@ export default function RiskRadar() {
                                 className="flex items-start justify-between p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/50 gap-2"
                             >
                                 <div className="flex-1 min-w-0">
-                                    <span className="text-sm text-slate-300 block truncate">{risk.name}</span>
+                                    <span className="text-sm text-slate-700 dark:text-slate-300 block truncate">{risk.name}</span>
                                     {risk.description && (
                                         <span className="text-xs text-slate-500 mt-0.5 block line-clamp-2">{risk.description}</span>
                                     )}
