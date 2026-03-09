@@ -976,6 +976,135 @@ def _parse_stock_csv(raw: str) -> List[Dict[str, Any]]:
     return candles
 
 
+CN_INDEX_SYMBOL_MAP = {
+    "000001.SH": "sh000001",
+    "399001.SZ": "sz399001",
+    "399006.SZ": "sz399006",
+    "000300.SH": "sh000300",
+    "000688.SH": "sh000688",
+    "000905.SH": "sh000905",
+    "000852.SH": "sh000852",
+    "899050.BJ": "bj899050",
+}
+
+
+def _is_cn_index_symbol(symbol: str) -> bool:
+    return symbol.upper() in CN_INDEX_SYMBOL_MAP
+
+
+def _normalize_kline_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    col_map = {
+        "日期": "Date",
+        "date": "Date",
+        "Date": "Date",
+        "开盘": "Open",
+        "open": "Open",
+        "Open": "Open",
+        "最高": "High",
+        "high": "High",
+        "High": "High",
+        "最低": "Low",
+        "low": "Low",
+        "Low": "Low",
+        "收盘": "Close",
+        "close": "Close",
+        "Close": "Close",
+        "成交量": "Volume",
+        "volume": "Volume",
+        "Volume": "Volume",
+        "成交额": "Amount",
+        "amount": "Amount",
+        "Amount": "Amount",
+        "涨跌幅": "ChangePercent",
+        "涨跌额": "Change",
+        "换手率": "TurnoverRate",
+    }
+    out = df.rename(columns=col_map).copy()
+    required = ["Date", "Open", "High", "Low", "Close"]
+    if any(col not in out.columns for col in required):
+        return pd.DataFrame()
+
+    out["Date"] = pd.to_datetime(out["Date"], errors="coerce")
+    out = out.dropna(subset=["Date"]).sort_values("Date")
+    for col in ["Open", "High", "Low", "Close", "Volume", "Amount", "ChangePercent", "Change", "TurnoverRate"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    out = out.dropna(subset=["Open", "High", "Low", "Close"])
+    return out.reset_index(drop=True)
+
+
+def _fetch_index_kline(symbol: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+    import akshare as ak  # type: ignore
+
+    symbol_key = symbol.upper()
+    vendor_symbol = CN_INDEX_SYMBOL_MAP.get(symbol_key)
+    if not vendor_symbol:
+        return []
+
+    yyyymmdd_start = start_date.replace("-", "")
+    yyyymmdd_end = end_date.replace("-", "")
+    last_exc: Exception | None = None
+
+    for fetcher in (
+        lambda: ak.stock_zh_index_daily_em(
+            symbol=vendor_symbol,
+            start_date=yyyymmdd_start,
+            end_date=yyyymmdd_end,
+        ),
+        lambda: ak.stock_zh_index_daily(symbol=vendor_symbol),
+        lambda: ak.index_zh_a_hist(
+            symbol=symbol_key.split(".")[0],
+            period="daily",
+            start_date=yyyymmdd_start,
+            end_date=yyyymmdd_end,
+        ),
+    ):
+        try:
+            raw_df = fetcher()
+            df = _normalize_kline_df(raw_df)
+            if df.empty:
+                continue
+            df = df[(df["Date"] >= pd.to_datetime(start_date)) & (df["Date"] <= pd.to_datetime(end_date))]
+            if df.empty:
+                continue
+            candles: List[Dict[str, Any]] = []
+            prev_close: float | None = None
+            for _, row in df.iterrows():
+                close = float(row["Close"])
+                change = float(row["Change"]) if "Change" in df.columns and pd.notna(row.get("Change")) else (close - prev_close if prev_close is not None else None)
+                change_pct = (
+                    float(row["ChangePercent"])
+                    if "ChangePercent" in df.columns and pd.notna(row.get("ChangePercent"))
+                    else ((change / prev_close) * 100 if prev_close not in (None, 0) and change is not None else None)
+                )
+                candles.append(
+                    {
+                        "date": row["Date"].strftime("%Y-%m-%d"),
+                        "open": float(row["Open"]),
+                        "high": float(row["High"]),
+                        "low": float(row["Low"]),
+                        "close": close,
+                        "volume": float(row["Volume"]) if "Volume" in df.columns and pd.notna(row.get("Volume")) else None,
+                        "amount": float(row["Amount"]) if "Amount" in df.columns and pd.notna(row.get("Amount")) else None,
+                        "change": change,
+                        "change_percent": change_pct,
+                        "turnover_rate": float(row["TurnoverRate"]) if "TurnoverRate" in df.columns and pd.notna(row.get("TurnoverRate")) else None,
+                    }
+                )
+                prev_close = close
+            return candles
+        except Exception as exc:
+            last_exc = exc
+            continue
+
+    if last_exc:
+        print(f"[kline] index fetch failed for {symbol}: {type(last_exc).__name__}: {last_exc}")
+    return []
+
+
 def _stream_job_events(job_id: str):
     q = _ensure_job_event_queue(job_id)
     yield _sse_pack("job.ready", {"job_id": job_id})
@@ -1012,10 +1141,13 @@ def get_kline(
     else:
         start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=120)).strftime("%Y-%m-%d")
 
-    config = _build_runtime_config({})
-    set_config(config)
-    raw = route_to_vendor("get_stock_data", symbol, start, end)
-    candles = _parse_stock_csv(raw)
+    if _is_cn_index_symbol(symbol):
+        candles = _fetch_index_kline(symbol, start, end)
+    else:
+        config = _build_runtime_config({})
+        set_config(config)
+        raw = route_to_vendor("get_stock_data", symbol, start, end)
+        candles = _parse_stock_csv(raw)
     if not candles:
         raise HTTPException(status_code=404, detail="no kline data")
     return KlineResponse(
