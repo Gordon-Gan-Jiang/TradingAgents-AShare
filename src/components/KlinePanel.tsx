@@ -6,10 +6,13 @@ import {
     ColorType,
     IChartApi,
     ISeriesApi,
+    MouseEventParams,
     createChart,
 } from 'lightweight-charts'
 import { Activity, CandlestickChart } from 'lucide-react'
 import { api } from '@/services/api'
+import type { KlineCandle } from '@/types'
+import { useAnalysisStore } from '@/stores/analysisStore'
 
 interface KlinePanelProps {
     symbol: string
@@ -40,12 +43,29 @@ const SYMBOL_NAME_MAP: Record<string, string> = {
     '000300.SH': '沪深300',
     '000905.SH': '中证500',
     '000852.SH': '中证1000',
+    '300750.SZ': '宁德时代',
+    '600406.SH': '国电南瑞',
     '510300.SH': '沪深300ETF',
 }
 
 function getDisplayName(symbol: string): string {
     const s = symbol.toUpperCase()
-    return SYMBOL_NAME_MAP[s] || s
+    return SYMBOL_NAME_MAP[s] ? `${SYMBOL_NAME_MAP[s]}（${s}）` : s
+}
+
+function formatNumber(value?: number | null, digits = 2): string {
+    if (value == null || !Number.isFinite(value)) return '--'
+    return new Intl.NumberFormat('zh-CN', {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+    }).format(value)
+}
+
+function formatVolume(value?: number | null): string {
+    if (value == null || !Number.isFinite(value)) return '--'
+    if (Math.abs(value) >= 1e8) return `${formatNumber(value / 1e8, 2)}亿`
+    if (Math.abs(value) >= 1e4) return `${formatNumber(value / 1e4, 2)}万`
+    return formatNumber(value, 0)
 }
 
 const INDEX_PRESETS = [
@@ -57,12 +77,16 @@ const INDEX_PRESETS = [
 ] as const
 
 export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) {
+    const currentAnalysisSymbol = useAnalysisStore((state) => state.currentSymbol)
     const containerRef = useRef<HTMLDivElement | null>(null)
     const chartRef = useRef<IChartApi | null>(null)
     const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [isDark, setIsDark] = useState(document.documentElement.classList.contains('dark'))
+    const [candles, setCandles] = useState<KlineCandle[]>([])
+    const [activeCandle, setActiveCandle] = useState<KlineCandle | null>(null)
+    const candlesRef = useRef<KlineCandle[]>([])
 
     const range = useMemo(() => {
         const end = new Date()
@@ -137,6 +161,35 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
 
         chartRef.current = chart
         seriesRef.current = series
+        if (candlesRef.current.length) {
+            const existingData: CandlestickData[] = candlesRef.current.flatMap((c) => {
+                const time = toBusinessDay((c.date || '').slice(0, 10))
+                const open = Number(c.open)
+                const high = Number(c.high)
+                const low = Number(c.low)
+                const close = Number(c.close)
+                if (!time) return []
+                if (![open, high, low, close].every(Number.isFinite)) return []
+                return [{ time, open, high, low, close }]
+            })
+            series.setData(existingData)
+            chart.timeScale().fitContent()
+        }
+
+        const handleCrosshairMove = (param: MouseEventParams) => {
+            if (!param.time || !seriesRef.current) {
+                setActiveCandle(candlesRef.current.length ? candlesRef.current[candlesRef.current.length - 1] : null)
+                return
+            }
+            const pointData = param.seriesData.get(seriesRef.current) as CandlestickData | undefined
+            if (!pointData) return
+            const time = typeof pointData.time === 'object'
+                ? `${pointData.time.year}-${String(pointData.time.month).padStart(2, '0')}-${String(pointData.time.day).padStart(2, '0')}`
+                : String(pointData.time)
+            const matched = candlesRef.current.find(c => c.date === time)
+            if (matched) setActiveCandle(matched)
+        }
+        chart.subscribeCrosshairMove(handleCrosshairMove)
 
         const onResize = () => {
             if (!containerRef.current || !chartRef.current) return
@@ -149,6 +202,7 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
         window.addEventListener('resize', onResize)
         return () => {
             window.removeEventListener('resize', onResize)
+            chart.unsubscribeCrosshairMove(handleCrosshairMove)
             chartRef.current?.remove()
             chartRef.current = null
             seriesRef.current = null
@@ -176,6 +230,9 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
                 })
 
                 if (cancelled) return
+                setCandles(resp.candles)
+                candlesRef.current = resp.candles
+                setActiveCandle(resp.candles.length ? resp.candles[resp.candles.length - 1] : null)
                 seriesRef.current?.setData(data)
                 chartRef.current?.timeScale().fitContent()
                 if (!data.length) {
@@ -184,6 +241,9 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
             } catch (e) {
                 if (cancelled) return
                 setError(e instanceof Error ? e.message : '加载K线失败')
+                setCandles([])
+                candlesRef.current = []
+                setActiveCandle(null)
                 seriesRef.current?.setData([])
             } finally {
                 if (!cancelled) setLoading(false)
@@ -196,14 +256,43 @@ export default function KlinePanel({ symbol, onSymbolChange }: KlinePanelProps) 
         }
     }, [range.end, range.start, symbol])
 
+    const panelCandle = activeCandle ?? (candles.length ? candles[candles.length - 1] : null)
+    const panelChange = panelCandle?.change ?? (panelCandle ? panelCandle.close - panelCandle.open : null)
+    const panelChangePercent = panelCandle?.change_percent ?? (
+        panelCandle && panelCandle.open !== 0 ? (panelChange! / panelCandle.open) * 100 : null
+    )
+    const isUp = (panelChange ?? 0) >= 0
+    const compactChangePercent = panelChangePercent == null ? '--' : `${panelChangePercent >= 0 ? '+' : ''}${formatNumber(panelChangePercent)}%`
+    const showCurrentSymbolButton = !!currentAnalysisSymbol && currentAnalysisSymbol !== symbol
+    const currentSymbolLabel = currentAnalysisSymbol ? getDisplayName(currentAnalysisSymbol).replace(/（.*?）/, '') : '当前标的'
+
     return (
         <section className="card h-full flex flex-col overflow-hidden">
             <div className="flex items-center justify-between mb-3 shrink-0">
-                <div className="flex items-center gap-2">
+                <div className="min-w-0 flex items-center gap-3">
                     <CandlestickChart className="w-5 h-5 text-cyan-500" />
-                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">{getDisplayName(symbol)} K线</h2>
+                    <div className="min-w-0 flex flex-wrap items-center gap-x-4 gap-y-1">
+                        <h2 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-100">{getDisplayName(symbol)} K线</h2>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                            <span className="text-slate-500 dark:text-slate-400">{panelCandle?.date || '--'}</span>
+                            <span className={`font-medium ${isUp ? 'text-red-500' : 'text-emerald-500'}`}>收盘 {formatNumber(panelCandle?.close)}</span>
+                            <span className="text-slate-500 dark:text-slate-400">开盘 {formatNumber(panelCandle?.open)}</span>
+                            <span className={`font-medium ${isUp ? 'text-red-500' : 'text-emerald-500'}`}>{compactChangePercent}</span>
+                            <span className="text-slate-500 dark:text-slate-400">高/低 {formatNumber(panelCandle?.high)} / {formatNumber(panelCandle?.low)}</span>
+                            <span className="text-slate-500 dark:text-slate-400">量 {formatVolume(panelCandle?.volume)}</span>
+                            <span className="text-slate-500 dark:text-slate-400">换手 {panelCandle?.turnover_rate == null ? '--' : `${formatNumber(panelCandle.turnover_rate)}%`}</span>
+                        </div>
+                    </div>
                 </div>
                 <div className="flex items-center gap-1.5">
+                    {showCurrentSymbolButton && (
+                        <button
+                            onClick={() => onSymbolChange?.(currentAnalysisSymbol)}
+                            className="text-xs px-2.5 py-1 rounded border border-emerald-500 text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10 hover:bg-emerald-100 dark:hover:bg-emerald-500/20 transition-colors"
+                        >
+                            {currentSymbolLabel}
+                        </button>
+                    )}
                     {INDEX_PRESETS.map((item) => (
                         <button
                             key={item.symbol}

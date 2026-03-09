@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import type { ReportDetail } from '@/types'
+import { sanitizeReportMarkdown } from '@/utils/reportText'
 
 const REPORT_SECTIONS = [
     { key: 'market_report', title: '市场分析报告', team: '分析团队' },
@@ -14,6 +15,9 @@ const REPORT_SECTIONS = [
     { key: 'trader_investment_plan', title: '交易团队计划', team: '交易团队' },
     { key: 'final_trade_decision', title: '最终交易决策', team: '组合管理' },
 ]
+
+const REPORT_DISCLAIMER =
+    '> 免责声明：以上内容由模型基于公开数据、历史信息与预设规则自动生成，仅供研究参考，不构成任何投资建议、收益承诺或实际交易指令。'
 
 const MD_COMPONENTS = {
     table: ({ children }: { children?: React.ReactNode }) => (
@@ -68,10 +72,10 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
 
     const getSectionContent = (key: string): string => {
         if (isHistorical) {
-            return (reportData?.[key as keyof ReportDetail] as string | undefined) || ''
+            return sanitizeReportMarkdown((reportData?.[key as keyof ReportDetail] as string | undefined) || '')
         }
         const s = streamingSections[key]
-        return s?.displayed || (report?.[key as keyof typeof report] as string | undefined) || ''
+        return sanitizeReportMarkdown(s?.displayed || (report?.[key as keyof typeof report] as string | undefined) || '')
     }
 
     const getSectionState = (key: string) => {
@@ -105,7 +109,7 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
         const text = REPORT_SECTIONS
             .filter(s => source[s.key as keyof typeof source])
             .map(s => `## ${s.title}\n\n${source[s.key as keyof typeof source]}`)
-            .join('\n\n---\n\n')
+            .join('\n\n---\n\n') + `\n\n---\n\n${REPORT_DISCLAIMER}\n`
         const blob = new Blob([text], { type: 'text/markdown' })
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
@@ -130,11 +134,14 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
     }
 
     return (
-        <div className={isHistorical ? 'space-y-2' : 'card flex-1 flex flex-col min-h-0'}>
+        <div className={isHistorical ? 'space-y-2' : 'card flex-1 flex flex-col min-h-0 ring-1 ring-slate-200/70 dark:ring-slate-800 shadow-[0_16px_40px_rgba(15,23,42,0.06)] dark:shadow-none'}>
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-2">
                     <FileText className="w-5 h-5 text-blue-500" />
-                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">分析报告</h2>
+                    <div>
+                        <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">分析报告</h2>
+                        <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">按章节持续输出，支持边生成边阅读。</p>
+                    </div>
                     {!isHistorical && isAnalyzing && (
                         <span className="badge-orange animate-pulse">生成中</span>
                     )}
@@ -150,7 +157,7 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
                 )}
             </div>
 
-            <div className={`space-y-2 ${isHistorical ? '' : 'flex-1 overflow-y-auto min-h-0'}`}>
+            <div className={`space-y-3 ${isHistorical ? '' : 'flex-1 overflow-y-auto min-h-0'}`}>
                 {REPORT_SECTIONS.map((section) => {
                     const content = getSectionContent(section.key)
                     const { isStreaming, isComplete } = getSectionState(section.key)
@@ -161,10 +168,10 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
                     const isExpanded = expandedSections.includes(section.key)
 
                     return (
-                        <div key={section.key} id={`section-${section.key}`} className="border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden">
+                        <div key={section.key} id={`section-${section.key}`} className="border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden bg-white dark:bg-slate-900/40">
                             <button
                                 onClick={() => toggleSection(section.key)}
-                                className="w-full flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                                className="w-full flex items-center justify-between p-4 bg-slate-50/90 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
                             >
                                 <div className="flex items-center gap-2">
                                     {isExpanded
@@ -185,8 +192,8 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
                             </button>
 
                             {isExpanded && (
-                                <div className="p-4 bg-white dark:bg-slate-800/30">
-                                    <div className="prose dark:prose-invert prose-sm max-w-none">
+                                <div className="p-5 bg-white dark:bg-slate-800/30">
+                                    <div className="prose dark:prose-invert prose-sm md:prose-base max-w-none">
                                         {hasContent ? (
                                             <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
                                                 {content}
@@ -210,6 +217,14 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
                 {!isHistorical && isAnalyzing && !hasAnyContent && (
                     <div className="flex items-center justify-center py-10 text-sm text-slate-400 dark:text-slate-500">
                         等待首个章节输出...
+                    </div>
+                )}
+
+                {hasAnyContent && (
+                    <div className="rounded-2xl border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-xs leading-6 text-amber-800 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-200">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {REPORT_DISCLAIMER}
+                        </ReactMarkdown>
                     </div>
                 )}
             </div>

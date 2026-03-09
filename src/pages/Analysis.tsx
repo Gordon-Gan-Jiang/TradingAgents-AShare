@@ -83,7 +83,6 @@ export default function Analysis() {
                         symbol={activeSymbol}
                         onSymbolChange={(symbol) => {
                             setActiveSymbol(symbol)
-                            setCurrentSymbol(symbol)
                         }}
                     />
                 </div>

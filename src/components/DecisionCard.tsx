@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { TrendingUp, TrendingDown, Target, Shield, ChevronDown, ChevronUp, Info } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { AnalysisReport } from '@/types'
+import { sanitizeReportMarkdown } from '@/utils/reportText'
 
 interface DecisionCardProps {
     symbol: string
@@ -40,20 +43,21 @@ export default function DecisionCard({
 }: DecisionCardProps) {
     const [expanded, setExpanded] = useState(false)
 
-    const parseDecision = (text?: string): 'buy' | 'sell' | 'hold' | 'add' | 'reduce' | 'watch' => {
-        if (!text) return propDecision || 'hold'
+    const parseDecision = (text?: string): 'buy' | 'sell' | 'hold' | 'add' | 'reduce' | 'watch' | undefined => {
+        if (!text) return propDecision
         const lower = text.toLowerCase()
         if (lower.includes('buy') || lower.includes('买入')) return 'buy'
         if (lower.includes('sell') || lower.includes('卖出')) return 'sell'
         if (lower.includes('add') || lower.includes('增持')) return 'add'
         if (lower.includes('reduce') || lower.includes('减持')) return 'reduce'
         if (lower.includes('watch') || lower.includes('观望')) return 'watch'
-        return 'hold'
+        if (lower.includes('hold') || lower.includes('持有')) return 'hold'
+        return undefined
     }
 
     const decision = parseDecision(report?.final_trade_decision)
-    const config = decisionConfig[decision] || decisionConfig.hold
-    const DecisionIcon = config.icon
+    const config = decision ? (decisionConfig[decision] || decisionConfig.hold) : null
+    const DecisionIcon = config?.icon
 
     const riskLabels: Record<string, string> = { low: '低', medium: '中等', high: '高' }
     const riskColors: Record<string, string> = {
@@ -75,10 +79,16 @@ export default function DecisionCard({
                         <p className="text-sm text-slate-500">{symbol}</p>
                     </div>
                 </div>
-                <div className={`px-4 py-2 rounded-full border font-medium flex items-center gap-1.5 ${config.color}`}>
-                    <DecisionIcon className="w-4 h-4" />
-                    {config.label}
-                </div>
+                {config && DecisionIcon ? (
+                    <div className={`px-4 py-2 rounded-full border font-medium flex items-center gap-1.5 ${config.color}`}>
+                        <DecisionIcon className="w-4 h-4" />
+                        {config.label}
+                    </div>
+                ) : (
+                    <div className="px-4 py-2 rounded-full border font-medium text-slate-400 border-slate-200 dark:border-slate-700">
+                        等待裁决
+                    </div>
+                )}
             </div>
 
             {/* 置信度 */}
@@ -105,7 +115,7 @@ export default function DecisionCard({
                         <span className="text-xs text-slate-500">目标价</span>
                     </div>
                     <p className="text-xl font-bold text-green-600 dark:text-green-400">
-                        {targetPrice != null ? `¥${targetPrice}` : '-'}
+                        {targetPrice != null ? `¥${targetPrice}` : '--'}
                     </p>
                     {targetChange != null && (
                         <p className="text-sm text-green-600 dark:text-green-400">
@@ -119,7 +129,7 @@ export default function DecisionCard({
                         <span className="text-xs text-slate-500">止损价</span>
                     </div>
                     <p className="text-xl font-bold text-red-600 dark:text-red-400">
-                        {stopLoss != null ? `¥${stopLoss}` : '-'}
+                        {stopLoss != null ? `¥${stopLoss}` : '--'}
                     </p>
                     {stopLossChange != null && (
                         <p className="text-sm text-red-600 dark:text-red-400">
@@ -135,7 +145,11 @@ export default function DecisionCard({
                     {reasoning && (
                         <div>
                             <span className="text-sm text-slate-500">核心逻辑</span>
-                            <p className="text-sm text-slate-700 dark:text-slate-300 mt-1 leading-relaxed">{reasoning}</p>
+                            <div className="mt-1 prose prose-sm dark:prose-invert max-w-none text-slate-700 dark:text-slate-300">
+                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {sanitizeReportMarkdown(reasoning)}
+                                </ReactMarkdown>
+                            </div>
                         </div>
                     )}
                     {riskLevel && (

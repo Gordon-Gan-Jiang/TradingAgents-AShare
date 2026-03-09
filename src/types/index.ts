@@ -191,6 +191,10 @@ export interface KlineCandle {
     low: number
     close: number
     volume?: number | null
+    amount?: number | null
+    change?: number | null
+    change_percent?: number | null
+    turnover_rate?: number | null
 }
 
 export interface KlineResponse {

@@ -106,6 +106,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
     // track which section IDs have been added to chatMessages and whether they're done
     const streamingReportIds = useRef<Map<string, boolean>>(new Map()) // section → isComplete
     const messagesEndRef = useRef<HTMLDivElement>(null)
+    const messagesContainerRef = useRef<HTMLDivElement>(null)
 
     const {
         chatMessages,
@@ -125,7 +126,12 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
     } = useAnalysisStore()
 
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+        const container = messagesContainerRef.current
+        if (!container) return
+        container.scrollTo({
+            top: container.scrollHeight,
+            behavior: 'smooth',
+        })
     }, [chatMessages])
 
     const toggleAnalyst = (id: string) => {
@@ -191,7 +197,9 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                     targetPrice: data.target_price as number | null,
                     stopLoss: data.stop_loss_price as number | null,
                 })
-                pushAssistant(`**分析完成**\n\n最终建议：**${String(data.decision || 'HOLD')}**`)
+                pushAssistant(
+                    `**分析完成**\n\n最终建议：**${String(data.decision || 'HOLD')}**\n\n> 免责声明：以上内容由模型基于公开数据与规则生成，仅供研究参考，不构成任何投资建议或收益承诺。`
+                )
                 if ('Notification' in window && Notification.permission === 'granted') {
                     new Notification('TradingAgents 分析完成', {
                         body: data.decision ? `建议：${String(data.decision)}` : '点击查看完整报告',
@@ -439,7 +447,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
             </div>
 
             {/* 聊天内容 */}
-            <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
+            <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
                 {chatMessages.map((msg) => {
                     // Report card
                     if (msg.role === 'report' && msg.section) {
