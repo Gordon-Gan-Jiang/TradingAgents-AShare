@@ -234,3 +234,4 @@ tradingagents.db
 deploy/deploy.env
 
 tradingagents.db.bak.*
+.playwright-cli/
