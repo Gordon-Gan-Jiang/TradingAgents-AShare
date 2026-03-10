@@ -225,6 +225,7 @@ results/
 
 # Private dirs (not open-source for now)
 docs/
+deploy/
 
 # Local development artifacts
 .DS_Store
