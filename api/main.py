@@ -1118,7 +1118,7 @@ def _stream_job_events(job_id: str):
     yield _sse_pack("job.ready", {"job_id": job_id})
     while True:
         try:
-            event = q.get(timeout=30)
+            event = q.get(timeout=10)
             yield _sse_pack(event["event"], event["data"])
             if event["event"] in ("job.completed", "job.failed"):
                 yield "event: done\ndata: [DONE]\n\n"
@@ -1129,7 +1129,7 @@ def _stream_job_events(job_id: str):
             if status in ("completed", "failed"):
                 yield "event: done\ndata: [DONE]\n\n"
                 break
-            yield ": keep-alive\n\n"
+            yield _sse_pack("ping", {"timestamp": datetime.now().isoformat()})
 
 
 @app.get("/healthz")
@@ -1364,7 +1364,7 @@ def stream_job_events(job_id: str, current_user: UserDB = Depends(_require_user)
     return StreamingResponse(
         _stream_job_events(job_id),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 
@@ -1433,7 +1433,7 @@ def chat_completions(
             return StreamingResponse(
                 _error_stream(),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
             )
         raise HTTPException(status_code=400, detail=message)
 
@@ -1473,7 +1473,7 @@ def chat_completions(
         return StreamingResponse(
             _stream_job_events(job_id),
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
 
     return {
