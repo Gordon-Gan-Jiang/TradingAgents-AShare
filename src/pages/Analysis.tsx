@@ -9,6 +9,18 @@ import RiskRadar from '@/components/RiskRadar'
 import KeyMetrics from '@/components/KeyMetrics'
 import { useAnalysisStore } from '@/stores/analysisStore'
 
+function mapDecision(decision?: string): 'buy' | 'sell' | 'hold' | 'add' | 'reduce' | 'watch' | undefined {
+    if (!decision) return undefined
+    const d = decision.toUpperCase()
+    if (d.includes('SELL') || d.includes('卖出')) return 'sell'
+    if (d.includes('REDUCE') || d.includes('减持')) return 'reduce'
+    if (d.includes('WATCH') || d.includes('观望')) return 'watch'
+    if (d.includes('HOLD') || d.includes('持有')) return 'hold'
+    if (d.includes('ADD') || d.includes('增持')) return 'add'
+    if (d.includes('BUY') || d.includes('买入')) return 'buy'
+    return undefined
+}
+
 function extractConfidence(text?: string): number | undefined {
     if (!text) return undefined
     const m = text.match(/置信度[:：]\s*(\d+)%/i) ?? text.match(/confidence[:：]\s*(\d+)%/i)
@@ -93,6 +105,7 @@ export default function Analysis() {
                     <DecisionCard
                         symbol={activeSymbol}
                         report={report || undefined}
+                        decision={mapDecision(report?.decision)}
                         confidence={confidence}
                         targetPrice={targetPrice}
                         stopLoss={stopLoss}

@@ -158,6 +158,7 @@ export interface MilestoneMessage {
 export interface AnalysisReport {
     symbol: string
     trade_date: string
+    decision?: string
     market_report?: string
     sentiment_report?: string
     news_report?: string
@@ -269,6 +270,7 @@ export interface RuntimeConfig {
     max_debate_rounds: number
     max_risk_discuss_rounds: number
     has_api_key?: boolean
+    server_fallback_enabled?: boolean
 }
 
 export interface RuntimeConfigUpdateResponse {

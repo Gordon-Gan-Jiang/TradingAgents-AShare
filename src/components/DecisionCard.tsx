@@ -46,16 +46,16 @@ export default function DecisionCard({
     const parseDecision = (text?: string): 'buy' | 'sell' | 'hold' | 'add' | 'reduce' | 'watch' | undefined => {
         if (!text) return propDecision
         const lower = text.toLowerCase()
-        if (lower.includes('buy') || lower.includes('买入')) return 'buy'
         if (lower.includes('sell') || lower.includes('卖出')) return 'sell'
-        if (lower.includes('add') || lower.includes('增持')) return 'add'
         if (lower.includes('reduce') || lower.includes('减持')) return 'reduce'
         if (lower.includes('watch') || lower.includes('观望')) return 'watch'
         if (lower.includes('hold') || lower.includes('持有')) return 'hold'
+        if (lower.includes('add') || lower.includes('增持')) return 'add'
+        if (lower.includes('buy') || lower.includes('买入')) return 'buy'
         return undefined
     }
 
-    const decision = parseDecision(report?.final_trade_decision)
+    const decision = propDecision || parseDecision(report?.decision || report?.final_trade_decision)
     const config = decision ? (decisionConfig[decision] || decisionConfig.hold) : null
     const DecisionIcon = config?.icon
 
