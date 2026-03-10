@@ -1,5 +1,6 @@
 import re
 import time
+import threading
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -7,6 +8,9 @@ from stockstats import wrap
 
 from .base import BaseMarketDataProvider
 from ..trade_calendar import cn_market_phase, cn_no_data_reason, cn_today_str, is_cn_trading_day
+
+
+AKSHARE_CALL_LOCK = threading.RLock()
 
 
 class CnAkshareProvider(BaseMarketDataProvider):
@@ -42,13 +46,18 @@ class CnAkshareProvider(BaseMarketDataProvider):
         return "cn_akshare"
 
     def _ak(self):
-        try:
-            import akshare as ak  # type: ignore
-        except ImportError as exc:
-            raise NotImplementedError(
-                "cn_akshare requires 'akshare'. Install it with: pip install akshare"
-            ) from exc
-        return ak
+        with AKSHARE_CALL_LOCK:
+            try:
+                import akshare as ak  # type: ignore
+            except ImportError as exc:
+                raise NotImplementedError(
+                    "cn_akshare requires 'akshare'. Install it with: pip install akshare"
+                ) from exc
+            return ak
+
+    def _locked(self, func, *args, **kwargs):
+        with AKSHARE_CALL_LOCK:
+            return func(*args, **kwargs)
 
     def _normalize_symbol(self, symbol: str) -> str:
         s = symbol.strip().lower()
@@ -155,110 +164,112 @@ class CnAkshareProvider(BaseMarketDataProvider):
         return df.head(rows).iloc[:, :cols]
 
     def _fetch_hist_df(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        ak = self._ak()
-        code = self._normalize_symbol(symbol)
-        symbol_with_market = self._sina_symbol(symbol)
-        start_yyyymmdd = start_date.replace("-", "")
-        end_yyyymmdd = end_date.replace("-", "")
+        with AKSHARE_CALL_LOCK:
+            ak = self._ak()
+            code = self._normalize_symbol(symbol)
+            symbol_with_market = self._sina_symbol(symbol)
+            start_yyyymmdd = start_date.replace("-", "")
+            end_yyyymmdd = end_date.replace("-", "")
 
-        # ETF 优先：Sina 历史接口稳定且不依赖东财
-        if self._is_likely_etf_symbol(symbol):
-            etf_errors = []
-            try:
-                df = ak.fund_etf_hist_sina(symbol=symbol_with_market)
-                out = self._normalize_hist_df(df)
-                out = self._slice_hist_df(out, start_date, end_date)
-                if not out.empty:
+            # ETF 优先：Sina 历史接口稳定且不依赖东财
+            if self._is_likely_etf_symbol(symbol):
+                etf_errors = []
+                try:
+                    df = ak.fund_etf_hist_sina(symbol=symbol_with_market)
+                    out = self._normalize_hist_df(df)
+                    out = self._slice_hist_df(out, start_date, end_date)
+                    if not out.empty:
+                        return self._maybe_append_realtime_row(symbol, out, end_date)
+                    etf_errors.append("fund_etf_hist_sina: empty after date filter")
+                except Exception as exc:
+                    etf_errors.append(f"fund_etf_hist_sina: {type(exc).__name__}")
+
+                try:
+                    df = ak.fund_etf_hist_em(
+                        symbol=code,
+                        period="daily",
+                        start_date=start_yyyymmdd,
+                        end_date=end_yyyymmdd,
+                        adjust="qfq",
+                    )
+                    out = self._normalize_hist_df(df)
+                    if not out.empty:
+                        return self._maybe_append_realtime_row(symbol, out, end_date)
+                    etf_errors.append("fund_etf_hist_em: empty dataframe")
+                except Exception as exc:
+                    etf_errors.append(f"fund_etf_hist_em: {type(exc).__name__}")
+
+            # Source 1: Eastmoney (default)
+            em_last_exc = None
+            for i in range(2):
+                try:
+                    df = ak.stock_zh_a_hist(
+                        symbol=code,
+                        period="daily",
+                        start_date=start_yyyymmdd,
+                        end_date=end_yyyymmdd,
+                        adjust="qfq",
+                    )
+                    out = self._normalize_hist_df(df)
                     return self._maybe_append_realtime_row(symbol, out, end_date)
-                etf_errors.append("fund_etf_hist_sina: empty after date filter")
-            except Exception as exc:
-                etf_errors.append(f"fund_etf_hist_sina: {type(exc).__name__}")
+                except Exception as exc:
+                    em_last_exc = exc
+                    if i < 1:
+                        time.sleep(0.6 * (i + 1))
 
+            # Source 2: Sina
             try:
-                df = ak.fund_etf_hist_em(
-                    symbol=code,
-                    period="daily",
-                    start_date=start_yyyymmdd,
-                    end_date=end_yyyymmdd,
-                    adjust="qfq",
-                )
-                out = self._normalize_hist_df(df)
-                if not out.empty:
-                    return self._maybe_append_realtime_row(symbol, out, end_date)
-                etf_errors.append("fund_etf_hist_em: empty dataframe")
-            except Exception as exc:
-                etf_errors.append(f"fund_etf_hist_em: {type(exc).__name__}")
-
-        # Source 1: Eastmoney (default)
-        em_last_exc = None
-        for i in range(2):
-            try:
-                df = ak.stock_zh_a_hist(
-                    symbol=code,
-                    period="daily",
+                df = ak.stock_zh_a_daily(
+                    symbol=symbol_with_market,
                     start_date=start_yyyymmdd,
                     end_date=end_yyyymmdd,
                     adjust="qfq",
                 )
                 out = self._normalize_hist_df(df)
                 return self._maybe_append_realtime_row(symbol, out, end_date)
-            except Exception as exc:
-                em_last_exc = exc
-                if i < 1:
-                    time.sleep(0.6 * (i + 1))
+            except Exception:
+                pass
 
-        # Source 2: Sina
-        try:
-            df = ak.stock_zh_a_daily(
-                symbol=symbol_with_market,
-                start_date=start_yyyymmdd,
-                end_date=end_yyyymmdd,
-                adjust="qfq",
-            )
-            out = self._normalize_hist_df(df)
-            return self._maybe_append_realtime_row(symbol, out, end_date)
-        except Exception:
-            pass
+            # Source 3: Tencent
+            try:
+                df = ak.stock_zh_a_hist_tx(
+                    symbol=symbol_with_market,
+                    start_date=start_yyyymmdd,
+                    end_date=end_yyyymmdd,
+                    adjust="qfq",
+                )
+                out = self._normalize_hist_df(df)
+                return self._maybe_append_realtime_row(symbol, out, end_date)
+            except Exception:
+                pass
 
-        # Source 3: Tencent
-        try:
-            df = ak.stock_zh_a_hist_tx(
-                symbol=symbol_with_market,
-                start_date=start_yyyymmdd,
-                end_date=end_yyyymmdd,
-                adjust="qfq",
-            )
-            out = self._normalize_hist_df(df)
-            return self._maybe_append_realtime_row(symbol, out, end_date)
-        except Exception:
-            pass
-
-        raise NotImplementedError(
-            f"cn_akshare is temporarily unavailable for price history (eastmoney/sina/tencent all failed): {em_last_exc}"
-        ) from em_last_exc
+            raise NotImplementedError(
+                f"cn_akshare is temporarily unavailable for price history (eastmoney/sina/tencent all failed): {em_last_exc}"
+            ) from em_last_exc
 
     def _fetch_realtime_row(self, symbol: str) -> pd.DataFrame:
-        ak = self._ak()
-        spot = ak.stock_individual_spot_xq(symbol=self._xq_symbol(symbol))
-        if spot is None or spot.empty:
-            return pd.DataFrame()
-        if not {"item", "value"}.issubset(set(spot.columns)):
-            return pd.DataFrame()
-        kv = dict(zip(spot["item"].astype(str), spot["value"]))
+        with AKSHARE_CALL_LOCK:
+            ak = self._ak()
+            spot = ak.stock_individual_spot_xq(symbol=self._xq_symbol(symbol))
+            if spot is None or spot.empty:
+                return pd.DataFrame()
+            if not {"item", "value"}.issubset(set(spot.columns)):
+                return pd.DataFrame()
+            kv = dict(zip(spot["item"].astype(str), spot["value"]))
 
-        date_val = pd.to_datetime(kv.get("时间"), errors="coerce")
-        if pd.isna(date_val):
-            date_val = pd.to_datetime(cn_today_str())
-        row = {
-            "Date": pd.to_datetime(date_val).normalize(),
-            "Open": pd.to_numeric(kv.get("今开"), errors="coerce"),
-            "High": pd.to_numeric(kv.get("最高"), errors="coerce"),
-            "Low": pd.to_numeric(kv.get("最低"), errors="coerce"),
-            "Close": pd.to_numeric(kv.get("现价"), errors="coerce"),
-            "Volume": pd.to_numeric(kv.get("成交量"), errors="coerce"),
-        }
-        rt = pd.DataFrame([row]).dropna(subset=["Open", "High", "Low", "Close", "Volume"])
-        return rt
+            date_val = pd.to_datetime(kv.get("时间"), errors="coerce")
+            if pd.isna(date_val):
+                date_val = pd.to_datetime(cn_today_str())
+            row = {
+                "Date": pd.to_datetime(date_val).normalize(),
+                "Open": pd.to_numeric(kv.get("今开"), errors="coerce"),
+                "High": pd.to_numeric(kv.get("最高"), errors="coerce"),
+                "Low": pd.to_numeric(kv.get("最低"), errors="coerce"),
+                "Close": pd.to_numeric(kv.get("现价"), errors="coerce"),
+                "Volume": pd.to_numeric(kv.get("成交量"), errors="coerce"),
+            }
+            rt = pd.DataFrame([row]).dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+            return rt
 
     def _maybe_append_realtime_row(self, symbol: str, hist_df: pd.DataFrame, end_date: str) -> pd.DataFrame:
         if hist_df is None:
@@ -359,77 +370,79 @@ class CnAkshareProvider(BaseMarketDataProvider):
         return result
 
     def get_fundamentals(self, ticker: str, curr_date: str = None) -> str:
-        ak = self._ak()
-        code = self._normalize_symbol(ticker)
-        errors = []
+        with AKSHARE_CALL_LOCK:
+            ak = self._ak()
+            code = self._normalize_symbol(ticker)
+            errors = []
 
-        info_df = None
-        try:
-            info_df = ak.stock_individual_info_em(symbol=code)
-        except Exception as exc:
-            errors.append(f"stock_individual_info_em: {type(exc).__name__}")
-
-        if info_df is None or info_df.empty:
+            info_df = None
             try:
-                info_df = ak.stock_individual_basic_info_xq(symbol=self._xq_symbol(ticker))
-                if not info_df.empty and set(info_df.columns) >= {"item", "value"}:
-                    info_df = info_df.rename(columns={"item": "item", "value": "value"})
+                info_df = ak.stock_individual_info_em(symbol=code)
             except Exception as exc:
-                errors.append(f"stock_individual_basic_info_xq: {type(exc).__name__}")
+                errors.append(f"stock_individual_info_em: {type(exc).__name__}")
 
-        abstract_df = None
-        try:
-            abstract_df = ak.stock_financial_abstract(symbol=code)
-        except Exception as exc:
-            errors.append(f"stock_financial_abstract: {type(exc).__name__}")
+            if info_df is None or info_df.empty:
+                try:
+                    info_df = ak.stock_individual_basic_info_xq(symbol=self._xq_symbol(ticker))
+                    if not info_df.empty and set(info_df.columns) >= {"item", "value"}:
+                        info_df = info_df.rename(columns={"item": "item", "value": "value"})
+                except Exception as exc:
+                    errors.append(f"stock_individual_basic_info_xq: {type(exc).__name__}")
 
-        parts = [f"## Fundamentals for {ticker}"]
-        if info_df is not None and not info_df.empty:
-            for c in info_df.columns:
-                info_df[c] = info_df[c].astype(str).str.slice(0, 220)
-            parts.append("### Company Profile")
-            parts.append(info_df.head(40).to_markdown(index=False))
-        if abstract_df is not None and not abstract_df.empty:
-            parts.append("### Financial Abstract (latest available columns)")
-            metric_cols = [c for c in abstract_df.columns if c not in ("选项", "指标")]
-            top_cols = metric_cols[:8]
-            cols = [c for c in ("选项", "指标") if c in abstract_df.columns] + top_cols
-            parts.append(self._shrink_table(abstract_df[cols], max_rows=20, max_cols=10).to_markdown(index=False))
+            abstract_df = None
+            try:
+                abstract_df = ak.stock_financial_abstract(symbol=code)
+            except Exception as exc:
+                errors.append(f"stock_financial_abstract: {type(exc).__name__}")
 
-        if len(parts) > 1:
-            return "\n\n".join(parts)
+            parts = [f"## Fundamentals for {ticker}"]
+            if info_df is not None and not info_df.empty:
+                for c in info_df.columns:
+                    info_df[c] = info_df[c].astype(str).str.slice(0, 220)
+                parts.append("### Company Profile")
+                parts.append(info_df.head(40).to_markdown(index=False))
+            if abstract_df is not None and not abstract_df.empty:
+                parts.append("### Financial Abstract (latest available columns)")
+                metric_cols = [c for c in abstract_df.columns if c not in ("选项", "指标")]
+                top_cols = metric_cols[:8]
+                cols = [c for c in ("选项", "指标") if c in abstract_df.columns] + top_cols
+                parts.append(self._shrink_table(abstract_df[cols], max_rows=20, max_cols=10).to_markdown(index=False))
 
-        raise NotImplementedError(
-            "cn_akshare is temporarily unavailable for fundamentals: "
-            + "; ".join(errors)
-        )
+            if len(parts) > 1:
+                return "\n\n".join(parts)
+
+            raise NotImplementedError(
+                "cn_akshare is temporarily unavailable for fundamentals: "
+                + "; ".join(errors)
+            )
 
     def _financial_report_sina(self, ticker: str, report_name: str) -> str:
-        ak = self._ak()
-        symbol = self._sina_symbol(ticker)
-        errors = []
-        try:
-            df = ak.stock_financial_report_sina(stock=symbol, symbol=report_name)
-            if df is None or df.empty:
-                raise ValueError("empty dataframe")
-            return self._shrink_table(df, max_rows=12, max_cols=18).to_markdown(index=False)
-        except Exception as exc:
-            errors.append(f"stock_financial_report_sina: {type(exc).__name__}")
+        with AKSHARE_CALL_LOCK:
+            ak = self._ak()
+            symbol = self._sina_symbol(ticker)
+            errors = []
+            try:
+                df = ak.stock_financial_report_sina(stock=symbol, symbol=report_name)
+                if df is None or df.empty:
+                    raise ValueError("empty dataframe")
+                return self._shrink_table(df, max_rows=12, max_cols=18).to_markdown(index=False)
+            except Exception as exc:
+                errors.append(f"stock_financial_report_sina: {type(exc).__name__}")
 
-        code = self._normalize_symbol(ticker)
-        indicator = "按报告期"
-        try:
-            # 同花顺摘要表作为备用，口径不完全一致但可作为降级保障
-            df = ak.stock_financial_abstract_new_ths(symbol=code, indicator=indicator)
-            if df is None or df.empty:
-                raise ValueError("empty dataframe")
-            return self._shrink_table(df, max_rows=12, max_cols=18).to_markdown(index=False)
-        except Exception as exc:
-            errors.append(f"stock_financial_abstract_new_ths: {type(exc).__name__}")
+            code = self._normalize_symbol(ticker)
+            indicator = "按报告期"
+            try:
+                # 同花顺摘要表作为备用，口径不完全一致但可作为降级保障
+                df = ak.stock_financial_abstract_new_ths(symbol=code, indicator=indicator)
+                if df is None or df.empty:
+                    raise ValueError("empty dataframe")
+                return self._shrink_table(df, max_rows=12, max_cols=18).to_markdown(index=False)
+            except Exception as exc:
+                errors.append(f"stock_financial_abstract_new_ths: {type(exc).__name__}")
 
-        raise NotImplementedError(
-            f"cn_akshare is temporarily unavailable for {report_name}: {'; '.join(errors)}"
-        )
+            raise NotImplementedError(
+                f"cn_akshare is temporarily unavailable for {report_name}: {'; '.join(errors)}"
+            )
 
     def get_balance_sheet(
         self, ticker: str, freq: str = "quarterly", curr_date: str = None
@@ -450,114 +463,117 @@ class CnAkshareProvider(BaseMarketDataProvider):
         return f"## Income Statement ({ticker})\n\n{table}"
 
     def get_news(self, ticker: str, start_date: str, end_date: str) -> str:
-        ak = self._ak()
-        code = self._normalize_symbol(ticker)
-        try:
-            df = ak.stock_news_em(symbol=code)
-            if df is None or df.empty:
-                return f"No news found for {ticker}"
+        with AKSHARE_CALL_LOCK:
+            ak = self._ak()
+            code = self._normalize_symbol(ticker)
+            try:
+                df = ak.stock_news_em(symbol=code)
+                if df is None or df.empty:
+                    return f"No news found for {ticker}"
 
-            date_col = "发布时间" if "发布时间" in df.columns else None
-            if date_col is not None:
-                df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-                end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
-                df = df[(df[date_col] >= start_dt) & (df[date_col] < end_dt)]
+                date_col = "发布时间" if "发布时间" in df.columns else None
+                if date_col is not None:
+                    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+                    df = df[(df[date_col] >= start_dt) & (df[date_col] < end_dt)]
 
-            if df.empty:
-                return f"No news found for {ticker} between {start_date} and {end_date}"
+                if df.empty:
+                    return f"No news found for {ticker} between {start_date} and {end_date}"
 
-            rows = []
-            for _, row in df.head(20).iterrows():
-                title = str(row.get("新闻标题", row.get("标题", "No title")))
-                src = str(row.get("文章来源", row.get("来源", "Unknown")))
-                summary = str(row.get("新闻内容", row.get("内容", "")))
-                link = str(row.get("新闻链接", row.get("链接", "")))
-                rows.append(f"### {title} (source: {src})")
-                if summary and summary != "nan":
-                    rows.append(summary[:400])
-                if link and link != "nan":
-                    rows.append(f"Link: {link}")
-                rows.append("")
+                rows = []
+                for _, row in df.head(20).iterrows():
+                    title = str(row.get("新闻标题", row.get("标题", "No title")))
+                    src = str(row.get("文章来源", row.get("来源", "Unknown")))
+                    summary = str(row.get("新闻内容", row.get("内容", "")))
+                    link = str(row.get("新闻链接", row.get("链接", "")))
+                    rows.append(f"### {title} (source: {src})")
+                    if summary and summary != "nan":
+                        rows.append(summary[:400])
+                    if link and link != "nan":
+                        rows.append(f"Link: {link}")
+                    rows.append("")
 
-            return f"## {ticker} 新闻（{start_date} 至 {end_date}）：\n\n" + "\n".join(rows)
-        except Exception as exc:
-            raise NotImplementedError(
-                f"cn_akshare is temporarily unavailable for news: {exc}"
-            ) from exc
+                return f"## {ticker} 新闻（{start_date} 至 {end_date}）：\n\n" + "\n".join(rows)
+            except Exception as exc:
+                raise NotImplementedError(
+                    f"cn_akshare is temporarily unavailable for news: {exc}"
+                ) from exc
 
     def get_global_news(
         self, curr_date: str, look_back_days: int = 7, limit: int = 50
     ) -> str:
-        ak = self._ak()
-        try:
-            if hasattr(ak, "news_cctv"):
-                target_dt = datetime.strptime(curr_date, "%Y-%m-%d")
-                used_date = curr_date
-                df = ak.news_cctv(date=curr_date.replace("-", ""))
-                if df is None or df.empty:
-                    # Fallback: if today's feed is empty, try recent 3 days.
-                    for back in range(1, 4):
-                        probe_dt = target_dt - timedelta(days=back)
-                        probe_date = probe_dt.strftime("%Y-%m-%d")
-                        probe_df = ak.news_cctv(date=probe_date.replace("-", ""))
-                        if probe_df is not None and not probe_df.empty:
-                            df = probe_df
-                            used_date = probe_date
-                            break
-                if df is None or df.empty:
-                    return f"{curr_date} 未获取到全球市场新闻（已回看最近3天）"
-                rows = []
-                for _, row in df.head(limit).iterrows():
-                    title = str(row.get("title", row.get("标题", "No title")))
-                    content = str(row.get("content", row.get("内容", "")))
-                    rows.append(f"### {title}")
-                    if content and content != "nan":
-                        rows.append(content[:300])
-                    rows.append("")
-                start = (
-                    datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=look_back_days)
-                ).strftime("%Y-%m-%d")
-                if used_date != curr_date:
-                    return (
-                        f"## 全球市场新闻（{start} 至 {curr_date}，当日为空，回退至 {used_date}）：\n\n"
-                        + "\n".join(rows)
-                    )
-                return f"## 全球市场新闻（{start} 至 {curr_date}）：\n\n" + "\n".join(rows)
-            return "当前 cn_akshare 实现暂不支持全球新闻接口。"
-        except Exception as exc:
-            raise NotImplementedError(
-                f"cn_akshare is temporarily unavailable for global news: {exc}"
-            ) from exc
+        with AKSHARE_CALL_LOCK:
+            ak = self._ak()
+            try:
+                if hasattr(ak, "news_cctv"):
+                    target_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+                    used_date = curr_date
+                    df = ak.news_cctv(date=curr_date.replace("-", ""))
+                    if df is None or df.empty:
+                        # Fallback: if today's feed is empty, try recent 3 days.
+                        for back in range(1, 4):
+                            probe_dt = target_dt - timedelta(days=back)
+                            probe_date = probe_dt.strftime("%Y-%m-%d")
+                            probe_df = ak.news_cctv(date=probe_date.replace("-", ""))
+                            if probe_df is not None and not probe_df.empty:
+                                df = probe_df
+                                used_date = probe_date
+                                break
+                    if df is None or df.empty:
+                        return f"{curr_date} 未获取到全球市场新闻（已回看最近3天）"
+                    rows = []
+                    for _, row in df.head(limit).iterrows():
+                        title = str(row.get("title", row.get("标题", "No title")))
+                        content = str(row.get("content", row.get("内容", "")))
+                        rows.append(f"### {title}")
+                        if content and content != "nan":
+                            rows.append(content[:300])
+                        rows.append("")
+                    start = (
+                        datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=look_back_days)
+                    ).strftime("%Y-%m-%d")
+                    if used_date != curr_date:
+                        return (
+                            f"## 全球市场新闻（{start} 至 {curr_date}，当日为空，回退至 {used_date}）：\n\n"
+                            + "\n".join(rows)
+                        )
+                    return f"## 全球市场新闻（{start} 至 {curr_date}）：\n\n" + "\n".join(rows)
+                return "当前 cn_akshare 实现暂不支持全球新闻接口。"
+            except Exception as exc:
+                raise NotImplementedError(
+                    f"cn_akshare is temporarily unavailable for global news: {exc}"
+                ) from exc
 
     def get_insider_transactions(self, symbol: str) -> str:
-        ak = self._ak()
-        code = self._normalize_symbol(symbol)
-        errors = []
-        try:
-            # stock_ggcg_em 不支持按个股代码查询，默认全市场数据量较大
-            df = ak.stock_main_stock_holder(stock=code)
-            if df is not None and not df.empty:
+        with AKSHARE_CALL_LOCK:
+            ak = self._ak()
+            code = self._normalize_symbol(symbol)
+            errors = []
+            try:
+                # stock_ggcg_em 不支持按个股代码查询，默认全市场数据量较大
+                df = ak.stock_main_stock_holder(stock=code)
+                if df is not None and not df.empty:
+                    return (
+                        f"## Insider Transactions for {symbol}\n\n"
+                        f"{df.head(20).to_markdown(index=False)}"
+                    )
+                errors.append("stock_main_stock_holder: empty dataframe")
+            except Exception as exc:
+                errors.append(f"stock_main_stock_holder: {type(exc).__name__}")
+
+            try:
+                # 退化为最近相关新闻，至少保证接口有可用输出
+                end_date = datetime.now().strftime("%Y-%m-%d")
+                start_date = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+                news = self.get_news(symbol, start_date, end_date)
                 return (
                     f"## Insider Transactions for {symbol}\n\n"
-                    f"{df.head(20).to_markdown(index=False)}"
+                    f"未获取到股东交易明细，降级返回近两周公司相关新闻：\n\n{news}"
                 )
-            errors.append("stock_main_stock_holder: empty dataframe")
-        except Exception as exc:
-            errors.append(f"stock_main_stock_holder: {type(exc).__name__}")
+            except Exception as exc:
+                errors.append(f"news_fallback: {type(exc).__name__}")
 
-        try:
-            # 退化为最近相关新闻，至少保证接口有可用输出
-            end_date = datetime.now().strftime("%Y-%m-%d")
-            start_date = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
-            news = self.get_news(symbol, start_date, end_date)
-            return (
-                f"## Insider Transactions for {symbol}\n\n"
-                f"未获取到股东交易明细，降级返回近两周公司相关新闻：\n\n{news}"
+            raise NotImplementedError(
+                f"cn_akshare is temporarily unavailable for insider transactions: {'; '.join(errors)}"
             )
-        except Exception as exc:
-            errors.append(f"news_fallback: {type(exc).__name__}")
-
-        raise NotImplementedError(
-            f"cn_akshare is temporarily unavailable for insider transactions: {'; '.join(errors)}"
-        )

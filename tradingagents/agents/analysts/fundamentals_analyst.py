@@ -1,54 +1,72 @@
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-import time
-import json
-from tradingagents.agents.utils.agent_utils import get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement, get_insider_transactions
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from tradingagents.agents.utils.agent_utils import (
+    get_balance_sheet,
+    get_cashflow,
+    get_fundamentals,
+    get_income_statement,
+)
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
 
 
 def create_fundamentals_analyst(llm):
+    def _invoke_tool(tool, payload):
+        try:
+            return tool.invoke(payload)
+        except Exception as exc:
+            return f"{tool.name} 调用失败：{type(exc).__name__}: {exc}"
+
     def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
-        company_name = state["company_of_interest"]
-
-        tools = [
-            get_fundamentals,
-            get_balance_sheet,
-            get_cashflow,
-            get_income_statement,
-        ]
 
         config = get_config()
         system_message = get_prompt("fundamentals_system_message", config=config)
 
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    get_prompt("fundamentals_collab_system", config=config),
-                ),
-                MessagesPlaceholder(variable_name="messages"),
-            ]
-        )
+        tool_outputs = {
+            "fundamentals": _invoke_tool(
+                get_fundamentals,
+                {"ticker": ticker, "curr_date": current_date},
+            ),
+            "balance_sheet": _invoke_tool(
+                get_balance_sheet,
+                {"ticker": ticker, "freq": "quarterly", "curr_date": current_date},
+            ),
+            "cashflow": _invoke_tool(
+                get_cashflow,
+                {"ticker": ticker, "freq": "quarterly", "curr_date": current_date},
+            ),
+            "income_statement": _invoke_tool(
+                get_income_statement,
+                {"ticker": ticker, "freq": "quarterly", "curr_date": current_date},
+            ),
+        }
 
-        prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
-        prompt = prompt.partial(current_date=current_date)
-        prompt = prompt.partial(ticker=ticker)
+        messages = [
+            SystemMessage(
+                content=(
+                    system_message
+                    + "\n\n你已经拿到基本面与财务报表结果。现在只基于这些结果写报告，"
+                    "不要继续请求工具，不要输出 <longcat_tool_call>、XML、JSON 或伪函数调用。"
+                    "请全程使用中文。"
+                )
+            ),
+            HumanMessage(
+                content=(
+                    f"以下是为 {ticker} 在 {current_date} 主动获取的基本面资料。"
+                    "请严格基于这些资料输出基本面分析；只有当工具结果明确失败或为空时，才允许说明数据不足。\n\n"
+                    f"【get_fundamentals】\n{tool_outputs['fundamentals']}\n\n"
+                    f"【get_balance_sheet】\n{tool_outputs['balance_sheet']}\n\n"
+                    f"【get_cashflow】\n{tool_outputs['cashflow']}\n\n"
+                    f"【get_income_statement】\n{tool_outputs['income_statement']}\n"
+                )
+            ),
+        ]
 
-        chain = prompt | llm.bind_tools(tools)
-
-        result = chain.invoke(state["messages"])
-
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
-
+        result = llm.invoke(messages)
         return {
-            "messages": [result],
-            "fundamentals_report": report,
+            "fundamentals_report": result.content,
         }
 
     return fundamentals_analyst_node

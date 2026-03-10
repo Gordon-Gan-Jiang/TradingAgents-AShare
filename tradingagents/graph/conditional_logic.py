@@ -15,33 +15,33 @@ class ConditionalLogic:
         """Determine if market analysis should continue."""
         messages = state["messages"]
         last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools_market"
-        return "Msg Clear Market"
+        if getattr(last_message, "tool_calls", None):
+            return "continue"
+        return "done"
 
     def should_continue_social(self, state: AgentState):
         """Determine if social media analysis should continue."""
         messages = state["messages"]
         last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools_social"
-        return "Msg Clear Social"
+        if getattr(last_message, "tool_calls", None):
+            return "continue"
+        return "done"
 
     def should_continue_news(self, state: AgentState):
         """Determine if news analysis should continue."""
         messages = state["messages"]
         last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools_news"
-        return "Msg Clear News"
+        if getattr(last_message, "tool_calls", None):
+            return "continue"
+        return "done"
 
     def should_continue_fundamentals(self, state: AgentState):
         """Determine if fundamentals analysis should continue."""
         messages = state["messages"]
         last_message = messages[-1]
-        if last_message.tool_calls:
-            return "tools_fundamentals"
-        return "Msg Clear Fundamentals"
+        if getattr(last_message, "tool_calls", None):
+            return "continue"
+        return "done"
 
     def should_continue_debate(self, state: AgentState) -> str:
         """Determine if debate should continue."""
