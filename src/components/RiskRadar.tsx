@@ -1,5 +1,4 @@
 import { AlertTriangle, Shield, AlertCircle } from 'lucide-react'
-import { useAnalysisStore } from '@/stores/analysisStore'
 import type { RiskItem } from '@/types'
 
 const LEVEL_CONFIG = {
@@ -8,10 +7,8 @@ const LEVEL_CONFIG = {
     low: { color: 'text-emerald-400', bg: 'bg-emerald-500/20', label: '低风险', icon: Shield },
 }
 
-export default function RiskRadar() {
-    const { riskItems } = useAnalysisStore()
-
-    const risks: RiskItem[] = riskItems
+export default function RiskRadar({ items }: { items?: RiskItem[] }) {
+    const risks: RiskItem[] = items ?? []
 
     return (
         <div className="card p-4">

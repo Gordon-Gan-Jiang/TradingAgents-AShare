@@ -5,7 +5,8 @@ import { api } from '@/services/api'
 import type { Report, ReportDetail } from '@/types'
 import DecisionCard from '@/components/DecisionCard'
 import ReportViewer from '@/components/ReportViewer'
-import KlinePanel from '@/components/KlinePanel'
+import RiskRadar from '@/components/RiskRadar'
+import KeyMetrics from '@/components/KeyMetrics'
 import { useAuthStore } from '@/stores/authStore'
 
 const parseDecision = (decisionText?: string): { action: 'add' | 'reduce' | 'hold'; label: string } => {
@@ -212,25 +213,22 @@ export default function Reports() {
                     </div>
                 )}
 
-                {/* 主体：左列决策卡 + K线，右列报告全文 */}
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-                    <div className="space-y-4">
-                        <DecisionCard
-                            symbol={selectedReport.symbol}
-                            decision={action}
-                            confidence={selectedReport.confidence ?? undefined}
-                            targetPrice={selectedReport.target_price ?? undefined}
-                            stopLoss={selectedReport.stop_loss_price ?? undefined}
-                            reasoning={selectedReport.final_trade_decision?.slice(0, 300) ?? undefined}
-                        />
-                        <KlinePanel symbol={selectedReport.symbol} />
-                    </div>
+                {/* 主体：概要卡片 + 报告全文 */}
+                <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+                    <DecisionCard
+                        symbol={selectedReport.symbol}
+                        decision={action}
+                        confidence={selectedReport.confidence ?? undefined}
+                        targetPrice={selectedReport.target_price ?? undefined}
+                        stopLoss={selectedReport.stop_loss_price ?? undefined}
+                        reasoning={selectedReport.final_trade_decision?.slice(0, 300) ?? undefined}
+                    />
+                    <RiskRadar items={selectedReport.risk_items ?? undefined} />
+                    <KeyMetrics items={selectedReport.key_metrics ?? undefined} />
+                </div>
 
-                    <div className="lg:col-span-2">
-                        <div className="card">
-                            <ReportViewer reportData={selectedReport} />
-                        </div>
-                    </div>
+                <div className="card">
+                    <ReportViewer reportData={selectedReport} />
                 </div>
             </div>
         )

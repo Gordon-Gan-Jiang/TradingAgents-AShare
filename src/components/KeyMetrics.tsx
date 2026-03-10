@@ -1,5 +1,4 @@
 import { BarChart3 } from 'lucide-react'
-import { useAnalysisStore } from '@/stores/analysisStore'
 import type { KeyMetric } from '@/types'
 
 const STATUS_COLOR = {
@@ -8,10 +7,8 @@ const STATUS_COLOR = {
     bad: 'text-rose-400',
 }
 
-export default function KeyMetrics() {
-    const { keyMetrics } = useAnalysisStore()
-
-    const metrics: KeyMetric[] = keyMetrics
+export default function KeyMetrics({ items }: { items?: KeyMetric[] }) {
+    const metrics: KeyMetric[] = items ?? []
 
     return (
         <div className="card p-4">

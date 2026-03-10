@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { createJSONStorage, persist } from 'zustand/middleware'
 import type {
     Agent,
     JobStatus,
@@ -25,6 +26,15 @@ export interface ChatMessage {
     section?: string    // only for role='report'
     complete?: boolean  // only for role='report'
 }
+
+const createInitialChatMessages = (): ChatMessage[] => [
+    {
+        id: 'init',
+        role: 'assistant',
+        content: '我是你的 A 股多智能体投研助手。直接告诉我你想分析的标的和日期。',
+        timestamp: new Date().toISOString(),
+    },
+]
 
 interface AnalysisState {
     // Current Job
@@ -114,7 +124,7 @@ const initialAgents: Agent[] = [
     { id: 'portfolio_manager', name: 'Portfolio Manager', team: 'Portfolio Management', status: 'pending' },
 ]
 
-export const useAnalysisStore = create<AnalysisState>((set) => ({
+export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
     currentJobId: null,
     currentSymbol: '000001.SH',
     jobStatus: null,
@@ -127,14 +137,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
     jobStopLoss: null,
     streamingSections: {},
     milestones: [],
-    chatMessages: [
-        {
-            id: 'init',
-            role: 'assistant',
-            content: '我是你的 A 股多智能体投研助手。直接告诉我你想分析的标的和日期。',
-            timestamp: new Date().toISOString(),
-        },
-    ],
+    chatMessages: createInitialChatMessages(),
     logs: [],
     isAnalyzing: false,
     isConnected: false,
@@ -251,14 +254,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
 
     // 清空聊天记录
     clearChatMessages: () => set({
-        chatMessages: [
-            {
-                id: 'init',
-                role: 'assistant',
-                content: '我是你的 A 股多智能体投研助手。直接告诉我你想分析的标的和日期。',
-                timestamp: new Date().toISOString(),
-            },
-        ]
+        chatMessages: createInitialChatMessages()
     }),
 
     clearSession: () => set({
@@ -274,14 +270,7 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
         jobStopLoss: null,
         streamingSections: {},
         milestones: [],
-        chatMessages: [
-            {
-                id: 'init',
-                role: 'assistant',
-                content: '我是你的 A 股多智能体投研助手。直接告诉我你想分析的标的和日期。',
-                timestamp: new Date().toISOString(),
-            },
-        ],
+        chatMessages: createInitialChatMessages(),
         logs: [],
         isAnalyzing: false,
         isConnected: false,
@@ -326,4 +315,34 @@ export const useAnalysisStore = create<AnalysisState>((set) => ({
         isAnalyzing: false,
         isConnected: false
     }))
+}), {
+    name: 'tradingagents-analysis',
+    version: 1,
+    storage: createJSONStorage(() => localStorage),
+    partialize: (state) => ({
+        currentSymbol: state.currentSymbol,
+        report: state.report,
+        riskItems: state.riskItems,
+        keyMetrics: state.keyMetrics,
+        jobConfidence: state.jobConfidence,
+        jobTargetPrice: state.jobTargetPrice,
+        jobStopLoss: state.jobStopLoss,
+        chatMessages: state.chatMessages,
+    }),
+    merge: (persistedState, currentState) => {
+        const persisted = (persistedState ?? {}) as Partial<AnalysisState>
+        return {
+            ...currentState,
+            ...persisted,
+            currentJobId: null,
+            jobStatus: null,
+            agents: initialAgents.map(a => ({ ...a, status: 'pending' })),
+            streamingSections: {},
+            milestones: [],
+            logs: [],
+            isAnalyzing: false,
+            isConnected: false,
+            chatMessages: persisted.chatMessages?.length ? persisted.chatMessages : currentState.chatMessages,
+        }
+    },
 }))

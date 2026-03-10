@@ -107,15 +107,15 @@ export default function Login() {
 
                         <div className="mt-10 grid gap-3 sm:grid-cols-3">
                             {SIGNALS.map((item) => (
-                                <div key={item.label} className="rounded-[28px] border border-slate-200/80 bg-white/85 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.06)] backdrop-blur-sm dark:border-slate-800 dark:bg-slate-900/78 dark:shadow-[0_18px_44px_rgba(2,6,23,0.24)]">
+                                <div key={item.label} className="rounded-[28px] border border-slate-200/80 bg-white/88 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.06)] backdrop-blur-sm dark:border-slate-800/90 dark:bg-slate-950 dark:shadow-[0_18px_44px_rgba(2,6,23,0.32)]">
                                     <div className="text-[11px] tracking-[0.18em] text-slate-400 dark:text-slate-500">{item.label}</div>
-                                    <div className="mt-3 text-2xl font-semibold text-slate-900 dark:text-slate-100">{item.value}</div>
+                                    <div className="mt-3 text-2xl font-semibold text-slate-900 dark:text-slate-50">{item.value}</div>
                                 </div>
                             ))}
                         </div>
                     </div>
 
-                    <div className="relative mt-10 rounded-[36px] border border-slate-200/80 bg-white/88 p-6 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/78 dark:shadow-[0_28px_88px_rgba(2,6,23,0.42)] lg:mt-0">
+                    <div className="relative mt-10 rounded-[36px] border border-slate-200/80 bg-white/90 p-6 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800/90 dark:bg-slate-950 dark:shadow-[0_28px_88px_rgba(2,6,23,0.5)] lg:mt-0">
                         <div className="flex items-center justify-between">
                             <div>
                                 <div className="text-[11px] tracking-[0.22em] text-slate-400 dark:text-slate-500">12-AGENT 架构</div>
@@ -128,7 +128,7 @@ export default function Login() {
 
                         <div className="mt-6 grid gap-3 md:grid-cols-2">
                             {AGENT_GROUPS.map((group) => (
-                                <div key={group.title} className="rounded-[24px] border border-slate-200/80 bg-slate-50/85 p-4 dark:border-slate-800 dark:bg-slate-900/72">
+                                <div key={group.title} className="rounded-[24px] border border-slate-200/80 bg-slate-50/90 p-4 dark:border-slate-800/90 dark:bg-slate-900">
                                     <div className="flex items-center justify-between">
                                         <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{group.title}</div>
                                         <div className="rounded-full bg-cyan-500/10 px-2.5 py-0.5 text-xs font-medium text-cyan-600 dark:text-cyan-300">
@@ -137,7 +137,7 @@ export default function Login() {
                                     </div>
                                     <div className="mt-3 flex flex-wrap gap-2">
                                         {group.items.map((item) => (
-                                            <span key={item} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-300">
+                                            <span key={item} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-200 dark:ring-1 dark:ring-slate-700/70">
                                                 {item}
                                             </span>
                                         ))}
@@ -147,7 +147,7 @@ export default function Login() {
                             ))}
                         </div>
 
-                        <div className="mt-5 flex items-start gap-3 rounded-[24px] bg-slate-950 px-4 py-4 text-slate-100 dark:bg-slate-900">
+                        <div className="mt-5 flex items-start gap-3 rounded-[24px] bg-slate-950 px-4 py-4 text-slate-100 dark:border dark:border-slate-800/80 dark:bg-slate-900">
                             <TrendingUp className="mt-0.5 h-4 w-4 shrink-0 text-cyan-400" />
                             <div className="text-sm leading-6 text-slate-300">
                                 登录后可持续保存研究历史、模型配置与分析上下文，用于跟踪同一标的在不同日期下的判断演进。
@@ -158,7 +158,7 @@ export default function Login() {
 
                 <section className="flex items-center px-2 py-4 lg:justify-end lg:px-8 lg:py-10">
                     <div className="w-full max-w-md">
-                        <div className="rounded-[36px] border border-slate-200/80 bg-white/92 p-7 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/88 dark:shadow-[0_28px_88px_rgba(2,6,23,0.44)]">
+                        <div className="rounded-[36px] border border-slate-200/80 bg-white/92 p-7 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800/90 dark:bg-slate-950 dark:shadow-[0_28px_88px_rgba(2,6,23,0.56)]">
                             <div className="flex items-center justify-between">
                                 <div>
                                     <div className="text-[11px] tracking-[0.22em] text-slate-400 dark:text-slate-500">身份验证</div>
@@ -169,7 +169,7 @@ export default function Login() {
                                 </div>
                             </div>
 
-                            <div className="mt-6 flex items-center gap-2 rounded-2xl bg-slate-100 p-1 dark:bg-slate-900">
+                            <div className="mt-6 flex items-center gap-2 rounded-2xl bg-slate-100 p-1 dark:bg-slate-900 dark:ring-1 dark:ring-slate-800">
                                 <div className={`flex-1 rounded-xl px-3 py-2 text-center text-sm transition-colors ${step === 'email' ? 'bg-white text-slate-950 shadow-sm dark:bg-slate-800 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
                                     邮箱验证
                                 </div>
@@ -220,7 +220,7 @@ export default function Login() {
                                     </div>
                                 )}
                                 {error && (
-                                    <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
+                                    <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/12 dark:text-rose-200">
                                         {error}
                                     </div>
                                 )}
@@ -246,7 +246,7 @@ export default function Login() {
                                 )}
                             </form>
 
-                            <div className="mt-6 rounded-2xl bg-slate-100/90 px-4 py-3 text-xs leading-6 text-slate-500 dark:bg-slate-900 dark:text-slate-400">
+                            <div className="mt-6 rounded-2xl bg-slate-100/90 px-4 py-3 text-xs leading-6 text-slate-500 dark:border dark:border-slate-800/80 dark:bg-slate-900 dark:text-slate-400">
                                 当前账户将独占保存报告历史、模型密钥与分析上下文，适合持续跟踪个人研究对象。
                             </div>
                         </div>

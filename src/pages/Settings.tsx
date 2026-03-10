@@ -1,7 +1,41 @@
-import { useState, useEffect } from 'react'
-import { Save, Key, Database, Loader2, MessageSquare, User, Trash2 } from 'lucide-react'
+import { useState, useEffect, useMemo } from 'react'
+import { Save, Key, Database, Loader2, MessageSquare, User, Trash2, Link2 } from 'lucide-react'
 import { api } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
+
+type ProviderPreset = {
+    id: string
+    label: string
+    provider: string
+    baseUrl: string
+    protocol: string
+    editableBaseUrl?: boolean
+}
+
+const PROVIDER_PRESETS: ProviderPreset[] = [
+    { id: 'openai', label: 'OpenAI', provider: 'openai', baseUrl: 'https://api.openai.com/v1', protocol: 'OpenAI' },
+    { id: 'anthropic', label: 'Anthropic', provider: 'anthropic', baseUrl: '', protocol: 'Anthropic' },
+    { id: 'google', label: 'Google Gemini', provider: 'google', baseUrl: '', protocol: 'Google' },
+    { id: 'dashscope', label: '阿里云百炼（DashScope）', provider: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', protocol: 'OpenAI 兼容' },
+    { id: 'deepseek', label: 'DeepSeek', provider: 'openai', baseUrl: 'https://api.deepseek.com/v1', protocol: 'OpenAI 兼容' },
+    { id: 'moonshot', label: 'Moonshot AI（Kimi）', provider: 'openai', baseUrl: 'https://api.moonshot.cn/v1', protocol: 'OpenAI 兼容' },
+    { id: 'zhipu', label: '智谱 AI', provider: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'OpenAI 兼容' },
+    { id: 'siliconflow', label: '硅基流动', provider: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', protocol: 'OpenAI 兼容' },
+    { id: 'custom-openai', label: '自定义 OpenAI 兼容', provider: 'openai', baseUrl: '', protocol: 'OpenAI 兼容', editableBaseUrl: true },
+]
+
+function inferPreset(llmProvider: string, backendUrl: string): string {
+    const normalizedProvider = (llmProvider || '').toLowerCase()
+    const normalizedUrl = (backendUrl || '').replace(/\/$/, '')
+    const matched = PROVIDER_PRESETS.find((preset) => {
+        if (preset.provider !== normalizedProvider) return false
+        if (!preset.baseUrl && preset.id !== 'custom-openai') return true
+        return preset.baseUrl.replace(/\/$/, '') === normalizedUrl
+    })
+    if (matched) return matched.id
+    if (normalizedProvider === 'openai') return 'custom-openai'
+    return normalizedProvider || 'openai'
+}
 
 export default function Settings() {
     const { user } = useAuthStore()
@@ -10,19 +44,27 @@ export default function Settings() {
     const [llmApiKey, setLlmApiKey] = useState('')
     const [hasStoredApiKey, setHasStoredApiKey] = useState(false)
 
-    // LLM config (synced with backend)
-    const [llmProvider, setLlmProvider] = useState('openai')
+    const [providerPreset, setProviderPreset] = useState('openai')
+    const [customBaseUrl, setCustomBaseUrl] = useState('')
     const [deepThinkLlm, setDeepThinkLlm] = useState('')
     const [quickThinkLlm, setQuickThinkLlm] = useState('')
     const [maxDebateRounds, setMaxDebateRounds] = useState(1)
     const [maxRiskRounds, setMaxRiskRounds] = useState(1)
+    const [serverFallbackEnabled, setServerFallbackEnabled] = useState(true)
 
     const [configLoading, setConfigLoading] = useState(false)
     const [saving, setSaving] = useState(false)
     const [saved, setSaved] = useState(false)
     const [configError, setConfigError] = useState<string | null>(null)
 
-    // Load local settings from localStorage
+    const selectedPreset = useMemo(
+        () => PROVIDER_PRESETS.find((item) => item.id === providerPreset) || PROVIDER_PRESETS[0],
+        [providerPreset],
+    )
+
+    const effectiveProvider = selectedPreset.provider
+    const effectiveBaseUrl = selectedPreset.editableBaseUrl ? customBaseUrl.trim() : selectedPreset.baseUrl
+
     useEffect(() => {
         try {
             const stored = localStorage.getItem('tradingagents-settings')
@@ -40,18 +82,19 @@ export default function Settings() {
         } catch {}
     }, [])
 
-    // Fetch backend LLM config
     useEffect(() => {
         setConfigLoading(true)
         setConfigError(null)
         api.getConfig()
             .then(cfg => {
-                setLlmProvider(cfg.llm_provider)
+                setProviderPreset(inferPreset(cfg.llm_provider, cfg.backend_url))
+                setCustomBaseUrl(cfg.backend_url || '')
                 setDeepThinkLlm(cfg.deep_think_llm)
                 setQuickThinkLlm(cfg.quick_think_llm)
                 setMaxDebateRounds(cfg.max_debate_rounds)
                 setMaxRiskRounds(cfg.max_risk_discuss_rounds)
                 setHasStoredApiKey(!!cfg.has_api_key)
+                setServerFallbackEnabled(!!cfg.server_fallback_enabled)
             })
             .catch(err => {
                 setConfigError(err instanceof Error ? err.message : '无法连接到后端')
@@ -61,16 +104,15 @@ export default function Settings() {
 
     const handleSave = async () => {
         setSaving(true)
-        // Save local settings
         localStorage.setItem('tradingagents-settings', JSON.stringify({
             defaultAnalysts,
             customPrompt,
         }))
         localStorage.setItem('ta-custom-prompt', customPrompt)
-        // Push LLM config to backend
         try {
             const response = await api.updateConfig({
-                llm_provider: llmProvider,
+                llm_provider: effectiveProvider,
+                backend_url: effectiveBaseUrl || undefined,
                 deep_think_llm: deepThinkLlm,
                 quick_think_llm: quickThinkLlm,
                 max_debate_rounds: maxDebateRounds,
@@ -128,11 +170,10 @@ export default function Settings() {
                 </div>
             </div>
 
-            {/* LLM Config */}
             <div className="card space-y-4">
                 <div className="flex items-center gap-2">
                     <Database className="w-5 h-5 text-purple-500" />
-                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">LLM 配置</h2>
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">模型接入</h2>
                     {configLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400 ml-auto" />}
                 </div>
 
@@ -140,24 +181,53 @@ export default function Settings() {
                     <p className="text-sm text-amber-500">⚠ {configError}（显示本地默认值）</p>
                 )}
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                         <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
-                            LLM 提供商
+                            模型厂商
                         </label>
                         <select
-                            value={llmProvider}
-                            onChange={e => setLlmProvider(e.target.value)}
+                            value={providerPreset}
+                            onChange={e => setProviderPreset(e.target.value)}
                             className="input w-full"
                             disabled={configLoading}
                         >
-                            <option value="openai">OpenAI</option>
-                            <option value="anthropic">Anthropic</option>
-                            <option value="google">Google</option>
-                            <option value="dashscope">阿里云 DashScope</option>
-                            <option value="deepseek">DeepSeek</option>
+                            {PROVIDER_PRESETS.map((preset) => (
+                                <option key={preset.id} value={preset.id}>{preset.label}</option>
+                            ))}
                         </select>
                     </div>
+
+                    <div>
+                        <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
+                            接入协议
+                        </label>
+                        <div className="input w-full flex items-center gap-2 bg-slate-50 dark:bg-slate-900/70 text-slate-600 dark:text-slate-300">
+                            <Link2 className="w-4 h-4 text-slate-400" />
+                            <span>{selectedPreset.protocol}</span>
+                        </div>
+                    </div>
+
+                    {(selectedPreset.baseUrl || selectedPreset.editableBaseUrl) && (
+                        <div className="md:col-span-2">
+                            <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
+                                Base URL
+                            </label>
+                            <input
+                                type="text"
+                                value={selectedPreset.editableBaseUrl ? customBaseUrl : selectedPreset.baseUrl}
+                                onChange={e => setCustomBaseUrl(e.target.value)}
+                                className="input w-full"
+                                disabled={configLoading || !selectedPreset.editableBaseUrl}
+                                placeholder="https://your-openai-compatible-endpoint/v1"
+                            />
+                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                {selectedPreset.editableBaseUrl
+                                    ? '自定义 OpenAI 兼容服务需要自行填写 Base URL。'
+                                    : '该厂商默认通过预设的 OpenAI 兼容地址接入，通常只需填写模型名和 API Key。'}
+                            </p>
+                        </div>
+                    )}
 
                     <div>
                         <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
@@ -168,7 +238,7 @@ export default function Settings() {
                             value={deepThinkLlm}
                             onChange={e => setDeepThinkLlm(e.target.value)}
                             className="input w-full"
-                            placeholder="e.g. gpt-4o"
+                            placeholder="例如：gpt-4.1 / deepseek-reasoner / kimi-k2-0905-preview"
                             disabled={configLoading}
                         />
                     </div>
@@ -182,12 +252,12 @@ export default function Settings() {
                             value={quickThinkLlm}
                             onChange={e => setQuickThinkLlm(e.target.value)}
                             className="input w-full"
-                            placeholder="e.g. gpt-4o-mini"
+                            placeholder="例如：gpt-4.1-mini / deepseek-chat / moonshot-v1-8k"
                             disabled={configLoading}
                         />
                     </div>
 
-                    <div>
+                    <div className="md:col-span-2">
                         <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
                             用户模型 Key
                         </label>
@@ -202,9 +272,13 @@ export default function Settings() {
                                 disabled={configLoading}
                             />
                         </div>
-                        {hasStoredApiKey && (
-                            <div className="mt-1 flex items-center justify-between gap-3">
-                                <p className="text-xs text-emerald-500">当前账户已保存私有模型密钥</p>
+                        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                            <div className="text-xs text-slate-500 dark:text-slate-400">
+                                {serverFallbackEnabled
+                                    ? '当前后端已开启公共模型回退：未填写个人 Key 时，可能仍会使用服务端默认模型配置。'
+                                    : '当前后端已关闭公共模型回退：未填写个人 Key 时，将无法发起需要模型的分析任务。'}
+                            </div>
+                            {hasStoredApiKey && (
                                 <button
                                     type="button"
                                     onClick={handleClearApiKey}
@@ -214,8 +288,8 @@ export default function Settings() {
                                     <Trash2 className="w-3.5 h-3.5" />
                                     清除密钥
                                 </button>
-                            </div>
-                        )}
+                            )}
+                        </div>
                     </div>
 
                     <div>
@@ -250,7 +324,6 @@ export default function Settings() {
                 </div>
             </div>
 
-            {/* Default Analysts */}
             <div className="card space-y-4">
                 <div className="flex items-center gap-2">
                     <Database className="w-5 h-5 text-green-500" />
@@ -259,37 +332,35 @@ export default function Settings() {
 
                 <div>
                     <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
-                        默认启用的分析师
+                        默认启用分析师
                     </label>
-                    <div className="flex flex-wrap gap-2">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                         {[
-                            { id: 'market', label: '市场分析' },
-                            { id: 'social', label: '舆情分析' },
-                            { id: 'news', label: '新闻分析' },
-                            { id: 'fundamentals', label: '基本面' },
-                        ].map(({ id, label }) => (
-                            <label
-                                key={id}
-                                className={`px-4 py-2 rounded-lg border cursor-pointer transition-all ${
-                                    defaultAnalysts.includes(id)
-                                        ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-500 text-blue-600 dark:text-blue-400'
-                                        : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-400'
-                                }`}
-                            >
-                                <input
-                                    type="checkbox"
-                                    className="sr-only"
-                                    checked={defaultAnalysts.includes(id)}
-                                    onChange={() => toggleAnalyst(id)}
-                                />
-                                {label}
-                            </label>
-                        ))}
+                            { key: 'market', label: '市场分析' },
+                            { key: 'social', label: '舆情分析' },
+                            { key: 'news', label: '新闻分析' },
+                            { key: 'fundamentals', label: '基本面' },
+                        ].map((analyst) => {
+                            const active = defaultAnalysts.includes(analyst.key)
+                            return (
+                                <button
+                                    key={analyst.key}
+                                    type="button"
+                                    onClick={() => toggleAnalyst(analyst.key)}
+                                    className={`rounded-xl border px-3 py-3 text-sm transition-colors ${
+                                        active
+                                            ? 'bg-blue-50 dark:bg-blue-500/10 border-blue-500 text-blue-600 dark:text-blue-400'
+                                            : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-400'
+                                    }`}
+                                >
+                                    {analyst.label}
+                                </button>
+                            )
+                        })}
                     </div>
                 </div>
             </div>
 
-            {/* Custom Analysis Prompt */}
             <div className="card space-y-4">
                 <div className="flex items-center gap-2">
                     <MessageSquare className="w-5 h-5 text-cyan-500" />
@@ -297,33 +368,23 @@ export default function Settings() {
                 </div>
                 <div>
                     <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
-                        追加到每次分析请求
+                        附加提示词
                     </label>
                     <textarea
                         value={customPrompt}
                         onChange={e => setCustomPrompt(e.target.value)}
-                        className="input w-full min-h-[100px] resize-y"
-                        placeholder="例如：请特别关注技术面支撑位，并结合量价关系分析。尽量给出明确的买卖点建议。"
-                        maxLength={500}
+                        className="input w-full min-h-[120px] resize-y"
+                        placeholder="例如：更关注估值安全边际、政策催化与机构资金行为。"
                     />
-                    <p className="text-xs text-slate-400 mt-1">{customPrompt.length}/500 · 留空则不追加额外提示</p>
                 </div>
             </div>
 
-            {/* Save */}
             <div className="flex items-center gap-4">
-                <button
-                    onClick={handleSave}
-                    disabled={saving}
-                    className="btn-primary flex items-center gap-2 disabled:opacity-60"
-                >
+                <button onClick={handleSave} disabled={saving} className="btn-primary inline-flex items-center gap-2">
                     {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
                     保存设置
                 </button>
-
-                {saved && (
-                    <span className="text-sm text-green-600 dark:text-green-400">✓ 设置已保存</span>
-                )}
+                {saved && <span className="text-sm text-green-600 dark:text-green-400">✓ 设置已保存</span>}
             </div>
         </div>
     )

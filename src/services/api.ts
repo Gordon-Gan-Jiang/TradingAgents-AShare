@@ -34,6 +34,12 @@ class ApiService {
         })
 
         if (!response.ok) {
+            const contentType = response.headers.get('content-type') || ''
+            if (contentType.includes('application/json')) {
+                const data = await response.json().catch(() => null)
+                const detail = data?.detail || data?.message
+                throw new Error(detail || `HTTP error! status: ${response.status}`)
+            }
             const error = await response.text()
             throw new Error(error || `HTTP error! status: ${response.status}`)
         }

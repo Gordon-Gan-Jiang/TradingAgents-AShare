@@ -12,6 +12,7 @@ import type {
     ReportChunkEvent,
     AgentWritingEvent,
     AgentToolCallDisplayEvent,
+    Report,
 } from '@/types'
 
 interface ChatCopilotPanelProps {
@@ -102,7 +103,17 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
     const [input, setInput] = useState(initialInput || '')
     const [streaming, setStreaming] = useState(false)
     const [showConfig, setShowConfig] = useState(false)
-    const [selectedAnalysts, setSelectedAnalysts] = useState<string[]>(['market', 'social', 'news', 'fundamentals'])
+    const [selectedAnalysts, setSelectedAnalysts] = useState<string[]>(() => {
+        try {
+            const stored = localStorage.getItem('tradingagents-settings')
+            if (!stored) return ['market', 'social', 'news', 'fundamentals']
+            const parsed = JSON.parse(stored) as { defaultAnalysts?: string[] }
+            if (Array.isArray(parsed.defaultAnalysts) && parsed.defaultAnalysts.length > 0) {
+                return parsed.defaultAnalysts
+            }
+        } catch {}
+        return ['market', 'social', 'news', 'fundamentals']
+    })
     // track which section IDs have been added to chatMessages and whether they're done
     const streamingReportIds = useRef<Map<string, boolean>>(new Map()) // section → isComplete
     const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -124,6 +135,61 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
         setStructuredData,
         reset,
     } = useAnalysisStore()
+
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+
+    const recoverInterruptedJob = async () => {
+        const { currentJobId } = useAnalysisStore.getState()
+        if (!currentJobId) return false
+
+        pushSystem(`分析流中断，正在回查任务状态：${currentJobId}`)
+
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+            const status = await api.getJobStatus(currentJobId)
+
+            if (status.status === 'completed') {
+                const result = await api.getJobResult(currentJobId)
+                setReport(result.result)
+
+                const symbol = result.result.symbol
+                const tradeDate = result.result.trade_date
+                if (symbol) {
+                    setCurrentSymbol(symbol)
+                    onSymbolDetected(symbol)
+                }
+
+                try {
+                    const history = await api.getReports(symbol, 0, 10)
+                    const matched = history.reports.find((item: Report) => item.trade_date === tradeDate) ?? history.reports[0]
+                    if (matched) {
+                        setStructuredData({
+                            riskItems: matched.risk_items,
+                            keyMetrics: matched.key_metrics,
+                            confidence: matched.confidence,
+                            targetPrice: matched.target_price,
+                            stopLoss: matched.stop_loss_price,
+                        })
+                    }
+                } catch {
+                    // 历史报告回填失败时，至少保留主报告正文
+                }
+
+                pushAssistant(
+                    `**分析完成（已从中断连接恢复）**\n\n最终建议：**${String(result.decision || 'HOLD')}**\n\n> 免责声明：以上内容由模型基于公开数据与规则生成，仅供研究参考，不构成任何投资建议或收益承诺。`
+                )
+                return true
+            }
+
+            if (status.status === 'failed') {
+                pushAssistant(`分析失败：${status.error || 'unknown error'}`)
+                return true
+            }
+
+            await sleep(1500)
+        }
+
+        return false
+    }
 
     useEffect(() => {
         const container = messagesContainerRef.current
@@ -356,7 +422,16 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
         try {
             await streamChat(fullPrompt)
         } catch (error) {
-            pushAssistant(`请求失败：${error instanceof Error ? error.message : 'unknown error'}`)
+            const errorMessage = error instanceof Error ? error.message : 'unknown error'
+            const shouldRecover = /network|fetch|stream|sse|body/i.test(errorMessage)
+            if (shouldRecover) {
+                const recovered = await recoverInterruptedJob()
+                if (!recovered) {
+                    pushAssistant(`请求中断：${errorMessage}\n\n后端任务可能仍在执行，请稍后到历史报告中查看结果。`)
+                }
+            } else {
+                pushAssistant(`请求失败：${errorMessage}`)
+            }
             setIsAnalyzing(false)
             setIsConnected(false)
         } finally {

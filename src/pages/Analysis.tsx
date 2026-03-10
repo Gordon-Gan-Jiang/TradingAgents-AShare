@@ -49,7 +49,16 @@ export default function Analysis() {
     const [activeSymbol, setActiveSymbol] = useState(() => querySymbol || useAnalysisStore.getState().currentSymbol || '000001.SH')
     const [activeSection, setActiveSection] = useState<string | undefined>()
     const reportRef = useRef<HTMLDivElement | null>(null)
-    const { report, currentSymbol, setCurrentSymbol, jobConfidence, jobTargetPrice, jobStopLoss } = useAnalysisStore()
+    const {
+        report,
+        currentSymbol,
+        setCurrentSymbol,
+        jobConfidence,
+        jobTargetPrice,
+        jobStopLoss,
+        riskItems,
+        keyMetrics,
+    } = useAnalysisStore()
 
     const handleShowReport = (section?: string) => {
         setActiveSection(section)
@@ -111,8 +120,8 @@ export default function Analysis() {
                         stopLoss={stopLoss}
                         reasoning={finalDecision?.slice(0, 300)}
                     />
-                    <RiskRadar />
-                    <KeyMetrics />
+                    <RiskRadar items={riskItems} />
+                    <KeyMetrics items={keyMetrics} />
                 </div>
 
                 <div ref={reportRef}>
