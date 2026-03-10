@@ -234,6 +234,7 @@ class UserRuntimeConfigResponse(BaseModel):
     max_debate_rounds: int
     max_risk_discuss_rounds: int
     has_api_key: bool = False
+    server_fallback_enabled: bool = True
 
 
 class UserRuntimeConfigUpdateRequest(BaseModel):
@@ -286,6 +287,7 @@ def _user_config_overrides(user_id: Optional[str]) -> Dict[str, Any]:
 
 def _build_runtime_config(overrides: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     config = deepcopy(DEFAULT_CONFIG)
+    server_fallback_enabled = os.getenv("ALLOW_SERVER_LLM_FALLBACK", "1").strip().lower() in ("1", "true", "yes", "on")
 
     # Env defaults (align with main.py behavior)
     config["llm_provider"] = os.getenv("LLM_PROVIDER", config["llm_provider"])
@@ -294,7 +296,11 @@ def _build_runtime_config(overrides: Dict[str, Any], user_id: Optional[str] = No
     config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", config["deep_think_llm"])
     config["max_debate_rounds"] = int(os.getenv("MAX_DEBATE_ROUNDS", "1"))
     config["max_risk_discuss_rounds"] = int(os.getenv("MAX_RISK_DISCUSS_ROUNDS", "1"))
-    config["api_key"] = os.getenv("OPENAI_API_KEY", config.get("api_key"))
+    if server_fallback_enabled:
+        config["api_key"] = os.getenv("OPENAI_API_KEY", config.get("api_key"))
+    else:
+        config["api_key"] = config.get("api_key")
+    config["server_fallback_enabled"] = server_fallback_enabled
 
     # Default CN-first provider chain
     config["data_vendors"] = {
@@ -1629,6 +1635,7 @@ def _config_response_for_user(user: Optional[UserDB], db: Session) -> UserRuntim
         max_debate_rounds=cfg["max_debate_rounds"],
         max_risk_discuss_rounds=cfg["max_risk_discuss_rounds"],
         has_api_key=bool(user_cfg and user_cfg.api_key_encrypted),
+        server_fallback_enabled=bool(cfg.get("server_fallback_enabled", True)),
     )
 
 

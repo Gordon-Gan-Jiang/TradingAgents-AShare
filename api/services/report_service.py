@@ -151,10 +151,16 @@ def create_report(
     # Prefer LLM-extracted values; fall back to regex
     confidence = confidence_override if confidence_override is not None \
         else _extract_confidence_regex(final_trade_decision)
+
     target_price = target_price_override if target_price_override is not None \
         else _extract_price_regex(final_trade_decision, "target")
+    if target_price is None:
+        target_price = _extract_price_regex(trader_investment_plan, "target")
+
     stop_loss_price = stop_loss_override if stop_loss_override is not None \
         else _extract_price_regex(final_trade_decision, "stop_loss")
+    if stop_loss_price is None:
+        stop_loss_price = _extract_price_regex(trader_investment_plan, "stop_loss")
 
     now = datetime.now(timezone.utc)
     db_report = ReportDB(
