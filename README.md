@@ -91,67 +91,59 @@ TradingAgents 是一个模拟真实交易机构协作模式的多智能体框架
   <img src="assets/risk.png" width="70%" style="display: inline-block; margin: 0 2%;">
 </p>
 
-## 安装与 CLI
+## 安装与使用
 
 ### 安装
 
 克隆项目：
 ```bash
-git clone git@home:KylinMountain/TradingAgents-AShare.git
+git clone git@github.com:KylinMountain/TradingAgents-AShare.git
 cd TradingAgents-AShare
 ```
 
-创建虚拟环境（示例）：
-```bash
-conda create -n tradingagents python=3.13
-conda activate tradingagents
-```
-
-安装依赖（推荐使用 uv）：
+安装后端依赖（推荐使用 uv）：
 ```bash
 uv sync
 ```
 
+安装前端依赖：
+```bash
+cd frontend
+npm install
+```
+
 ### 必要 API
 
-TradingAgents 支持多种 LLM 提供方。为你使用的提供方设置 API Key：
+TradingAgents 支持多种 LLM 提供方。为你使用的提供方设置 API Key（复制 `.env.example` 到 `.env` 或 `deploy/backend/.env.production` 后填写）：
 
-```bash
-export OPENAI_API_KEY=...          # OpenAI (GPT)
-export GOOGLE_API_KEY=...          # Google (Gemini)
-export ANTHROPIC_API_KEY=...       # Anthropic (Claude)
-export XAI_API_KEY=...             # xAI (Grok)
-export OPENROUTER_API_KEY=...      # OpenRouter
-export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
+```env
+OPENAI_API_KEY=your_api_key_here
+# 支持 OpenAI 兼容格式的其他模型
+# OPENAI_BASE_URL=https://api.your-provider.com/v1
+# LLM_PROVIDER=openai
+# QUICK_THINK_LLM=gpt-4o-mini
+# DEEP_THINK_LLM=gpt-4o
 ```
 
-如需使用本地模型，可在配置中设置 `llm_provider: "ollama"`。
+### 启动 Web 界面
 
-也可以复制 `.env.example` 到 `.env` 后填写：
+**1. 启动后端 API**
+在项目根目录执行：
 ```bash
-cp .env.example .env
+uv run python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
-### CLI 用法
-
+**2. 启动前端**
+新开一个终端，在 `frontend` 目录执行：
 ```bash
-uv run python -m cli.main
+cd frontend
+npx vite
 ```
-
-你会看到可选择 ticker、日期、LLM、研究深度等参数的界面。
+随后在浏览器中访问 `http://localhost:5175` 即可使用直观的 Web 界面进行多智能体投研推演。
 
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-运行中界面会持续展示各 agent 的进度与结果。
-
-<p align="center">
-  <img src="assets/cli/cli_news.png" width="100%" style="display: inline-block; margin: 0 2%;">
-</p>
-
-<p align="center">
-  <img src="assets/cli/cli_transaction.png" width="100%" style="display: inline-block; margin: 0 2%;">
+  <em>注：旧版 CLI 界面，新版已升级为 React Web UI</em>
 </p>
 
 ## TradingAgents 包用法
