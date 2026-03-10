@@ -129,10 +129,12 @@ export function useSSE(jobId: string | null) {
             'agent.tool_call',
             'agent.report',
             'done',
+            'ping',
         ]
 
         eventNames.forEach((name) => {
             eventSource.addEventListener(name, (evt: MessageEvent) => {
+                if (name === 'ping') return // Ignore ping events, they just keep connection alive
                 if (name === 'done' || evt.data === '[DONE]') {
                     eventSource.close()
                     eventSourceRef.current = null

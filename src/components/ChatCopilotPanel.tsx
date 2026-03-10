@@ -382,6 +382,10 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                     setIsAnalyzing(false)
                     return
                 }
+                
+                if (currentEvent === 'ping') {
+                    continue
+                }
 
                 try {
                     const data = JSON.parse(dataLine) as Record<string, unknown>
