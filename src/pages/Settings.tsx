@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { Save, Key, Database, Loader2, MessageSquare, User, Trash2, Link2, Copy, Plus, CheckCircle2 } from 'lucide-react'
+import { Save, Key, Database, Loader2, MessageSquare, User, Trash2, Link2, Copy, Plus, CheckCircle2, Eye, EyeOff } from 'lucide-react'
 import { api } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
 import type { UserToken } from '@/types'
@@ -64,6 +64,7 @@ export default function Settings() {
     const [newTokenName, setNewTokenName] = useState('')
     const [isCreatingToken, setIsCreatingToken] = useState(false)
     const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null)
+    const [visibleTokenIds, setVisibleTokenIds] = useState<Set<string>>(new Set())
 
     const selectedPreset = useMemo(
         () => PROVIDER_PRESETS.find((item) => item.id === providerPreset) || PROVIDER_PRESETS[0],
@@ -154,6 +155,15 @@ export default function Settings() {
         navigator.clipboard.writeText(token)
         setCopiedTokenId(id)
         setTimeout(() => setCopiedTokenId(null), 2000)
+    }
+
+    const toggleTokenVisibility = (tokenId: string) => {
+        setVisibleTokenIds(prev => {
+            const next = new Set(prev)
+            if (next.has(tokenId)) next.delete(tokenId)
+            else next.add(tokenId)
+            return next
+        })
     }
 
     const handleSave = async () => {
@@ -433,16 +443,25 @@ export default function Settings() {
                             <div className="flex-1 min-w-0">
                                 <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">{token.name}</div>
                                 <div className="flex items-center gap-2 mt-1">
-                                    <code className="text-xs text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-950 px-1.5 py-0.5 rounded border border-slate-100 dark:border-slate-800 break-all">
-                                        {token.token}
+                                    <code className="text-xs text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-950 px-1.5 py-0.5 rounded border border-slate-100 dark:border-slate-800 font-mono tracking-tight">
+                                        {visibleTokenIds.has(token.id) ? token.token : '•'.repeat(24)}
                                     </code>
-                                    <button
-                                        onClick={() => copyToClipboard(token.token, token.id)}
-                                        className="p-1 hover:bg-slate-200 dark:hover:bg-slate-800 rounded transition-colors text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
-                                        title="复制 Token"
-                                    >
-                                        {copiedTokenId === token.id ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
-                                    </button>
+                                    <div className="flex items-center gap-1">
+                                        <button
+                                            onClick={() => toggleTokenVisibility(token.id)}
+                                            className="p-1 hover:bg-slate-200 dark:hover:bg-slate-800 rounded transition-colors text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                            title={visibleTokenIds.has(token.id) ? "隐藏 Token" : "显示 Token"}
+                                        >
+                                            {visibleTokenIds.has(token.id) ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                                        </button>
+                                        <button
+                                            onClick={() => copyToClipboard(token.token, token.id)}
+                                            className="p-1 hover:bg-slate-200 dark:hover:bg-slate-800 rounded transition-colors text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                            title="复制 Token"
+                                        >
+                                            {copiedTokenId === token.id ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                                        </button>
+                                    </div>
                                 </div>
                                 <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">
                                     创建于：{new Date(token.created_at).toLocaleDateString()}
