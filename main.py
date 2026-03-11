@@ -7,22 +7,8 @@ import os
 # Load environment variables from .env file
 load_dotenv()
 
-# Create a custom config
+# Use DEFAULT_CONFIG (it already loads from env)
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = os.getenv("LLM_PROVIDER", config["llm_provider"])
-config["backend_url"] = os.getenv("OPENAI_BASE_URL", config["backend_url"])
-config["quick_think_llm"] = os.getenv("QUICK_THINK_LLM", "gpt-5-mini")
-config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", "gpt-5-mini")
-config["max_debate_rounds"] = int(os.getenv("MAX_DEBATE_ROUNDS", "1"))
-config["max_risk_discuss_rounds"] = int(os.getenv("MAX_RISK_DISCUSS_ROUNDS", "1"))
-
-# Configure data vendors (prefer cn_akshare for A-share, fallback to yfinance)
-config["data_vendors"] = {
-    "core_stock_apis": "cn_akshare,cn_baostock,yfinance",
-    "technical_indicators": "cn_akshare,cn_baostock,yfinance",
-    "fundamental_data": "cn_akshare,cn_baostock,yfinance",
-    "news_data": "cn_akshare,cn_baostock,yfinance",
-}
 
 # Initialize with custom config
 ta = TradingAgentsGraph(debug=True, config=config)

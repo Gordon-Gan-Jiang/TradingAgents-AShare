@@ -15,7 +15,7 @@ MAX_TOKENS_PER_USER = 10
 
 def generate_token_string() -> str:
     """Generate a secure random token with prefix."""
-    random_part = secrets.token_urlsafe(32)
+    random_part = secrets.token_urlsafe(64)
     return f"{TOKEN_PREFIX}{random_part}"
 
 

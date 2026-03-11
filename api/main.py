@@ -302,27 +302,7 @@ def _user_config_overrides(user_id: Optional[str]) -> Dict[str, Any]:
 def _build_runtime_config(overrides: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     config = deepcopy(DEFAULT_CONFIG)
     server_fallback_enabled = os.getenv("ALLOW_SERVER_LLM_FALLBACK", "1").strip().lower() in ("1", "true", "yes", "on")
-
-    # Env defaults (align with main.py behavior)
-    config["llm_provider"] = os.getenv("LLM_PROVIDER", config["llm_provider"])
-    config["backend_url"] = os.getenv("OPENAI_BASE_URL", config["backend_url"])
-    config["quick_think_llm"] = os.getenv("QUICK_THINK_LLM", config["quick_think_llm"])
-    config["deep_think_llm"] = os.getenv("DEEP_THINK_LLM", config["deep_think_llm"])
-    config["max_debate_rounds"] = int(os.getenv("MAX_DEBATE_ROUNDS", "1"))
-    config["max_risk_discuss_rounds"] = int(os.getenv("MAX_RISK_DISCUSS_ROUNDS", "1"))
-    if server_fallback_enabled:
-        config["api_key"] = os.getenv("OPENAI_API_KEY", config.get("api_key"))
-    else:
-        config["api_key"] = config.get("api_key")
     config["server_fallback_enabled"] = server_fallback_enabled
-
-    # Default CN-first provider chain
-    config["data_vendors"] = {
-        "core_stock_apis": "cn_akshare,cn_baostock,yfinance",
-        "technical_indicators": "cn_akshare,cn_baostock,yfinance",
-        "fundamental_data": "cn_akshare,cn_baostock,yfinance",
-        "news_data": "cn_akshare,cn_baostock,yfinance",
-    }
 
     # Apply global config overrides (from PATCH /v1/config)
     if _global_config_overrides:
@@ -335,33 +315,44 @@ def _build_runtime_config(overrides: Dict[str, Any], user_id: Optional[str] = No
     return config
 
 
-def _require_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_auth_scheme),
-    db: Session = Depends(get_db),
-) -> UserDB:
-    if not credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
-    
-    token = credentials.credentials
-    
-    # 1. Try JWT
-    try:
-        payload = auth_service.decode_access_token(token)
-        user_id = str(payload.get("sub") or "")
-        user = auth_service.get_user_by_id(db, user_id)
-        if user and user.is_active:
-            return user
-    except Exception:
-        # Not a valid JWT or expired, try API Token
-        pass
+class RequireUser:
+    def __init__(self, allow_api_token: bool = True):
+        self.allow_api_token = allow_api_token
+
+    def __call__(
+        self,
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(_auth_scheme),
+        db: Session = Depends(get_db),
+    ) -> UserDB:
+        if not credentials:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
         
-    # 2. Try API Token
-    if token.startswith(token_service.TOKEN_PREFIX):
-        user = token_service.verify_token(db, token)
-        if user and user.is_active:
-            return user
+        token = credentials.credentials
+        
+        # 1. 优先尝试 JWT (网页登录)
+        try:
+            payload = auth_service.decode_access_token(token)
+            user_id = str(payload.get("sub") or "")
+            user = auth_service.get_user_by_id(db, user_id)
+            if user and user.is_active:
+                return user
+        except Exception:
+            # 不是有效的 JWT 或已过期，尝试 API Token
+            pass
             
-    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="身份验证失败或已失效")
+        # 2. 尝试 API Token (仅在允许时)
+        if self.allow_api_token and token.startswith(token_service.TOKEN_PREFIX):
+            user = token_service.verify_token(db, token)
+            if user and user.is_active:
+                return user
+                
+        detail = "身份验证失败或该接口不支持 API Token 访问" if self.allow_api_token else "该接口仅限网页端登录访问"
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
+
+
+# 快捷依赖定义
+_require_api_user = RequireUser(allow_api_token=True)    # 允许 API Token
+_require_web_user = RequireUser(allow_api_token=False)   # 仅限网页登录
 
 
 def _optional_user(
@@ -1314,7 +1305,7 @@ def get_hot_stocks(source: str = "em", limit: int = 30) -> Dict:
 @app.post("/v1/analyze", response_model=AnalyzeResponse)
 def analyze(
     request: AnalyzeRequest,
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_api_user),
 ) -> AnalyzeResponse:
     job_id = uuid4().hex
     now = datetime.now().isoformat()
@@ -1354,7 +1345,7 @@ def _require_job_owner(job_id: str, current_user: UserDB) -> Dict[str, Any]:
 
 
 @app.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
-def get_job_status(job_id: str, current_user: UserDB = Depends(_require_user)) -> JobStatusResponse:
+def get_job_status(job_id: str, current_user: UserDB = Depends(_require_api_user)) -> JobStatusResponse:
     job = _require_job_owner(job_id, current_user)
     return JobStatusResponse(
         job_id=job["job_id"],
@@ -1369,7 +1360,7 @@ def get_job_status(job_id: str, current_user: UserDB = Depends(_require_user)) -
 
 
 @app.get("/v1/jobs/{job_id}/result")
-def get_job_result(job_id: str, current_user: UserDB = Depends(_require_user)) -> Dict[str, Any]:
+def get_job_result(job_id: str, current_user: UserDB = Depends(_require_api_user)) -> Dict[str, Any]:
     job = _require_job_owner(job_id, current_user)
     if job["status"] != "completed":
         raise HTTPException(status_code=409, detail=f"job status is {job['status']}")
@@ -1383,7 +1374,7 @@ def get_job_result(job_id: str, current_user: UserDB = Depends(_require_user)) -
 
 
 @app.get("/v1/jobs/{job_id}/events")
-def stream_job_events(job_id: str, current_user: UserDB = Depends(_require_user)):
+def stream_job_events(job_id: str, current_user: UserDB = Depends(_require_api_user)):
     _require_job_owner(job_id, current_user)
     return StreamingResponse(
         _stream_job_events(job_id),
@@ -1440,7 +1431,7 @@ def _ai_extract_symbol_and_date(text: str, config: Dict[str, Any]) -> tuple[Opti
 @app.post("/v1/chat/completions")
 def chat_completions(
     request: ChatCompletionRequest,
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_api_user),
 ):
     text = _extract_chat_text(request.messages)
     config = _build_runtime_config(request.config_overrides, user_id=current_user.id)
@@ -1527,7 +1518,7 @@ def chat_completions(
 def create_report_endpoint(
     request: ReportCreateRequest,
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_api_user),
 ):
     """手动创建报告（通常由系统自动调用）."""
     report = report_service.create_report(
@@ -1547,7 +1538,7 @@ def list_reports(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_api_user),
 ):
     """获取报告列表."""
     total = report_service.count_reports(db=db, user_id=current_user.id, symbol=symbol)
@@ -1565,7 +1556,7 @@ def list_reports(
 def get_report_endpoint(
     report_id: str,
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_api_user),
 ):
     """获取报告详情."""
     report = report_service.get_report(db, report_id, user_id=current_user.id)
@@ -1578,7 +1569,7 @@ def get_report_endpoint(
 def delete_report_endpoint(
     report_id: str,
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_api_user),
 ):
     """删除报告."""
     success = report_service.delete_report(db, report_id, user_id=current_user.id)
@@ -1592,7 +1583,7 @@ def delete_report_endpoint(
 @app.get("/v1/tokens", response_model=List[UserTokenResponse])
 def list_tokens(
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_web_user),
 ):
     """获取当前用户的所有 API Token。"""
     return token_service.list_user_tokens(db, current_user.id)
@@ -1602,7 +1593,7 @@ def list_tokens(
 def create_token(
     request: UserTokenCreateRequest,
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_web_user),
 ):
     """创建一个新的 API Token。"""
     try:
@@ -1615,7 +1606,7 @@ def create_token(
 def delete_token(
     token_id: str,
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_web_user),
 ):
     """吊销并删除一个 API Token。"""
     success = token_service.delete_token(db, current_user.id, token_id)
@@ -1725,14 +1716,14 @@ def verify_login_code(request: AuthVerifyCodeRequest, db: Session = Depends(get_
 
 
 @app.get("/v1/auth/me", response_model=UserResponse)
-def get_me(current_user: UserDB = Depends(_require_user)):
+def get_me(current_user: UserDB = Depends(_require_web_user)):
     return current_user
 
 
 @app.get("/v1/config", response_model=UserRuntimeConfigResponse)
 def get_runtime_config(
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_web_user),
 ):
     """获取当前用户运行时配置。"""
     return _config_response_for_user(current_user, db)
@@ -1742,7 +1733,7 @@ def get_runtime_config(
 def update_runtime_config(
     updates: UserRuntimeConfigUpdateRequest,
     db: Session = Depends(get_db),
-    current_user: UserDB = Depends(_require_user),
+    current_user: UserDB = Depends(_require_web_user),
 ):
     """更新当前用户运行时配置，下次分析时生效。"""
     row = auth_service.upsert_user_llm_config(

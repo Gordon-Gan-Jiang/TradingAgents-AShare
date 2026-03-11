@@ -143,23 +143,33 @@ def verify_login_code(db: Session, email: str, code: str, purpose: str = "login"
     return user
 
 
+def get_env_alias(keys: list[str], default: str = "") -> str:
+    for k in keys:
+        v = os.getenv(k)
+        if v is not None:
+            return v
+    return default
+
+
 def send_login_code(email: str, code: str) -> Optional[str]:
-    smtp_host = (
-        os.getenv("MAIL_SERVER", "").strip()
-        or os.getenv("SMTP_HOST", "").strip()
-    )
+    smtp_host = get_env_alias(["MAIL_HOST", "MAIL_SERVER", "SMTP_HOST"]).strip()
     if not smtp_host:
         print(f"[auth] login code for {email}: {code}")
         if os.getenv("APP_ENV", "development") != "production":
             return code
         return None
 
-    smtp_port = int(os.getenv("MAIL_PORT") or os.getenv("SMTP_PORT") or "587")
-    smtp_user = (os.getenv("MAIL_USERNAME") or os.getenv("SMTP_USER") or "").strip()
-    smtp_password = (os.getenv("MAIL_PASSWORD") or os.getenv("SMTP_PASSWORD") or "").strip()
-    smtp_from = (os.getenv("MAIL_FROM") or os.getenv("SMTP_FROM") or smtp_user or "noreply@example.com").strip()
-    smtp_starttls = (os.getenv("MAIL_STARTTLS") or os.getenv("SMTP_TLS") or "1").strip().lower() not in ("0", "false", "off", "no")
-    smtp_ssl_tls = (os.getenv("MAIL_SSL_TLS") or "0").strip().lower() in ("1", "true", "on", "yes")
+    smtp_port = int(get_env_alias(["MAIL_PORT", "SMTP_PORT"]) or "587")
+    smtp_user = get_env_alias(["MAIL_USER", "MAIL_USERNAME", "SMTP_USER"]).strip()
+    smtp_password = get_env_alias(["MAIL_PASS", "MAIL_PASSWORD", "SMTP_PASSWORD"]).strip()
+    smtp_from = get_env_alias(["MAIL_FROM", "SMTP_FROM"], smtp_user or "noreply@example.com").strip()
+    
+    # 兼容旧版的逻辑
+    smtp_starttls_str = get_env_alias(["MAIL_STARTTLS", "SMTP_TLS"], "1").strip().lower()
+    smtp_starttls = smtp_starttls_str not in ("0", "false", "off", "no")
+    
+    smtp_ssl_tls_str = get_env_alias(["MAIL_SSL", "MAIL_SSL_TLS"], "0").strip().lower()
+    smtp_ssl_tls = smtp_ssl_tls_str in ("1", "true", "on", "yes")
 
     msg = EmailMessage()
     msg["Subject"] = "TradingAgents 登录验证码"
@@ -167,14 +177,22 @@ def send_login_code(email: str, code: str) -> Optional[str]:
     msg["To"] = email
     msg.set_content(f"你的 TradingAgents 登录验证码是：{code}\n\n10 分钟内有效。")
 
-    smtp_cls = smtplib.SMTP_SSL if smtp_ssl_tls else smtplib.SMTP
-    with smtp_cls(smtp_host, smtp_port, timeout=20) as server:
-        if smtp_starttls and not smtp_ssl_tls:
-            server.starttls()
-        if smtp_user:
-            server.login(smtp_user, smtp_password)
-        server.send_message(msg)
-    return None
+    try:
+        print(f"[auth] connecting to {smtp_host}:{smtp_port} (SSL: {smtp_ssl_tls}, STARTTLS: {smtp_starttls})")
+        smtp_cls = smtplib.SMTP_SSL if smtp_ssl_tls else smtplib.SMTP
+        with smtp_cls(smtp_host, smtp_port, timeout=20) as server:
+            if smtp_starttls and not smtp_ssl_tls:
+                server.starttls()
+            if smtp_user:
+                server.login(smtp_user, smtp_password)
+            server.send_message(msg)
+        return None
+    except Exception as e:
+        print(f"[auth] failed to send email via {smtp_host}: {e}")
+        print(f"[auth] falling back to console log. code for {email}: {code}")
+        if os.getenv("APP_ENV", "development") != "production":
+            return code
+        return None
 
 
 def get_user_llm_config(db: Session, user_id: str) -> Optional[UserLLMConfigDB]:
