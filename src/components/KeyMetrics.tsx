@@ -2,9 +2,9 @@ import { BarChart3 } from 'lucide-react'
 import type { KeyMetric } from '@/types'
 
 const STATUS_COLOR = {
-    good: 'text-emerald-400',
+    good: 'text-rose-400',
     neutral: 'text-slate-200',
-    bad: 'text-rose-400',
+    bad: 'text-emerald-400',
 }
 
 export default function KeyMetrics({ items }: { items?: KeyMetric[] }) {

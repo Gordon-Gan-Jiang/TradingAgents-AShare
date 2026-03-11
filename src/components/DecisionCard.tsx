@@ -20,10 +20,10 @@ interface DecisionCardProps {
 }
 
 const decisionConfig: Record<string, { label: string; color: string; icon: typeof TrendingUp }> = {
-    buy: { label: '买入', color: 'bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-500/30', icon: TrendingUp },
-    sell: { label: '卖出', color: 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-400 border-red-200 dark:border-red-500/30', icon: TrendingDown },
+    buy: { label: '买入', color: 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-400 border-red-200 dark:border-red-500/30', icon: TrendingUp },
+    sell: { label: '卖出', color: 'bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-500/30', icon: TrendingDown },
     hold: { label: '持有', color: 'bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-500/30', icon: Shield },
-    add: { label: '增持', color: 'bg-green-100 dark:bg-green-500/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-500/30', icon: TrendingUp },
+    add: { label: '增持', color: 'bg-red-100 dark:bg-red-500/20 text-red-700 dark:text-red-400 border-red-200 dark:border-red-500/30', icon: TrendingUp },
     reduce: { label: '减持', color: 'bg-orange-100 dark:bg-orange-500/20 text-orange-700 dark:text-orange-400 border-orange-200 dark:border-orange-500/30', icon: TrendingDown },
     watch: { label: '观望', color: 'bg-slate-100 dark:bg-slate-700/50 text-slate-700 dark:text-slate-400 border-slate-200 dark:border-slate-600', icon: Info },
 }
@@ -109,30 +109,30 @@ export default function DecisionCard({
 
             {/* 目标价和止损价 */}
             <div className="grid grid-cols-2 gap-3 mb-4">
-                <div className="p-3 rounded-xl bg-green-50 dark:bg-green-500/10 border border-green-100 dark:border-green-500/20">
+                <div className="p-3 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-100 dark:border-red-500/20">
                     <div className="flex items-center gap-1.5 mb-1">
-                        <Target className="w-4 h-4 text-green-600 dark:text-green-400" />
+                        <Target className="w-4 h-4 text-red-600 dark:text-red-400" />
                         <span className="text-xs text-slate-500">目标价</span>
                     </div>
-                    <p className="text-xl font-bold text-green-600 dark:text-green-400">
+                    <p className="text-xl font-bold text-red-600 dark:text-red-400">
                         {targetPrice != null ? `¥${targetPrice}` : '--'}
                     </p>
                     {targetChange != null && (
-                        <p className="text-sm text-green-600 dark:text-green-400">
+                        <p className="text-sm text-red-600 dark:text-red-400">
                             {targetChange >= 0 ? '+' : ''}{targetChange.toFixed(1)}%
                         </p>
                     )}
                 </div>
-                <div className="p-3 rounded-xl bg-red-50 dark:bg-red-500/10 border border-red-100 dark:border-red-500/20">
+                <div className="p-3 rounded-xl bg-green-50 dark:bg-green-500/10 border border-green-100 dark:border-green-500/20">
                     <div className="flex items-center gap-1.5 mb-1">
-                        <Shield className="w-4 h-4 text-red-600 dark:text-red-400" />
+                        <Shield className="w-4 h-4 text-green-600 dark:text-green-400" />
                         <span className="text-xs text-slate-500">止损价</span>
                     </div>
-                    <p className="text-xl font-bold text-red-600 dark:text-red-400">
+                    <p className="text-xl font-bold text-green-600 dark:text-green-400">
                         {stopLoss != null ? `¥${stopLoss}` : '--'}
                     </p>
                     {stopLossChange != null && (
-                        <p className="text-sm text-red-600 dark:text-red-400">
+                        <p className="text-sm text-green-600 dark:text-green-400">
                             {stopLossChange >= 0 ? '+' : ''}{stopLossChange.toFixed(1)}%
                         </p>
                     )}

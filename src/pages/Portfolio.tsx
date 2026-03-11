@@ -27,8 +27,8 @@ function saveHoldings(holdings: Holding[]) {
 const parseDecisionColor = (decision?: string) => {
     if (!decision) return 'text-slate-400'
     const d = decision.toUpperCase()
-    if (d.includes('BUY') || d.includes('增持') || d.includes('买入')) return 'text-green-500'
-    if (d.includes('SELL') || d.includes('减持') || d.includes('卖出')) return 'text-red-500'
+    if (d.includes('BUY') || d.includes('增持') || d.includes('买入')) return 'text-red-500'
+    if (d.includes('SELL') || d.includes('减持') || d.includes('卖出')) return 'text-green-500'
     return 'text-slate-500 dark:text-slate-400'
 }
 
@@ -229,7 +229,7 @@ export default function Portfolio() {
                                         <div className="flex items-center gap-3 mt-0.5">
                                             <span className="text-sm text-slate-700 dark:text-slate-300">¥{(stock.price || 0).toFixed(2)}</span>
                                             {stock.change_pct !== 0 && (
-                                                <span className={`text-xs font-medium flex items-center gap-0.5 ${(stock.change_pct || 0) >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                                                <span className={`text-xs font-medium flex items-center gap-0.5 ${(stock.change_pct || 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>
                                                     {(stock.change_pct || 0) >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
                                                     {(stock.change_pct || 0) >= 0 ? '+' : ''}{(stock.change_pct || 0).toFixed(2)}%
                                                 </span>
