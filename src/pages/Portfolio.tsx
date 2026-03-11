@@ -227,11 +227,11 @@ export default function Portfolio() {
                                             <span className="text-xs text-slate-400">{stock.symbol}</span>
                                         </div>
                                         <div className="flex items-center gap-3 mt-0.5">
-                                            <span className="text-sm text-slate-700 dark:text-slate-300">¥{stock.price.toFixed(2)}</span>
+                                            <span className="text-sm text-slate-700 dark:text-slate-300">¥{(stock.price || 0).toFixed(2)}</span>
                                             {stock.change_pct !== 0 && (
-                                                <span className={`text-xs font-medium flex items-center gap-0.5 ${stock.change_pct >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                                                    {stock.change_pct >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
-                                                    {stock.change_pct >= 0 ? '+' : ''}{stock.change_pct.toFixed(2)}%
+                                                <span className={`text-xs font-medium flex items-center gap-0.5 ${(stock.change_pct || 0) >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                                                    {(stock.change_pct || 0) >= 0 ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
+                                                    {(stock.change_pct || 0) >= 0 ? '+' : ''}{(stock.change_pct || 0).toFixed(2)}%
                                                 </span>
                                             )}
                                             {stock.extra && (

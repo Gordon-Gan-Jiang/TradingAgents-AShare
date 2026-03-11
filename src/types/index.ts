@@ -303,3 +303,15 @@ export interface AuthVerifyResponse {
     token_type: string
     user: AuthUser
 }
+
+export interface UserToken {
+    id: string
+    name: string
+    token: string
+    last_used_at?: string
+    created_at: string
+}
+
+export interface UserTokenCreateRequest {
+    name: string
+}

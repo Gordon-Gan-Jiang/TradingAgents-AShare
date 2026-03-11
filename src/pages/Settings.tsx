@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
-import { Save, Key, Database, Loader2, MessageSquare, User, Trash2, Link2 } from 'lucide-react'
+import { Save, Key, Database, Loader2, MessageSquare, User, Trash2, Link2, Copy, Plus, CheckCircle2 } from 'lucide-react'
 import { api } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
+import type { UserToken } from '@/types'
 
 type ProviderPreset = {
     id: string
@@ -57,6 +58,13 @@ export default function Settings() {
     const [saved, setSaved] = useState(false)
     const [configError, setConfigError] = useState<string | null>(null)
 
+    // API Token states
+    const [tokens, setTokens] = useState<UserToken[]>([])
+    const [tokensLoading, setTokensLoading] = useState(false)
+    const [newTokenName, setNewTokenName] = useState('')
+    const [isCreatingToken, setIsCreatingToken] = useState(false)
+    const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null)
+
     const selectedPreset = useMemo(
         () => PROVIDER_PRESETS.find((item) => item.id === providerPreset) || PROVIDER_PRESETS[0],
         [providerPreset],
@@ -100,7 +108,53 @@ export default function Settings() {
                 setConfigError(err instanceof Error ? err.message : '无法连接到后端')
             })
             .finally(() => setConfigLoading(false))
+
+        // Fetch tokens
+        fetchTokens()
     }, [])
+
+    const fetchTokens = async () => {
+        setTokensLoading(true)
+        try {
+            const data = await api.getTokens()
+            setTokens(data)
+        } catch (err) {
+            console.error('Failed to fetch tokens:', err)
+        } finally {
+            setTokensLoading(false)
+        }
+    }
+
+    const handleCreateToken = async (e: React.FormEvent) => {
+        e.preventDefault()
+        if (!newTokenName.trim()) return
+        setIsCreatingToken(true)
+        try {
+            await api.createToken({ name: newTokenName.trim() })
+            setNewTokenName('')
+            await fetchTokens()
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '创建 Token 失败')
+        } finally {
+            setIsCreatingToken(false)
+        }
+    }
+
+    const handleDeleteToken = async (tokenId: string) => {
+        if (!confirm('确定要吊销此 Token 吗？吊销后使用该 Token 的 API 请求将立即失效。')) return
+        try {
+            await api.deleteToken(tokenId)
+            await fetchTokens()
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '吊销 Token 失败')
+        }
+    }
+
+    const copyToClipboard = (token: string, id: string) => {
+        navigator.clipboard.writeText(token)
+        setCopiedTokenId(id)
+        setTimeout(() => setCopiedTokenId(null), 2000)
+    }
 
     const handleSave = async () => {
         setSaving(true)
@@ -359,6 +413,81 @@ export default function Settings() {
                         })}
                     </div>
                 </div>
+            </div>
+
+            <div className="card space-y-4">
+                <div className="flex items-center gap-2">
+                    <Key className="w-5 h-5 text-amber-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">API 访问令牌</h2>
+                    {tokensLoading && <Loader2 className="w-4 h-4 animate-spin text-slate-400 ml-auto" />}
+                </div>
+
+                <div className="text-sm text-slate-500 dark:text-slate-400 mb-4">
+                    使用 API Token 在三方应用（如 Open Claw）中调用投研分析接口。请妥善保管您的 Token。
+                </div>
+
+                {/* Token List */}
+                <div className="space-y-3">
+                    {tokens.map((token) => (
+                        <div key={token.id} className="flex flex-col sm:flex-row sm:items-center gap-3 p-3 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800 transition-all group">
+                            <div className="flex-1 min-w-0">
+                                <div className="text-sm font-medium text-slate-900 dark:text-slate-100 truncate">{token.name}</div>
+                                <div className="flex items-center gap-2 mt-1">
+                                    <code className="text-xs text-slate-500 dark:text-slate-400 bg-white dark:bg-slate-950 px-1.5 py-0.5 rounded border border-slate-100 dark:border-slate-800 break-all">
+                                        {token.token}
+                                    </code>
+                                    <button
+                                        onClick={() => copyToClipboard(token.token, token.id)}
+                                        className="p-1 hover:bg-slate-200 dark:hover:bg-slate-800 rounded transition-colors text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                                        title="复制 Token"
+                                    >
+                                        {copiedTokenId === token.id ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+                                    </button>
+                                </div>
+                                <div className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">
+                                    创建于：{new Date(token.created_at).toLocaleDateString()}
+                                    {token.last_used_at && ` • 最后使用：${new Date(token.last_used_at).toLocaleString()}`}
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => handleDeleteToken(token.id)}
+                                className="self-end sm:self-center p-2 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-500/10 rounded-xl transition-colors"
+                                title="吊销 Token"
+                            >
+                                <Trash2 className="w-4 h-4" />
+                            </button>
+                        </div>
+                    ))}
+
+                    {tokens.length === 0 && !tokensLoading && (
+                        <div className="text-center py-6 border-2 border-dashed border-slate-100 dark:border-slate-800 rounded-3xl text-slate-400 text-sm font-medium">
+                            暂无活跃的 API Token
+                        </div>
+                    )}
+                </div>
+
+                {/* Create Token Form */}
+                <form onSubmit={handleCreateToken} className="flex items-center gap-2 pt-2">
+                    <input
+                        type="text"
+                        value={newTokenName}
+                        onChange={e => setNewTokenName(e.target.value)}
+                        placeholder="给新 Token 起个名字，如：Open Claw"
+                        className="input flex-1 h-10 text-sm"
+                        disabled={isCreatingToken || tokens.length >= 10}
+                    />
+                    <button
+                        type="submit"
+                        disabled={isCreatingToken || !newTokenName.trim() || tokens.length >= 10}
+                        className="btn-primary h-10 px-4 flex items-center gap-2 whitespace-nowrap text-sm"
+                    >
+                        {isCreatingToken ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                        生成 Token
+                    </button>
+                </form>
+                {tokens.length >= 10 && (
+                    <p className="text-[10px] text-amber-500">已达到 Token 创建上限（10个）</p>
+                )}
             </div>
 
             <div className="card space-y-4">

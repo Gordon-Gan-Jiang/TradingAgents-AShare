@@ -1,4 +1,4 @@
-import type { AnalysisRequest, AnalysisResponse, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, HotStock } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, HotStock, UserToken, UserTokenCreateRequest } from '@/types'
 
 export function getBaseUrl(): string {
     const envUrl = (import.meta.env.VITE_API_URL as string) || ''
@@ -156,6 +156,24 @@ class ApiService {
 
     async getMe(): Promise<AuthUser> {
         return this.request('/v1/auth/me')
+    }
+
+    // Token Management
+    async getTokens(): Promise<UserToken[]> {
+        return this.request<UserToken[]>('/v1/tokens')
+    }
+
+    async createToken(request: UserTokenCreateRequest): Promise<UserToken> {
+        return this.request<UserToken>('/v1/tokens', {
+            method: 'POST',
+            body: JSON.stringify(request),
+        })
+    }
+
+    async deleteToken(tokenId: string): Promise<{ message: string }> {
+        return this.request<{ message: string }>(`/v1/tokens/${tokenId}`, {
+            method: 'DELETE',
+        })
     }
 }
 
