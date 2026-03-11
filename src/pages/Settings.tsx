@@ -217,7 +217,7 @@ export default function Settings() {
     }
 
     return (
-        <div className="space-y-6 max-w-3xl">
+        <div className="space-y-6">
             <div>
                 <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">系统设置</h1>
                 <p className="text-slate-500 dark:text-slate-400 mt-1">配置当前账户的分析参数与私有模型</p>
@@ -486,15 +486,15 @@ export default function Settings() {
                 </div>
 
                 {/* Create Token Form */}
-                <form onSubmit={handleCreateToken} className="flex items-center gap-2 pt-2">
-                    <input
-                        type="text"
-                        value={newTokenName}
-                        onChange={e => setNewTokenName(e.target.value)}
-                        placeholder="给新 Token 起个名字，如：Open Claw"
-                        className="input flex-1 h-10 text-sm"
-                        disabled={isCreatingToken || tokens.length >= 10}
-                    />
+                    <form onSubmit={handleCreateToken} className="flex items-center gap-2 pt-2">
+                        <input
+                            type="text"
+                            value={newTokenName}
+                            onChange={e => setNewTokenName(e.target.value)}
+                            placeholder="给新 Token 起个名字，如：Open Claw"
+                            className="input flex-1 h-10 text-sm"
+                            disabled={isCreatingToken || tokens.length >= 10}
+                        />
                     <button
                         type="submit"
                         disabled={isCreatingToken || !newTokenName.trim() || tokens.length >= 10}
