@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session
 import pandas as pd
 
 from api.database import UserDB, init_db, get_db, SessionLocal
-from api.services import auth_service, report_service
+from api.services import auth_service, report_service, token_service
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -248,6 +248,20 @@ class UserRuntimeConfigUpdateRequest(BaseModel):
     clear_api_key: bool = False
 
 
+class UserTokenResponse(BaseModel):
+    id: str
+    name: str
+    token: str
+    last_used_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class UserTokenCreateRequest(BaseModel):
+    name: str
+
+
 def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
     for k, v in overrides.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
@@ -327,15 +341,27 @@ def _require_user(
 ) -> UserDB:
     if not credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
+    
+    token = credentials.credentials
+    
+    # 1. Try JWT
     try:
-        payload = auth_service.decode_access_token(credentials.credentials)
+        payload = auth_service.decode_access_token(token)
+        user_id = str(payload.get("sub") or "")
+        user = auth_service.get_user_by_id(db, user_id)
+        if user and user.is_active:
+            return user
     except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录状态已失效")
-    user_id = str(payload.get("sub") or "")
-    user = auth_service.get_user_by_id(db, user_id)
-    if not user or not user.is_active:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已停用")
-    return user
+        # Not a valid JWT or expired, try API Token
+        pass
+        
+    # 2. Try API Token
+    if token.startswith(token_service.TOKEN_PREFIX):
+        user = token_service.verify_token(db, token)
+        if user and user.is_active:
+            return user
+            
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="身份验证失败或已失效")
 
 
 def _optional_user(
@@ -1559,6 +1585,43 @@ def delete_report_endpoint(
     if not success:
         raise HTTPException(status_code=404, detail="报告不存在")
     return {"message": "报告已删除"}
+
+
+# ─── API Token Endpoints ────────────────────────────────────────────────────
+
+@app.get("/v1/tokens", response_model=List[UserTokenResponse])
+def list_tokens(
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
+):
+    """获取当前用户的所有 API Token。"""
+    return token_service.list_user_tokens(db, current_user.id)
+
+
+@app.post("/v1/tokens", response_model=UserTokenResponse)
+def create_token(
+    request: UserTokenCreateRequest,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
+):
+    """创建一个新的 API Token。"""
+    try:
+        return token_service.create_token(db, current_user.id, request.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/v1/tokens/{token_id}")
+def delete_token(
+    token_id: str,
+    db: Session = Depends(get_db),
+    current_user: UserDB = Depends(_require_user),
+):
+    """吊销并删除一个 API Token。"""
+    success = token_service.delete_token(db, current_user.id, token_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Token 不存在")
+    return {"message": "Token 已吊销"}
 
 
 # ─── Backtest Endpoints ───────────────────────────────────────────────────────
