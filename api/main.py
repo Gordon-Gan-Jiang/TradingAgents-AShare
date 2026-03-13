@@ -810,12 +810,23 @@ def _run_job(
     save_report: bool = True,
     user_id: Optional[str] = None,
 ) -> None:
-    _set_job(job_id, status="running", started_at=_utcnow_iso())
+    # Normalize for logic but keep original for display
+    display_name = request.symbol
+    normalized_symbol = _normalize_symbol(request.symbol)
+    
+    _set_job(job_id, status="running", started_at=_utcnow_iso(), symbol=normalized_symbol)
     _emit_job_event(
         job_id,
         "job.running",
-        {"job_id": job_id, "symbol": request.symbol, "trade_date": request.trade_date},
+        {
+            "job_id": job_id, 
+            "symbol": normalized_symbol, 
+            "display_name": display_name, 
+            "trade_date": request.trade_date
+        },
     )
+    # Ensure request object uses the normalized symbol for internal logic
+    request.symbol = normalized_symbol
     tracker = AgentProgressTracker(request.selected_analysts, job_id)
     _emit_job_event(job_id, "agent.snapshot", tracker.snapshot())
     try:
