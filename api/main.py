@@ -1292,6 +1292,8 @@ def get_kline(
     if _is_cn_index_symbol(symbol):
         candles = _fetch_index_kline(symbol, start, end)
     else:
+        # Normalize symbol (convert "阳光电源" -> "300274.SZ")
+        symbol = _normalize_symbol(symbol)
         config = _build_runtime_config({})
         set_config(config)
         raw = route_to_vendor("get_stock_data", symbol, start, end)
