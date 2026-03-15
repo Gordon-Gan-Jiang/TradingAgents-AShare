@@ -35,6 +35,7 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.dataflows.trade_calendar import cn_today_str
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.interface import route_to_vendor
+from tradingagents.graph.intent_parser import parse_intent as _parse_intent
 
 
 def _cors_allow_origins() -> list[str]:
@@ -171,6 +172,15 @@ ANALYST_AGENT_NAMES = {
     "fundamentals": "Fundamentals Analyst",
     "macro": "Macro Analyst",
     "smart_money": "Smart Money Analyst",
+    "game_theory": "Game Theory Manager",
+    "bull": "Bull Researcher",
+    "bear": "Bear Researcher",
+    "research_manager": "Research Manager",
+    "trader": "Trader",
+    "aggressive": "Aggressive Analyst",
+    "neutral": "Neutral Analyst",
+    "conservative": "Conservative Analyst",
+    "portfolio_manager": "Portfolio Manager",
 }
 ANALYST_REPORT_MAP = {
     "market": "market_report",
@@ -181,15 +191,33 @@ ANALYST_REPORT_MAP = {
     "smart_money": "smart_money_report",
 }
 
+# Analysts that are relevant per investment horizon
+HORIZON_ANALYSTS = {
+    "short": ["market", "social", "news", "smart_money"],
+    "medium": ["market", "news", "fundamentals", "macro"],
+}
+
+
+def _get_horizon_analysts(horizon: str, available: List[str]) -> List[str]:
+    """Return the subset of available analysts relevant for the given horizon."""
+    relevant = set(HORIZON_ANALYSTS.get(horizon, available))
+    filtered = [a for a in available if a in relevant]
+    return filtered if filtered else list(available)
+
 
 class AnalyzeRequest(BaseModel):
-    symbol: str = Field(..., description="股票代码，如 600519.SH")
+    symbol: str = Field(default="", description="股票代码，如 600519.SH（当 query 包含代码时可省略）")
     trade_date: str = Field(default_factory=cn_today_str, description="交易日期 YYYY-MM-DD")
     selected_analysts: List[str] = Field(
         default_factory=lambda: ["market", "social", "news", "fundamentals", "macro", "smart_money"]
     )
     config_overrides: Dict[str, Any] = Field(default_factory=dict)
     dry_run: bool = False
+    # When set, triggers intent-driven analysis via streaming dual-horizon path
+    query: Optional[str] = Field(default=None, description="自然语言查询，如：分析贵州茅台短线机会")
+    horizons: List[str] = Field(default_factory=lambda: ["short"], description="分析周期列表，如 ['short'] 或 ['short','medium']")
+    # Pre-parsed intent from _ai_extract_symbol_and_date (avoids second LLM call in _run_job)
+    user_intent: Optional[Dict[str, Any]] = Field(default=None, description="预解析的用户意图，由 chat_completions 传入")
 
 
 class AnalyzeResponse(BaseModel):
@@ -861,6 +889,238 @@ def _run_job(
         )
         final_state: Optional[Dict[str, Any]] = None
 
+        # Ensure horizons is never empty
+        if not request.horizons:
+            request.horizons = ["short"]
+
+        # ── Dual-horizon intent-driven path ──────────────────────────────────
+        if request.query:
+            # 1. 组装用户意图
+            ticker = request.symbol or display_name
+
+            # 优先使用已由 chat_completions 预解析的 intent（单次 LLM），避免二次调用
+            if request.user_intent:
+                user_intent = dict(request.user_intent)
+                user_intent["ticker"] = ticker
+                user_intent["horizons"] = request.horizons
+            else:
+                # 直接 POST /v1/analyze 时的兜底（无预解析 intent）
+                user_intent = _parse_intent(request.query, graph.quick_thinking_llm, fallback_ticker=ticker)
+                if not request.horizons:
+                    request.horizons = user_intent["horizons"]
+                user_intent["horizons"] = request.horizons
+
+            # Use normalized ticker from intent parser if available
+            ticker = user_intent.get("ticker") or ticker
+
+            # 2. 一次性采集数据，短线/中线共用缓存
+            _emit_job_event(job_id, "agent.tool_call", {
+                "agent": "数据采集", "tool": "data_collector",
+                "description": f"预加载 {ticker} 近90天行情、财务、新闻、资金数据…",
+            })
+            print(f"[DualHorizon] Collecting data for {ticker} {request.trade_date}…")
+            graph.data_collector.collect(ticker, request.trade_date, horizons=request.horizons)
+            _emit_job_event(job_id, "agent.tool_call", {
+                "agent": "数据采集", "tool": "data_collector",
+                "description": "数据采集完成，开始多维度分析",
+            })
+
+            report_keys = (
+                "market_report", "sentiment_report", "news_report", "fundamentals_report",
+                "macro_report", "smart_money_report", "game_theory_report",
+                "investment_plan", "trader_investment_plan", "final_trade_decision",
+            )
+
+            horizon_states: Dict[str, Any] = {}
+
+            # 3. 按解析出的 horizons 依次走 stream()，事件实时推给前端
+            for horizon in request.horizons:
+                # 根据周期过滤 analyst，共享已采集的数据缓存
+                horizon_analysts = _get_horizon_analysts(horizon, request.selected_analysts)
+                horizon_graph = TradingAgentsGraph(
+                    selected_analysts=horizon_analysts,
+                    debug=False,
+                    config=config,
+                    data_collector=graph.data_collector,
+                )
+
+                horizon_label = "短线" if horizon == "short" else "中线"
+                _emit_job_event(job_id, "agent.horizon_start", {
+                    "horizon": horizon, "label": horizon_label,
+                })
+                # 每轮重置 tracker，前端进度条重新走一遍
+                tracker = AgentProgressTracker(horizon_analysts, job_id)
+                _emit_job_event(job_id, "agent.snapshot", tracker.snapshot())
+                # 告知前端本轮参与的 analyst 即将开始
+                for analyst_key in ANALYST_ORDER:
+                    if analyst_key in horizon_analysts:
+                        aname = ANALYST_AGENT_NAMES[analyst_key]
+                        tracker._set_status(aname, "in_progress")
+                        tracker._emit_writing_status(aname, ANALYST_REPORT_MAP[analyst_key])
+
+                args = horizon_graph.propagator.get_graph_args()
+                init_state = horizon_graph.propagator.create_initial_state(
+                    ticker, request.trade_date,
+                    user_intent=user_intent, horizon=horizon,
+                )
+                last_report: Dict[str, str] = {}
+                seen: Dict[str, bool] = {}   # 追踪哪些字段已出现过，避免重复事件
+                horizon_final = None
+
+                for chunk in horizon_graph.graph.stream(init_state, **args):
+                    horizon_final = chunk
+                    active_keys = [k for k, v in chunk.items() if v and k != "messages"]
+                    if active_keys:
+                        print(f"[Graph Chunk/{horizon}] keys={active_keys}")
+
+                    # ── 并行感知的状态推进（替代 apply_chunk）──────────────────
+                    # 1. 每个 analyst 报告首次出现 → completed
+                    for analyst_key in ANALYST_ORDER:
+                        if analyst_key not in horizon_analysts:
+                            continue
+                        rkey = ANALYST_REPORT_MAP[analyst_key]
+                        aname = ANALYST_AGENT_NAMES[analyst_key]
+                        if chunk.get(rkey) and not seen.get(rkey):
+                            seen[rkey] = True
+                            tracker._set_status(aname, "completed")
+
+                    # 2. game_theory_report 出现 → GTM completed, Bull 开始
+                    if chunk.get("game_theory_report") and not seen.get("game_theory_report"):
+                        seen["game_theory_report"] = True
+                        tracker._set_status(ANALYST_AGENT_NAMES["game_theory"], "completed")
+                        tracker._set_status(ANALYST_AGENT_NAMES["bull"], "in_progress")
+
+                    # 3. research judge → 研究团队完成, Trader 开始
+                    debate = chunk.get("investment_debate_state") or {}
+                    if debate.get("judge_decision") and not seen.get("judge_decision"):
+                        seen["judge_decision"] = True
+                        for r_key in ["bull", "bear", "research_manager"]:
+                            tracker._set_status(ANALYST_AGENT_NAMES[r_key], "completed")
+                        tracker._set_status(ANALYST_AGENT_NAMES["trader"], "in_progress")
+                        tracker._emit_writing_status(ANALYST_AGENT_NAMES["trader"], "trader_investment_plan")
+
+                    # 4. trader plan → Trader completed, 风控开始
+                    if chunk.get("trader_investment_plan") and not seen.get("trader_investment_plan"):
+                        seen["trader_investment_plan"] = True
+                        tracker._set_status(ANALYST_AGENT_NAMES["trader"], "completed")
+                        tracker._set_status(ANALYST_AGENT_NAMES["aggressive"], "in_progress")
+
+                    # 5. risk judge → 风控全部完成
+                    risk = chunk.get("risk_debate_state") or {}
+                    if risk.get("judge_decision") and not seen.get("risk_judge_decision"):
+                        seen["risk_judge_decision"] = True
+                        for r_key in ["aggressive", "neutral", "conservative", "portfolio_manager"]:
+                            tracker._set_status(ANALYST_AGENT_NAMES[r_key], "completed")
+                    # ── end 并行感知 ────────────────────────────────────────────
+
+                    # 报告分片推送
+                    for key in report_keys:
+                        value = chunk.get(key)
+                        if value and value != last_report.get(key):
+                            last_report[key] = value
+                            tracker._emit_report_chunked(job_id, key, str(value))
+
+                horizon_states[horizon] = horizon_final
+                for agent, st in tracker.status.items():
+                    if st not in ("completed", "skipped"):
+                        tracker._set_status(agent, "completed")
+                _emit_job_event(job_id, "agent.horizon_done", {"horizon": horizon})
+
+            graph.data_collector.evict(ticker, request.trade_date)
+
+            short_r = graph._build_horizon_result("short", horizon_states.get("short") or {})
+            medium_r = graph._build_horizon_result("medium", horizon_states.get("medium") or {})
+            primary_r = short_r if horizon_states.get("short") else medium_r
+            decision = graph.process_signal(primary_r.get("final_trade_decision", "")) or "UNKNOWN"
+            result = {
+                "symbol": ticker,
+                "trade_date": request.trade_date,
+                "mode": "dual_horizon",
+                "user_intent": user_intent,
+                "short_term": short_r,
+                "medium_term": medium_r,
+                "decision": decision,
+                # Hoist primary horizon's report fields to top level so that
+                # resolve_report_fields / create_report can find them directly.
+                "final_trade_decision": primary_r.get("final_trade_decision", ""),
+                "investment_plan": primary_r.get("investment_plan", ""),
+                "trader_investment_plan": primary_r.get("trader_investment_plan", ""),
+                "market_report": primary_r.get("market_report", ""),
+                "sentiment_report": primary_r.get("sentiment_report", ""),
+                "news_report": primary_r.get("news_report", ""),
+                "fundamentals_report": primary_r.get("fundamentals_report", ""),
+                "macro_report": primary_r.get("macro_report", ""),
+                "smart_money_report": primary_r.get("smart_money_report", ""),
+                "analyst_traces": (
+                    short_r.get("analyst_traces", []) + medium_r.get("analyst_traces", [])
+                ),
+            }
+            # LLM 结构化提取（目标价、止损、信心、风险、关键指标）
+            # 注意：必须在 _set_job(status="completed") 之前完成，否则 SSE 超时
+            # 会因为看到 status="completed" 而提前关闭流，导致 job.completed 事件丢失。
+            structured = None
+            try:
+                structured = report_service.extract_structured_data(
+                    final_trade_decision=primary_r.get("final_trade_decision", ""),
+                    fundamentals_report=primary_r.get("fundamentals_report", ""),
+                    config=config,
+                )
+            except Exception as e:
+                print(f"Structured extraction failed (non-fatal): {e}")
+
+            resolved = report_service.resolve_report_fields(
+                result_data=result,
+                confidence_override=structured.confidence if structured else None,
+                target_price_override=structured.target_price if structured else None,
+                stop_loss_override=structured.stop_loss_price if structured else None,
+            )
+            result.update({
+                "direction": resolved["direction"],
+                "confidence": resolved["confidence"],
+                "target_price": resolved["target_price"],
+                "stop_loss_price": resolved["stop_loss_price"],
+            })
+
+            # 自动保存报告到数据库
+            if save_report:
+                db = SessionLocal()
+                try:
+                    report_service.create_report(
+                        db=db,
+                        symbol=request.symbol,
+                        trade_date=request.trade_date,
+                        decision=decision,
+                        result_data=result,
+                        user_id=user_id,
+                        risk_items=([r.model_dump() for r in structured.risks] if structured else None),
+                        key_metrics=([m.model_dump() for m in structured.key_metrics] if structured else None),
+                        confidence_override=result["confidence"],
+                        target_price_override=result["target_price"],
+                        stop_loss_override=result["stop_loss_price"],
+                    )
+                    db.commit()
+                except Exception as e:
+                    db.rollback()
+                    print(f"Failed to save report: {e}")
+                finally:
+                    db.close()
+
+            # 所有后处理完成后再标记 completed，防止 SSE 超时提前关闭流
+            _set_job(job_id, status="completed", result=result,
+                     decision=decision, finished_at=_utcnow_iso())
+            _emit_job_event(job_id, "job.completed", {
+                "job_id": job_id, "decision": decision,
+                "direction": result["direction"],
+                "result": result, "mode": "dual_horizon",
+                "risk_items": [r.model_dump() for r in structured.risks] if structured else [],
+                "key_metrics": [m.model_dump() for m in structured.key_metrics] if structured else [],
+                "confidence": result["confidence"],
+                "target_price": result["target_price"],
+                "stop_loss_price": result["stop_loss_price"],
+            })
+            return
+        # ── End dual-horizon path ─────────────────────────────────────────────
+
         if stream_events:
             init_state = graph.propagator.create_initial_state(
                 request.symbol, request.trade_date
@@ -949,19 +1209,13 @@ def _run_job(
         result = _build_result_payload(final_state)
         result["decision"] = decision
 
-        _set_job(
-            job_id,
-            status="completed",
-            result=result,
-            decision=decision,
-            finished_at=_utcnow_iso(),
-        )
         # 全量收口为 completed/skipped
         for agent, status in tracker.status.items():
             if status not in ("completed", "skipped"):
                 tracker._set_status(agent, "completed")
-        
+
         # LLM 结构化提取（非阻塞，失败不影响主流程）
+        # 注意：_set_job(status="completed") 必须在此之后调用，否则 SSE 超时会提前关闭流
         structured = None
         try:
             structured = report_service.extract_structured_data(
@@ -1006,11 +1260,21 @@ def _run_job(
                     target_price_override=result["target_price"],
                     stop_loss_override=result["stop_loss_price"],
                 )
+                db.commit()
             except Exception as e:
+                db.rollback()
                 print(f"Failed to save report: {e}")
             finally:
                 db.close()
 
+        # 所有后处理完成后再标记 completed，防止 SSE 超时提前关闭流
+        _set_job(
+            job_id,
+            status="completed",
+            result=result,
+            decision=decision,
+            finished_at=_utcnow_iso(),
+        )
         _emit_job_event(
             job_id,
             "job.completed",
@@ -1058,6 +1322,13 @@ def _normalize_symbol(raw: str) -> str:
     m2 = re.search(r"([A-Z]{1,6}(?:\.[A-Z]{1,3})?)", s)
     if m2:
         return m2.group(1)
+        
+    # Final Fallback: Check Chinese Name Map (e.g. "三花智控" -> "002050.SZ")
+    from tradingagents.dataflows.trade_calendar import _load_cn_stock_map
+    stock_map = _load_cn_stock_map()
+    if s in stock_map:
+        return stock_map[s]
+        
     return s
 
 
@@ -1269,12 +1540,13 @@ def _stream_job_events(job_id: str):
     yield _sse_pack("job.ready", {"job_id": job_id})
     while True:
         try:
-            event = q.get(timeout=10)
+            event = q.get(timeout=30)
             yield _sse_pack(event["event"], event["data"])
             if event["event"] in ("job.completed", "job.failed"):
                 yield "event: done\ndata: [DONE]\n\n"
                 break
         except queue.Empty:
+            # 仅在 status 已完成且无更多事件时关闭（兜底，正常路径不会触发）
             with _jobs_lock:
                 status = _jobs.get(job_id, {}).get("status")
             if status in ("completed", "failed"):
@@ -1521,20 +1793,24 @@ def stream_job_events(job_id: str, current_user: UserDB = Depends(_require_api_u
     )
 
 
-def _ai_extract_symbol_and_date(text: str, config: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+def _ai_extract_symbol_and_date(
+    text: str, config: Dict[str, Any]
+) -> tuple[Optional[str], Optional[str], List[str], List[str], List[str]]:
     """
-    Two-step extraction:
-    1. LLM extracts the company name/ticker and date from natural language.
-    2. Use the extracted name to look up the authoritative stock code from akshare.
+    Single-LLM extraction: stock name, date, horizons, focus_areas, specific_questions.
+    Then resolves the stock name to an authoritative code via akshare.
+    Returns (symbol, date, horizons, focus_areas, specific_questions).
     """
     from tradingagents.llm_clients.factory import create_llm_client
     import json as _json
 
     today = datetime.now().strftime("%Y-%m-%d")
 
-    # ── Step 1: LLM extracts company name + date ──────────────────────────────
     llm_name: Optional[str] = None
     llm_date: Optional[str] = None
+    llm_horizons: List[str] = ["short"]
+    llm_focus_areas: List[str] = []
+    llm_specific_questions: List[str] = []
     try:
         client = create_llm_client(
             provider=config.get("llm_provider", "openai"),
@@ -1542,14 +1818,22 @@ def _ai_extract_symbol_and_date(text: str, config: Dict[str, Any]) -> tuple[Opti
             base_url=config.get("backend_url"),
             api_key=config.get("api_key"),
         )
-        prompt = f"""你是金融数据助手。从用户消息中提取股票标的名称（或代码）和交易日期。
+        prompt = f"""你是金融数据助手。从用户消息中提取以下字段并以 JSON 输出。
 
-规则：
-- stock_name：提取用户提到的公司名称或股票代码原文（如"华盛天成"、"贵州茅台"、"600519"、"AAPL"）。
-- 如果是美股，stock_name 直接填 ticker（如"AAPL"）。
-- date：使用 YYYY-MM-DD 格式。今天是 {today}，如未提及日期则填今天。
-- 仅输出 JSON，不要任何其他文字：{{"stock_name": "...", "date": "YYYY-MM-DD"}}
-- 如果无法识别任何股票标的，返回：{{"stock_name": null, "date": null}}
+字段说明：
+- stock_name：用户提到的公司名称或股票代码原文（如"华盛天成"、"贵州茅台"、"600519"、"AAPL"）；美股直接填 ticker。
+- date：YYYY-MM-DD 格式。今天是 {today}，如未提及则填今天。
+- horizons：分析周期数组：
+  * 用户明确提到"中线/中期/几个月/季度/长期/趋势投资"→ ["medium"]
+  * 同时提到短期和中期 → ["short", "medium"]
+  * 其他所有情况（含未提及）→ ["short"]
+- focus_areas：用户关注的分析维度关键词列表，如 ["技术面", "资金面", "业绩"]，未提及则 []。
+- specific_questions：用户提出的具体问题列表，如 ["近期有无催化剂？", "主力是否出货？"]，未提及则 []。
+
+仅输出 JSON，不要任何其他文字：
+{{"stock_name": "...", "date": "YYYY-MM-DD", "horizons": ["short"], "focus_areas": [], "specific_questions": []}}
+
+如果无法识别股票标的：{{"stock_name": null, "date": null, "horizons": ["short"], "focus_areas": [], "specific_questions": []}}
 
 用户消息："{text}"
 """
@@ -1561,35 +1845,38 @@ def _ai_extract_symbol_and_date(text: str, config: Dict[str, Any]) -> tuple[Opti
             data = _json.loads(m.group(0))
             llm_name = (data.get("stock_name") or "").strip() or None
             llm_date = data.get("date") or today
+            llm_horizons = data.get("horizons") or ["short"]
+            llm_focus_areas = data.get("focus_areas") or []
+            llm_specific_questions = data.get("specific_questions") or []
     except Exception as e:
         print(f"[StockExtract] LLM failed: {e}")
 
     if not llm_name:
         print(f"[StockExtract] LLM returned no stock name for: '{text[:40]}'")
-        return None, None
+        return None, None, llm_horizons, llm_focus_areas, llm_specific_questions
 
-    print(f"[StockExtract] LLM extracted name='{llm_name}', date={llm_date}")
+    print(f"[StockExtract] LLM extracted name='{llm_name}', date={llm_date}, horizons={llm_horizons}")
 
     # ── Step 2: If looks like a direct code (digits / letters), normalize it ──
     if re.match(r"^\d{6}$", llm_name) or re.match(r"^[A-Za-z]{1,6}(\.[A-Za-z]+)?$", llm_name):
         symbol = _normalize_symbol(llm_name)
         print(f"[StockExtract] Direct code: {symbol}")
-        return symbol or None, llm_date
+        return symbol or None, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions
 
     # ── Step 3: Search akshare A-share name database ──────────────────────────
     local_code = _search_cn_stock_by_name(llm_name)
     if local_code:
         print(f"[StockExtract] akshare match: '{llm_name}' → {local_code}")
-        return local_code, llm_date
+        return local_code, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions
 
     # ── Step 4: Last resort — treat LLM name as a raw code ────────────────────
     fallback = _normalize_symbol(llm_name)
     if fallback:
         print(f"[StockExtract] Fallback normalize: '{llm_name}' → {fallback}")
-        return fallback, llm_date
+        return fallback, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions
 
     print(f"[StockExtract] Could not resolve '{llm_name}' to a stock code")
-    return None, llm_date
+    return None, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions
 
 @app.post("/v1/chat/completions")
 def chat_completions(
@@ -1599,8 +1886,8 @@ def chat_completions(
     text = _extract_chat_text(request.messages)
     config = _build_runtime_config(request.config_overrides, user_id=current_user.id)
 
-    # 仅使用 LLM 解析，避免本地正则误判后缀
-    symbol, trade_date = _ai_extract_symbol_and_date(text, config)
+    # 单次 LLM 调用提取全部意图（避免 _run_job 里二次 LLM）
+    symbol, trade_date, horizons, focus_areas, specific_questions = _ai_extract_symbol_and_date(text, config)
 
     if not symbol:
         message = "抱歉，我没能从您的消息中识别出股票标的。请输入代码（如 600519.SH）或可识别的公司名称。"
@@ -1615,6 +1902,13 @@ def chat_completions(
             )
         raise HTTPException(status_code=400, detail=message)
 
+    pre_intent = {
+        "raw_query": text,
+        "ticker": symbol,
+        "horizons": horizons,
+        "focus_areas": focus_areas,
+        "specific_questions": specific_questions,
+    }
 
     analyze_req = AnalyzeRequest(
         symbol=symbol,
@@ -1622,6 +1916,9 @@ def chat_completions(
         selected_analysts=request.selected_analysts,
         config_overrides=request.config_overrides,
         dry_run=request.dry_run,
+        query=text,
+        horizons=horizons,
+        user_intent=pre_intent,
     )
     job_id = uuid4().hex
     now = _utcnow_iso()
