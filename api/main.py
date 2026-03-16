@@ -36,6 +36,7 @@ from tradingagents.dataflows.trade_calendar import cn_today_str
 from tradingagents.dataflows.config import set_config
 from tradingagents.dataflows.interface import route_to_vendor
 from tradingagents.graph.intent_parser import parse_intent as _parse_intent
+from tradingagents.agents.utils.context_utils import USER_CONTEXT_KEYS, normalize_user_context
 
 
 def _cors_allow_origins() -> list[str]:
@@ -205,7 +206,20 @@ def _get_horizon_analysts(horizon: str, available: List[str]) -> List[str]:
     return filtered if filtered else list(available)
 
 
-class AnalyzeRequest(BaseModel):
+class UserContextInput(BaseModel):
+    objective: Optional[str] = Field(None, description="用户目标动作，如建仓/加仓/减仓/止损/观察")
+    risk_profile: Optional[str] = Field(None, description="风险偏好，如保守/平衡/激进")
+    investment_horizon: Optional[str] = Field(None, description="持有周期，如短线/波段/中线")
+    cash_available: Optional[float] = Field(None, description="可用资金")
+    current_position: Optional[float] = Field(None, description="当前持仓数量")
+    current_position_pct: Optional[float] = Field(None, description="当前仓位占比")
+    average_cost: Optional[float] = Field(None, description="当前持仓成本")
+    max_loss_pct: Optional[float] = Field(None, description="最大容忍亏损百分比")
+    constraints: List[str] = Field(default_factory=list, description="用户的硬约束列表")
+    user_notes: Optional[str] = Field(None, description="用户补充说明")
+
+
+class AnalyzeRequest(UserContextInput):
     symbol: str = Field(default="", description="股票代码，如 600519.SH（当 query 包含代码时可省略）")
     trade_date: str = Field(default_factory=cn_today_str, description="交易日期 YYYY-MM-DD")
     selected_analysts: List[str] = Field(
@@ -242,7 +256,7 @@ class ChatMessage(BaseModel):
     content: Any
 
 
-class ChatCompletionRequest(BaseModel):
+class ChatCompletionRequest(UserContextInput):
     model: Optional[str] = "tradingagents-ashare"
     messages: List[ChatMessage]
     stream: bool = True
@@ -508,11 +522,38 @@ def _emit_job_event(job_id: str, event: str, data: Dict[str, Any]) -> None:
     _ensure_job_event_queue(job_id).put(payload)
 
 
+def _extract_request_user_context(request: UserContextInput) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    for key in USER_CONTEXT_KEYS:
+        value = getattr(request, key, None)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        if key == "constraints" and not value:
+            continue
+        payload[key] = value
+    return payload
+
+
+def _merge_user_context_payload(
+    explicit_context: Dict[str, Any],
+    inferred_context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    merged = normalize_user_context(inferred_context or {})
+    merged.update(normalize_user_context(explicit_context or {}))
+    return merged
+
+
 def _build_result_payload(final_state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "symbol": final_state.get("company_of_interest"),
         "trade_date": final_state.get("trade_date"),
         "direction": None,
+        "instrument_context": final_state.get("instrument_context"),
+        "market_context": final_state.get("market_context"),
+        "user_context": final_state.get("user_context"),
+        "workflow_context": final_state.get("workflow_context"),
         "market_report": final_state.get("market_report"),
         "sentiment_report": final_state.get("sentiment_report"),
         "news_report": final_state.get("news_report"),
@@ -520,8 +561,10 @@ def _build_result_payload(final_state: Dict[str, Any]) -> Dict[str, Any]:
         "macro_report": final_state.get("macro_report"),
         "smart_money_report": final_state.get("smart_money_report"),
         "game_theory_report": final_state.get("game_theory_report"),
+        "game_theory_signals": final_state.get("game_theory_signals"),
         "investment_plan": final_state.get("investment_plan"),
         "trader_investment_plan": final_state.get("trader_investment_plan"),
+        "risk_feedback_state": final_state.get("risk_feedback_state"),
         "final_trade_decision": final_state.get("final_trade_decision"),
     }
 
@@ -837,6 +880,7 @@ def _run_job(
     stream_events: bool = False,
     save_report: bool = True,
     user_id: Optional[str] = None,
+    request_source: str = "api",
 ) -> None:
     # Normalize for logic but keep original for display
     display_name = request.symbol
@@ -855,6 +899,7 @@ def _run_job(
     )
     # Ensure request object uses the normalized symbol for internal logic
     request.symbol = normalized_symbol
+    user_context_payload = _extract_request_user_context(request)
     tracker = AgentProgressTracker(request.selected_analysts, job_id)
     _emit_job_event(job_id, "agent.snapshot", tracker.snapshot())
     try:
@@ -865,6 +910,7 @@ def _run_job(
                 "symbol": request.symbol,
                 "trade_date": request.trade_date,
                 "selected_analysts": request.selected_analysts,
+                "user_context": user_context_payload,
                 "llm_provider": config.get("llm_provider"),
                 "data_vendors": config.get("data_vendors"),
             }
@@ -909,6 +955,13 @@ def _run_job(
                 if not request.horizons:
                     request.horizons = user_intent["horizons"]
                 user_intent["horizons"] = request.horizons
+
+            inferred_user_context = user_intent.get("user_context") or {}
+            user_context_payload = _merge_user_context_payload(
+                user_context_payload,
+                inferred_user_context,
+            )
+            user_intent["user_context"] = user_context_payload
 
             # Use normalized ticker from intent parser if available
             ticker = user_intent.get("ticker") or ticker
@@ -963,6 +1016,9 @@ def _run_job(
                 args = horizon_graph.propagator.get_graph_args()
                 init_state = horizon_graph.propagator.create_initial_state(
                     ticker, request.trade_date,
+                    user_context=user_context_payload,
+                    selected_analysts=horizon_analysts,
+                    request_source=request_source,
                     user_intent=user_intent, horizon=horizon,
                 )
                 last_report: Dict[str, str] = {}
@@ -1125,7 +1181,11 @@ def _run_job(
 
         if stream_events:
             init_state = graph.propagator.create_initial_state(
-                request.symbol, request.trade_date
+                request.symbol,
+                request.trade_date,
+                user_context=user_context_payload,
+                selected_analysts=request.selected_analysts,
+                request_source=request_source,
             )
             args = graph.propagator.get_graph_args()
             report_keys = (
@@ -1202,7 +1262,13 @@ def _run_job(
                         # 使用分片推送，支持打字机效果
                         tracker._emit_report_chunked(job_id, key, str(value))
         else:
-            final_state, _ = graph.propagate(request.symbol, request.trade_date)
+            final_state, _ = graph.propagate(
+                request.symbol,
+                request.trade_date,
+                user_context=user_context_payload,
+                selected_analysts=request.selected_analysts,
+                request_source=request_source,
+            )
 
         if not final_state:
             raise RuntimeError("graph returned empty final state")
@@ -1741,7 +1807,7 @@ def analyze(
         "job.created",
         {"job_id": job_id, "symbol": request.symbol, "trade_date": request.trade_date},
     )
-    _executor.submit(_run_job, job_id, request, True, True, current_user.id)
+    _executor.submit(_run_job, job_id, request, True, True, current_user.id, "api")
     return AnalyzeResponse(job_id=job_id, status="pending", created_at=now)
 
 
@@ -1797,11 +1863,11 @@ def stream_job_events(job_id: str, current_user: UserDB = Depends(_require_api_u
 
 def _ai_extract_symbol_and_date(
     text: str, config: Dict[str, Any]
-) -> tuple[Optional[str], Optional[str], List[str], List[str], List[str]]:
+) -> tuple[Optional[str], Optional[str], List[str], List[str], List[str], Dict[str, Any]]:
     """
     Single-LLM extraction: stock name, date, horizons, focus_areas, specific_questions.
     Then resolves the stock name to an authoritative code via akshare.
-    Returns (symbol, date, horizons, focus_areas, specific_questions).
+    Returns (symbol, date, horizons, focus_areas, specific_questions, inferred_user_context).
     """
     from tradingagents.llm_clients.factory import create_llm_client
     import json as _json
@@ -1813,6 +1879,7 @@ def _ai_extract_symbol_and_date(
     llm_horizons: List[str] = ["short"]
     llm_focus_areas: List[str] = []
     llm_specific_questions: List[str] = []
+    llm_user_context: Dict[str, Any] = {}
     try:
         client = create_llm_client(
             provider=config.get("llm_provider", "openai"),
@@ -1831,11 +1898,18 @@ def _ai_extract_symbol_and_date(
   * 其他所有情况（含未提及）→ ["short"]
 - focus_areas：用户关注的分析维度关键词列表，如 ["技术面", "资金面", "业绩"]，未提及则 []。
 - specific_questions：用户提出的具体问题列表，如 ["近期有无催化剂？", "主力是否出货？"]，未提及则 []。
+- user_context：从自然语言中提取的账户与约束对象。若未提及返回 {{}}。可包含：
+  * objective：建仓 / 加仓 / 减仓 / 止损 / 观察 / 持有处理
+  * risk_profile：保守 / 平衡 / 激进
+  * investment_horizon：短线 / 波段 / 中线 / 长期
+  * cash_available / current_position / current_position_pct / average_cost / max_loss_pct：数字
+  * constraints：字符串数组
+  * user_notes：仅保留重要但未能结构化归类的信息
 
 仅输出 JSON，不要任何其他文字：
-{{"stock_name": "...", "date": "YYYY-MM-DD", "horizons": ["short"], "focus_areas": [], "specific_questions": []}}
+{{"stock_name": "...", "date": "YYYY-MM-DD", "horizons": ["short"], "focus_areas": [], "specific_questions": [], "user_context": {{}}}}
 
-如果无法识别股票标的：{{"stock_name": null, "date": null, "horizons": ["short"], "focus_areas": [], "specific_questions": []}}
+如果无法识别股票标的：{{"stock_name": null, "date": null, "horizons": ["short"], "focus_areas": [], "specific_questions": [], "user_context": {{}}}}
 
 用户消息："{text}"
 """
@@ -1850,12 +1924,13 @@ def _ai_extract_symbol_and_date(
             llm_horizons = data.get("horizons") or ["short"]
             llm_focus_areas = data.get("focus_areas") or []
             llm_specific_questions = data.get("specific_questions") or []
+            llm_user_context = normalize_user_context(data.get("user_context") or {})
     except Exception as e:
         print(f"[StockExtract] LLM failed: {e}")
 
     if not llm_name:
         print(f"[StockExtract] LLM returned no stock name for: '{text[:40]}'")
-        return None, None, llm_horizons, llm_focus_areas, llm_specific_questions
+        return None, None, llm_horizons, llm_focus_areas, llm_specific_questions, llm_user_context
 
     print(f"[StockExtract] LLM extracted name='{llm_name}', date={llm_date}, horizons={llm_horizons}")
 
@@ -1863,22 +1938,22 @@ def _ai_extract_symbol_and_date(
     if re.match(r"^\d{6}$", llm_name) or re.match(r"^[A-Za-z]{1,6}(\.[A-Za-z]+)?$", llm_name):
         symbol = _normalize_symbol(llm_name)
         print(f"[StockExtract] Direct code: {symbol}")
-        return symbol or None, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions
+        return symbol or None, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions, llm_user_context
 
     # ── Step 3: Search akshare A-share name database ──────────────────────────
     local_code = _search_cn_stock_by_name(llm_name)
     if local_code:
         print(f"[StockExtract] akshare match: '{llm_name}' → {local_code}")
-        return local_code, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions
+        return local_code, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions, llm_user_context
 
     # ── Step 4: Last resort — treat LLM name as a raw code ────────────────────
     fallback = _normalize_symbol(llm_name)
     if fallback:
         print(f"[StockExtract] Fallback normalize: '{llm_name}' → {fallback}")
-        return fallback, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions
+        return fallback, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions, llm_user_context
 
     print(f"[StockExtract] Could not resolve '{llm_name}' to a stock code")
-    return None, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions
+    return None, llm_date, llm_horizons, llm_focus_areas, llm_specific_questions, llm_user_context
 
 @app.post("/v1/chat/completions")
 def chat_completions(
@@ -1889,7 +1964,7 @@ def chat_completions(
     config = _build_runtime_config(request.config_overrides, user_id=current_user.id)
 
     # 单次 LLM 调用提取全部意图（避免 _run_job 里二次 LLM）
-    symbol, trade_date, horizons, focus_areas, specific_questions = _ai_extract_symbol_and_date(text, config)
+    symbol, trade_date, horizons, focus_areas, specific_questions, inferred_user_context = _ai_extract_symbol_and_date(text, config)
 
     if not symbol:
         message = "抱歉，我没能从您的消息中识别出股票标的。请输入代码（如 600519.SH）或可识别的公司名称。"
@@ -1910,7 +1985,12 @@ def chat_completions(
         "horizons": horizons,
         "focus_areas": focus_areas,
         "specific_questions": specific_questions,
+        "user_context": inferred_user_context,
     }
+    merged_user_context = _merge_user_context_payload(
+        _extract_request_user_context(request),
+        inferred_user_context,
+    )
 
     analyze_req = AnalyzeRequest(
         symbol=symbol,
@@ -1921,6 +2001,16 @@ def chat_completions(
         query=text,
         horizons=horizons,
         user_intent=pre_intent,
+        objective=merged_user_context.get("objective"),
+        risk_profile=merged_user_context.get("risk_profile"),
+        investment_horizon=merged_user_context.get("investment_horizon"),
+        cash_available=merged_user_context.get("cash_available"),
+        current_position=merged_user_context.get("current_position"),
+        current_position_pct=merged_user_context.get("current_position_pct"),
+        average_cost=merged_user_context.get("average_cost"),
+        max_loss_pct=merged_user_context.get("max_loss_pct"),
+        constraints=merged_user_context.get("constraints", []),
+        user_notes=merged_user_context.get("user_notes"),
     )
     job_id = uuid4().hex
     now = _utcnow_iso()
@@ -1944,7 +2034,7 @@ def chat_completions(
         "job.created",
         {"job_id": job_id, "symbol": analyze_req.symbol, "trade_date": analyze_req.trade_date},
     )
-    _executor.submit(_run_job, job_id, analyze_req, True, True, current_user.id)
+    _executor.submit(_run_job, job_id, analyze_req, True, True, current_user.id, "chat")
 
     if request.stream:
         return StreamingResponse(
