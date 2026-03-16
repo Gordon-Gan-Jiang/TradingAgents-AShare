@@ -1,6 +1,7 @@
 # TradingAgents/graph/conditional_logic.py
 
 from tradingagents.agents.utils.agent_states import AgentState
+from tradingagents.agents.utils.debate_utils import safe_int
 
 
 class ConditionalLogic:
@@ -66,7 +67,7 @@ class ConditionalLogic:
             state["investment_debate_state"]["count"] >= 2 * self.max_debate_rounds
         ):  # 3 rounds of back-and-forth between 2 agents
             return "Research Manager"
-        if state["investment_debate_state"]["current_response"].startswith("Bull"):
+        if state["investment_debate_state"].get("current_speaker", "").startswith("Bull"):
             return "Bear Researcher"
         return "Bull Researcher"
 
@@ -81,3 +82,13 @@ class ConditionalLogic:
         if state["risk_debate_state"]["latest_speaker"].startswith("Conservative"):
             return "Neutral Analyst"
         return "Aggressive Analyst"
+
+    def should_revise_after_risk_judge(self, state: AgentState) -> str:
+        """Determine whether the trader must revise the plan after the risk judge."""
+        feedback = state.get("risk_feedback_state", {})
+        if (
+            feedback.get("revision_required")
+            and safe_int(feedback.get("retry_count", 0), 0) <= safe_int(feedback.get("max_retries", 1), 1)
+        ):
+            return "Trader"
+        return "END"
