@@ -496,6 +496,30 @@ def _build_runtime_config(overrides: Dict[str, Any], user_id: Optional[str] = No
     # Apply global config overrides (from PATCH /v1/config)
     if _global_config_overrides:
         config = _deep_merge(config, dict(_global_config_overrides))
+    
+    # Fetch user specific overrides from DB
+    user_overrides = _user_config_overrides(user_id)
+    
+    # ── Critical: Filter out empty strings before merging ──
+    # This prevents an empty DB field from wiping out an Env Var default.
+    filtered_user_overrides = {k: v for k, v in user_overrides.items() if v not in (None, "", [])}
+    filtered_request_overrides = {k: v for k, v in overrides.items() if v not in (None, "", [])}
+
+    if filtered_user_overrides:
+        config = _deep_merge(config, filtered_user_overrides)
+    if filtered_request_overrides:
+        config = _deep_merge(config, filtered_request_overrides)
+    
+    # ── Intelligent fallback between models ──
+    # If one is provided but the other is missing (even after env var merge), cross-fill.
+    quick = config.get("quick_think_llm")
+    deep = config.get("deep_think_llm")
+    
+    if not deep and quick:
+        config["deep_think_llm"] = quick
+    if not quick and deep:
+        config["quick_think_llm"] = deep
+        
     user_overrides = _user_config_overrides(user_id, db=db)
     if user_overrides:
         config = _deep_merge(config, user_overrides)
@@ -2035,7 +2059,7 @@ def _ai_extract_symbol_and_date(
     try:
         client = create_llm_client(
             provider=config.get("llm_provider", "openai"),
-            model=config.get("quick_think_llm", "gpt-4o-mini"),
+            model=config.get("quick_think_llm"),
             base_url=config.get("backend_url"),
             api_key=config.get("api_key"),
         )
