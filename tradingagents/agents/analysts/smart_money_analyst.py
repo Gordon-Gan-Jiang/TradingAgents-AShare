@@ -1,7 +1,10 @@
+import asyncio
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
 from tradingagents.graph.intent_parser import build_horizon_context
+from tradingagents.agents.utils.agent_states import current_tracker_var
 
 
 def _extract_verdict(text):
@@ -17,13 +20,13 @@ def _extract_verdict(text):
 
 
 def create_smart_money_analyst(llm, data_collector=None):
-    def _safe(tool, payload):
+    async def _safe(tool, payload):
         try:
-            return tool.invoke(payload)
+            return await asyncio.to_thread(tool.invoke, payload)
         except Exception as exc:
             return f"调用失败：{exc}"
 
-    def smart_money_analyst_node(state):
+    async def smart_money_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
         print(f"[Smart Money Analyst] START {ticker} {current_date}")
@@ -34,7 +37,7 @@ def create_smart_money_analyst(llm, data_collector=None):
 
         config = get_config()
         system_message = get_prompt("smart_money_system_message", config=config) or ""
-        horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, "smart_money")
+        horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="smart_money")
 
         pool = data_collector.get(ticker, current_date) if data_collector else None
 
@@ -46,12 +49,17 @@ def create_smart_money_analyst(llm, data_collector=None):
             from tradingagents.agents.utils.agent_utils import (
                 get_individual_fund_flow, get_lhb_detail, get_indicators,
             )
-            fund_flow = _safe(get_individual_fund_flow, {"symbol": ticker})
-            lhb = _safe(get_lhb_detail, {"symbol": ticker, "date": current_date})
-            volume = _safe(get_indicators, {
-                "symbol": ticker, "indicator": "volume",
-                "curr_date": current_date, "look_back_days": 20,
-            })
+            
+            # Parallelize fallback fetches
+            results = await asyncio.gather(
+                _safe(get_individual_fund_flow, {"symbol": ticker}),
+                _safe(get_lhb_detail, {"symbol": ticker, "date": current_date}),
+                _safe(get_indicators, {
+                    "symbol": ticker, "indicator": "volume",
+                    "curr_date": current_date, "look_back_days": 20,
+                })
+            )
+            fund_flow, lhb, volume = results
 
         messages = [
             SystemMessage(content=(
@@ -66,11 +74,19 @@ def create_smart_money_analyst(llm, data_collector=None):
             )),
         ]
 
-        result = llm.invoke(messages)
-        print(f"[Smart Money Analyst] DONE {ticker}, report length={len(result.content)}")
-        verdict, confidence = _extract_verdict(result.content)
+        # ── 实现 Token 级流式输出 ──────────────────
+        tracker = current_tracker_var.get()
+        full_content = ""
+        async for chunk in llm.astream(messages):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            full_content += content
+            if tracker:
+                tracker._emit_token("Smart Money Analyst", "smart_money_report", content)
+
+        print(f"[Smart Money Analyst] DONE {ticker}, report length={len(full_content)}")
+        verdict, confidence = _extract_verdict(full_content)
         return {
-            "smart_money_report": result.content,
+            "smart_money_report": full_content,
             "analyst_traces": [{
                 "agent": "smart_money_analyst",
                 "horizon": horizon,

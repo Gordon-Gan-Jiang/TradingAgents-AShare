@@ -2,6 +2,7 @@ import time
 import json
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
+from tradingagents.agents.utils.agent_states import current_tracker_var
 from tradingagents.agents.utils.debate_utils import (
     format_claim_subset_for_prompt,
     format_claims_for_prompt,
@@ -10,7 +11,7 @@ from tradingagents.agents.utils.debate_utils import (
 
 
 def create_research_manager(llm, memory):
-    def research_manager_node(state) -> dict:
+    async def research_manager_node(state) -> dict:
         history = state["investment_debate_state"].get("history", "")
         market_research_report = state["market_report"]
         sentiment_report = state["sentiment_report"]
@@ -40,15 +41,23 @@ def create_research_manager(llm, memory):
             unresolved_claims_text=format_claim_subset_for_prompt(claims, unresolved_claim_ids),
             round_summary=round_summary or "暂无轮次摘要。",
         )
-        response = llm.invoke(prompt)
+        
+        # ── 实现 Token 级流式输出 ──────────────────
+        tracker = current_tracker_var.get()
+        full_content = ""
+        async for chunk in llm.astream(prompt):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            full_content += content
+            if tracker:
+                tracker._emit_token("Research Manager", "investment_plan", content)
 
         new_investment_debate_state = {
-            "judge_decision": response.content,
+            "judge_decision": full_content,
             "history": investment_debate_state.get("history", ""),
             "bear_history": investment_debate_state.get("bear_history", ""),
             "bull_history": investment_debate_state.get("bull_history", ""),
             "current_speaker": investment_debate_state.get("current_speaker", ""),
-            "current_response": response.content,
+            "current_response": full_content,
             "count": investment_debate_state["count"],
             "claims": claims,
             "focus_claim_ids": investment_debate_state.get("focus_claim_ids", []),
@@ -62,7 +71,7 @@ def create_research_manager(llm, memory):
 
         return {
             "investment_debate_state": new_investment_debate_state,
-            "investment_plan": response.content,
+            "investment_plan": full_content,
         }
 
     return research_manager_node

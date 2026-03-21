@@ -1,7 +1,10 @@
+import asyncio
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
 from tradingagents.graph.intent_parser import build_horizon_context
+from tradingagents.agents.utils.agent_states import current_tracker_var
 
 
 def _extract_verdict(text):
@@ -17,13 +20,13 @@ def _extract_verdict(text):
 
 
 def create_fundamentals_analyst(llm, data_collector=None):
-    def _safe(tool, payload):
+    async def _safe(tool, payload):
         try:
-            return tool.invoke(payload)
+            return await asyncio.to_thread(tool.invoke, payload)
         except Exception as exc:
             return f"调用失败：{exc}"
 
-    def fundamentals_analyst_node(state):
+    async def fundamentals_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
         horizon = state.get("horizon", "medium")
@@ -33,7 +36,7 @@ def create_fundamentals_analyst(llm, data_collector=None):
 
         config = get_config()
         system_message = get_prompt("fundamentals_system_message", config=config)
-        horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, "fundamentals")
+        horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="fundamentals")
 
         pool = data_collector.get(ticker, current_date) if data_collector else None
 
@@ -44,12 +47,15 @@ def create_fundamentals_analyst(llm, data_collector=None):
             from tradingagents.agents.utils.agent_utils import (
                 get_fundamentals, get_balance_sheet, get_cashflow, get_income_statement,
             )
-            outputs = {
+            tasks = {
                 "fundamentals": _safe(get_fundamentals, {"ticker": ticker, "curr_date": current_date}),
                 "balance_sheet": _safe(get_balance_sheet, {"ticker": ticker, "freq": "quarterly", "curr_date": current_date}),
                 "cashflow": _safe(get_cashflow, {"ticker": ticker, "freq": "quarterly", "curr_date": current_date}),
                 "income_statement": _safe(get_income_statement, {"ticker": ticker, "freq": "quarterly", "curr_date": current_date}),
             }
+            keys = list(tasks.keys())
+            results = await asyncio.gather(*[tasks[k] for k in keys])
+            outputs = dict(zip(keys, results))
 
         messages = [
             SystemMessage(content=horizon_ctx + system_message + "\n\n请全程使用中文。"),
@@ -62,10 +68,18 @@ def create_fundamentals_analyst(llm, data_collector=None):
             )),
         ]
 
-        result = llm.invoke(messages)
-        verdict, confidence = _extract_verdict(result.content)
+        # ── 实现 Token 级流式输出 ──────────────────
+        tracker = current_tracker_var.get()
+        full_content = ""
+        async for chunk in llm.astream(messages):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            full_content += content
+            if tracker:
+                tracker._emit_token("Fundamentals Analyst", "fundamentals_report", content)
+
+        verdict, confidence = _extract_verdict(full_content)
         return {
-            "fundamentals_report": result.content,
+            "fundamentals_report": full_content,
             "analyst_traces": [{
                 "agent": "fundamentals_analyst",
                 "horizon": horizon,

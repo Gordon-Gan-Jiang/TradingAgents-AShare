@@ -1,8 +1,16 @@
+import contextvars
 import operator
 from typing import Annotated, Any, List
 
 from typing_extensions import Optional, TypedDict
 from langgraph.graph import MessagesState
+
+# ContextVar used to pass the AgentProgressTracker into async graph nodes
+# without putting it in the LangGraph state (which would require serialization).
+# Set by the API layer before each graph.astream() call; read by analyst nodes.
+current_tracker_var: contextvars.ContextVar = contextvars.ContextVar(
+    "current_tracker", default=None
+)
 
 
 class UserIntent(TypedDict, total=False):
@@ -69,6 +77,14 @@ class InvestDebateState(TypedDict):
     history: Annotated[str, "Conversation history"]
     current_speaker: Annotated[str, "Speaker that spoke last"]
     current_response: Annotated[str, "Latest response"]
+    
+    # ── Parallel Rebuttal Fields ──────────────────────────────────────
+    bull_initial: Annotated[str, "Bull's initial opening statement"]
+    bear_initial: Annotated[str, "Bear's initial opening statement"]
+    bull_rebuttal: Annotated[str, "Bull's rebuttal to Bear's initial"]
+    bear_rebuttal: Annotated[str, "Bear's rebuttal to Bull's initial"]
+    # ──────────────────────────────────────────────────────────────────
+
     judge_decision: Annotated[str, "Final judge decision"]
     count: Annotated[int, "Length of the current conversation"]
     claims: Annotated[list[dict[str, Any]], "Tracked research claims"]

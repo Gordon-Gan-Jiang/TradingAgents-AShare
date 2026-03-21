@@ -131,6 +131,7 @@ export type SSEEventType =
     | 'agent.writing'
     | 'agent.activity'
     | 'agent.activity_complete'
+    | 'agent.token'
 
 export interface SSEEvent {
     event: SSEEventType
@@ -188,6 +189,13 @@ export interface AgentWritingEvent {
     report: string
     report_name: string
     status: 'writing' | 'completed'
+}
+
+export interface AgentTokenEvent {
+    agent: string
+    report: string
+    token: string
+    horizon?: string
 }
 
 export interface AgentActivityEvent {

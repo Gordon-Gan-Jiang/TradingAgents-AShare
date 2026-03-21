@@ -1,8 +1,10 @@
+from langchain_core.messages import AIMessage
 import functools
 import time
 import json
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
+from tradingagents.agents.utils.agent_states import current_tracker_var
 from tradingagents.agents.utils.context_utils import build_agent_context_view
 from tradingagents.agents.utils.debate_utils import (
     build_empty_risk_debate_state,
@@ -11,7 +13,7 @@ from tradingagents.agents.utils.debate_utils import (
 
 
 def create_trader(llm, memory):
-    def trader_node(state, name):
+    async def trader_node(state, name):
         company_name = state["company_of_interest"]
         investment_plan = state["investment_plan"]
         previous_trader_plan = state.get("trader_investment_plan", "")
@@ -60,14 +62,23 @@ def create_trader(llm, memory):
             context,
         ]
 
-        result = llm.invoke(messages)
+        # ── 实现 Token 级流式输出 ──────────────────
+        tracker = current_tracker_var.get()
+        full_content = ""
+        async for chunk in llm.astream(messages):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            full_content += content
+            if tracker:
+                tracker._emit_token("Trader", "trader_investment_plan", content)
+
+        result = AIMessage(content=full_content)
         updated_feedback_state = dict(risk_feedback_state)
         if updated_feedback_state.get("revision_required"):
             updated_feedback_state["revision_required"] = False
 
         response_state = {
             "messages": [result],
-            "trader_investment_plan": result.content,
+            "trader_investment_plan": full_content,
             "sender": name,
         }
         if risk_feedback_state.get("latest_risk_verdict") == "revise":

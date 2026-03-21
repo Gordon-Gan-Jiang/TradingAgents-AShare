@@ -1,7 +1,10 @@
+import asyncio
+
 from langchain_core.messages import HumanMessage, SystemMessage
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
 from tradingagents.graph.intent_parser import build_horizon_context
+from tradingagents.agents.utils.agent_states import current_tracker_var
 
 
 def _extract_verdict(text):
@@ -17,13 +20,13 @@ def _extract_verdict(text):
 
 
 def create_social_media_analyst(llm, data_collector=None):
-    def _safe(tool, payload):
+    async def _safe(tool, payload):
         try:
-            return tool.invoke(payload)
+            return await asyncio.to_thread(tool.invoke, payload)
         except Exception as exc:
             return f"调用失败：{exc}"
 
-    def social_media_analyst_node(state):
+    async def social_media_analyst_node(state):
         current_date = state["trade_date"]
         ticker = state["company_of_interest"]
         horizon = state.get("horizon", "short")
@@ -33,7 +36,7 @@ def create_social_media_analyst(llm, data_collector=None):
 
         config = get_config()
         system_message = get_prompt("social_system_message", config=config)
-        horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, "social")
+        horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="social")
 
         pool = data_collector.get(ticker, current_date) if data_collector else None
 
@@ -47,11 +50,16 @@ def create_social_media_analyst(llm, data_collector=None):
             days = 7
             end_dt = datetime.strptime(current_date, "%Y-%m-%d")
             start_dt = end_dt - timedelta(days=days)
-            news_text = _safe(get_news, {
-                "ticker": ticker, "start_date": start_dt.strftime("%Y-%m-%d"), "end_date": current_date,
-            })
-            zt_data = _safe(get_zt_pool, {"date": current_date})
-            hot_stocks = _safe(get_hot_stocks_xq, {})
+            
+            # Parallelize fallback fetches
+            results = await asyncio.gather(
+                _safe(get_news, {
+                    "ticker": ticker, "start_date": start_dt.strftime("%Y-%m-%d"), "end_date": current_date,
+                }),
+                _safe(get_zt_pool, {"date": current_date}),
+                _safe(get_hot_stocks_xq, {})
+            )
+            news_text, zt_data, hot_stocks = results
 
         messages = [
             SystemMessage(content=(
@@ -66,10 +74,18 @@ def create_social_media_analyst(llm, data_collector=None):
             )),
         ]
 
-        result = llm.invoke(messages)
-        verdict, confidence = _extract_verdict(result.content)
+        # ── 实现 Token 级流式输出 ──────────────────
+        tracker = current_tracker_var.get()
+        full_content = ""
+        async for chunk in llm.astream(messages):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            full_content += content
+            if tracker:
+                tracker._emit_token("Social Analyst", "sentiment_report", content)
+
+        verdict, confidence = _extract_verdict(full_content)
         return {
-            "sentiment_report": result.content,
+            "sentiment_report": full_content,
             "analyst_traces": [{
                 "agent": "social_media_analyst",
                 "horizon": horizon,
