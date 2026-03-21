@@ -1242,7 +1242,7 @@ async def _run_job(
                             horizon_final = chunk
                             active_keys = [k for k, v in chunk.items() if v and k != "messages"]
                             if active_keys:
-                                _log(f"[Graph Chunk/{horizon}] keys={active_keys}")
+                                logger.debug(f"[Graph Chunk/{horizon}] keys={active_keys}")
 
                             # ── 并行感知的状态推进 ──────────────────
                             # 1. 每个 analyst 报告首次出现 → completed
@@ -1508,7 +1508,7 @@ async def _run_job(
                     # 打印当前 chunk 包含哪些 key，方便追踪 agent 执行进度
                     active_keys = [k for k, v in chunk.items() if v and k != "messages"]
                     if active_keys:
-                        _log(f"[Graph Chunk] keys={active_keys}")
+                        logger.debug(f"[Graph Chunk] keys={active_keys}")
 
                     # ── Message & Tool Call Handling ──
                     messages = chunk.get("messages", [])
@@ -1701,7 +1701,6 @@ def _normalize_symbol(raw: str) -> str:
         return m2.group(1)
         
     # Final Fallback: Check Chinese Name Map (e.g. "三花智控" -> "002050.SZ")
-    from tradingagents.dataflows.trade_calendar import _load_cn_stock_map
     stock_map = _load_cn_stock_map()
     if s in stock_map:
         return stock_map[s]
