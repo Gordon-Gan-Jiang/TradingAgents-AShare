@@ -319,8 +319,6 @@ export default function AgentCollaboration({ onSelectSection, selectedSection }:
                     const anyAct = gc.some(c => c.status === 'in_progress')
                     const allDone = gc.every(c => !c.isParticipating || c.status === 'completed' || c.status === 'skipped')
                     
-                    const nextGroupParticipating = gi < GROUPS.length - 1 && GROUPS[gi+1].agents.some(n => cardMap.get(n)?.isParticipating)
-
                     if (isAnalyzing && !anyParticipating) return null
 
                     return (
@@ -342,13 +340,8 @@ export default function AgentCollaboration({ onSelectSection, selectedSection }:
                                     {group.title}
                                 </span>
                                 <div className="relative flex-1 h-[2px] bg-slate-100 dark:bg-slate-800/50 rounded-full overflow-hidden">
-                                    {/* 核心修复：预判流动连线，只要分析中且属于路径即全线开启流动 */}
-                                    {isAnalyzing && anyParticipating && nextGroupParticipating && (
-                                        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-blue-500 to-transparent animate-flowing-light" 
-                                             style={{ backgroundSize: '200% 100%' }} />
-                                    )}
                                     {allDone && anyParticipating && (
-                                        <div className="absolute inset-0 bg-emerald-500/40 shadow-[0_0_10px_#10b981]" />
+                                        <div className="absolute inset-0 bg-emerald-500/40" />
                                     )}
                                 </div>
                             </div>

@@ -4,6 +4,10 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+import time
+import pandas as pd
+from stockstats import wrap
+import io
 
 from tradingagents.agents.utils.agent_utils import (
     get_stock_data,
@@ -35,8 +39,14 @@ def make_cache_key(ticker: str, trade_date: str) -> str:
 
 
 def _safe(tool, payload: dict) -> Any:
+    start_t = time.time()
     try:
-        return tool.invoke(payload)
+        res = tool.invoke(payload)
+        duration = time.time() - start_t
+        # 仅在耗时较长时输出
+        if duration > 0.5:
+            print(f"  [Timer] {getattr(tool, 'name', str(tool))} took {duration:.2f}s")
+        return res
     except Exception as exc:
         return f"{getattr(tool, 'name', str(tool))} 调用失败：{type(exc).__name__}: {exc}"
 
@@ -49,11 +59,13 @@ def _fetch_all(ticker: str, trade_date: str, short_only: bool = False) -> Dict[s
     """
     lookback = SHORT_DAYS if short_only else LONG_DAYS
     end_dt = datetime.strptime(trade_date, "%Y-%m-%d")
-    start_str = (end_dt - timedelta(days=lookback)).strftime("%Y-%m-%d")
+    # 为了计算指标准确（如 200 SMA），我们需要比 90 天更多的历史数据
+    fetch_lookback = 365 if not short_only else 60
+    start_str = (end_dt - timedelta(days=fetch_lookback)).strftime("%Y-%m-%d")
 
     tasks: Dict[str, tuple] = {
         "stock_data": (get_stock_data, {"symbol": ticker, "start_date": start_str, "end_date": trade_date}),
-        "news": (get_news, {"ticker": ticker, "start_date": start_str, "end_date": trade_date}),
+        "news": (get_news, {"ticker": ticker, "start_date": (end_dt - timedelta(days=lookback)).strftime("%Y-%m-%d"), "end_date": trade_date}),
         "global_news": (get_global_news, {"curr_date": trade_date, "look_back_days": lookback, "limit": 30}),
         "fund_flow_board": (get_board_fund_flow, {}),
         "fund_flow_individual": (get_individual_fund_flow, {"symbol": ticker}),
@@ -73,18 +85,70 @@ def _fetch_all(ticker: str, trade_date: str, short_only: bool = False) -> Dict[s
         })
 
     results: Dict[str, Any] = {}
-    with ThreadPoolExecutor(max_workers=len(tasks) + len(INDICATORS)) as executor:
+    fetch_start = time.time()
+    # 减少并发池大小，避免被反爬
+    with ThreadPoolExecutor(max_workers=min(10, len(tasks))) as executor:
         future_to_key = {executor.submit(_safe, tool, payload): key for key, (tool, payload) in tasks.items()}
-        ind_futures = {
-            executor.submit(_safe, get_indicators, {
-                "symbol": ticker, "indicator": ind,
-                "curr_date": trade_date, "look_back_days": lookback,
-            }): ind for ind in INDICATORS
-        }
         for future in future_to_key:
             results[future_to_key[future]] = future.result()
-        results["indicators"] = {ind_futures[f]: f.result() for f in ind_futures}
 
+    # ── 核心加速：本地计算所有技术指标 ──────────────────
+    indicators_res = {}
+    try:
+        raw_csv = results.get("stock_data", "")
+        if isinstance(raw_csv, str) and len(raw_csv) > 50:
+            # 使用 on_bad_lines='skip' 容忍异常行，使用 comment='#' 跳过注释行
+            df = pd.read_csv(io.StringIO(raw_csv), on_bad_lines='skip', comment='#')
+            if not df.empty:
+                # 兼容不同数据源的列名（大小写）
+                cols_map = {c.lower(): c for c in df.columns}
+                rename_dict = {}
+                for target in ["date", "open", "high", "low", "close", "volume"]:
+                    if target in cols_map:
+                        rename_dict[cols_map[target]] = target
+                
+                df = df.rename(columns=rename_dict)
+                
+                # 再次检查关键列是否存在
+                if "close" in df.columns:
+                    ss = wrap(df)
+                    
+                    # 批量触发计算
+                    calc_map = {
+                        "close_50_sma": "close_50_sma",
+                        "close_200_sma": "close_200_sma",
+                        "close_10_ema": "close_10_ema",
+                        "rsi": "rsi_14",
+                        "macd": "macd",
+                        "boll": "close_20_sma",
+                        "boll_ub": "boll_ub",
+                        "boll_lb": "boll_lb",
+                        "atr": "atr",
+                        "vwma": "vwma"
+                    }
+                    
+                    for key, ss_key in calc_map.items():
+                        try:
+                            val = ss[ss_key].iloc[-1]
+                            indicators_res[key] = round(float(val), 2) if isinstance(val, (int, float)) else str(val)
+                        except Exception:
+                            indicators_res[key] = "N/A"
+                else:
+                    print(f"  [Warning] 'close' column not found in stock_data columns: {df.columns}")
+        else:
+            print(f"  [Warning] No valid stock_data for indicator calculation.")
+    except Exception as e:
+        print(f"  [Error] Local indicator calculation failed: {e}")
+    
+    # 填充缺失值
+    for ind in INDICATORS:
+        if ind not in indicators_res:
+            indicators_res[ind] = "无数据"
+            
+    results["indicators"] = indicators_res
+    # ────────────────────────────────────────────────
+
+    print(f"[Timer] Total Data Collection for {ticker} took {time.time() - fetch_start:.2f}s")
     return results
 
 

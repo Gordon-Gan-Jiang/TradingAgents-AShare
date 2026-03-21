@@ -1,5 +1,9 @@
 import { FormEvent, useState, useRef, useEffect } from 'react'
-import { Bot, Loader2, Send, Sparkles, Settings2, ChevronDown, ChevronUp, FileText, ChevronRight } from 'lucide-react'
+import {
+    Bot, Loader2, Send, Sparkles, Settings2, ChevronDown, ChevronUp, FileText, ChevronRight,
+    TrendingUp, MessageCircle, Newspaper, Calculator, BarChart2, DollarSign,
+    Swords, ArrowBigUp, ArrowBigDown, Brain, Briefcase, Flame, Scale, Shield, CheckCircle2,
+} from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '@/services/api'
@@ -10,8 +14,6 @@ import type {
     AgentStatusEvent,
     AnalysisReport,
     ReportChunkEvent,
-    AgentWritingEvent,
-    AgentToolCallDisplayEvent,
     Report,
 } from '@/types'
 
@@ -46,19 +48,46 @@ const REPORT_SECTION_TITLES: Record<string, string> = {
     sentiment_report: '舆情分析报告',
     news_report: '新闻分析报告',
     fundamentals_report: '基本面分析报告',
+    macro_report: '宏观分析报告',
+    smart_money_report: '主力资金分析报告',
+    game_theory_report: '博弈裁判报告',
     investment_plan: '研究团队投资计划',
     trader_investment_plan: '交易员计划',
     final_trade_decision: '最终交易决策',
 }
 
-const SECTION_ICONS: Record<string, string> = {
-    market_report: '📈',
-    sentiment_report: '💬',
-    news_report: '📰',
-    fundamentals_report: '📊',
-    investment_plan: '🧠',
-    trader_investment_plan: '💼',
-    final_trade_decision: '⚖️',
+// Section → Lucide 图标 + 颜色（与 AGENT_META_MAP 保持一致）
+const SECTION_META: Record<string, { Icon: React.FC<{ className?: string }>; iconCls: string; bgCls: string }> = {
+    market_report:          { Icon: TrendingUp,    iconCls: 'text-blue-500',    bgCls: 'bg-blue-100 dark:bg-blue-500/20' },
+    sentiment_report:       { Icon: MessageCircle, iconCls: 'text-fuchsia-500', bgCls: 'bg-fuchsia-100 dark:bg-fuchsia-500/20' },
+    news_report:            { Icon: Newspaper,     iconCls: 'text-cyan-500',    bgCls: 'bg-cyan-100 dark:bg-cyan-500/20' },
+    fundamentals_report:    { Icon: Calculator,    iconCls: 'text-emerald-500', bgCls: 'bg-emerald-100 dark:bg-emerald-500/20' },
+    macro_report:           { Icon: BarChart2,     iconCls: 'text-violet-500',  bgCls: 'bg-violet-100 dark:bg-violet-500/20' },
+    smart_money_report:     { Icon: DollarSign,    iconCls: 'text-amber-500',   bgCls: 'bg-amber-100 dark:bg-amber-500/20' },
+    game_theory_report:     { Icon: Swords,        iconCls: 'text-rose-500',    bgCls: 'bg-rose-100 dark:bg-rose-500/20' },
+    investment_plan:        { Icon: Brain,         iconCls: 'text-indigo-500',  bgCls: 'bg-indigo-100 dark:bg-indigo-500/20' },
+    trader_investment_plan: { Icon: Briefcase,     iconCls: 'text-orange-500',  bgCls: 'bg-orange-100 dark:bg-orange-500/20' },
+    final_trade_decision:   { Icon: CheckCircle2,  iconCls: 'text-teal-500',    bgCls: 'bg-teal-100 dark:bg-teal-500/20' },
+}
+
+// 与 AgentCollaboration.tsx 保持一致的图标 + 颜色体系
+const AGENT_META_MAP: Record<string, { Icon: React.FC<{ className?: string }>; iconCls: string; bgCls: string; label: string }> = {
+    'Market Analyst':       { Icon: TrendingUp,   iconCls: 'text-blue-500',    bgCls: 'bg-blue-100 dark:bg-blue-500/20',    label: '技术面' },
+    'Social Analyst':       { Icon: MessageCircle, iconCls: 'text-fuchsia-500', bgCls: 'bg-fuchsia-100 dark:bg-fuchsia-500/20', label: '舆情' },
+    'News Analyst':         { Icon: Newspaper,     iconCls: 'text-cyan-500',    bgCls: 'bg-cyan-100 dark:bg-cyan-500/20',    label: '新闻' },
+    'Fundamentals Analyst': { Icon: Calculator,    iconCls: 'text-emerald-500', bgCls: 'bg-emerald-100 dark:bg-emerald-500/20', label: '基本面' },
+    'Macro Analyst':        { Icon: BarChart2,     iconCls: 'text-violet-500',  bgCls: 'bg-violet-100 dark:bg-violet-500/20', label: '宏观' },
+    'Smart Money Analyst':  { Icon: DollarSign,    iconCls: 'text-amber-500',   bgCls: 'bg-amber-100 dark:bg-amber-500/20',  label: '主力资金' },
+    'Game Theory Manager':  { Icon: Swords,        iconCls: 'text-rose-500',    bgCls: 'bg-rose-100 dark:bg-rose-500/20',    label: '博弈裁判' },
+    'Bull Researcher':      { Icon: ArrowBigUp,    iconCls: 'text-emerald-500', bgCls: 'bg-emerald-100 dark:bg-emerald-500/20', label: '多头' },
+    'Bear Researcher':      { Icon: ArrowBigDown,  iconCls: 'text-rose-500',    bgCls: 'bg-rose-100 dark:bg-rose-500/20',    label: '空头' },
+    'Research Manager':     { Icon: Brain,         iconCls: 'text-indigo-500',  bgCls: 'bg-indigo-100 dark:bg-indigo-500/20', label: '研究总监' },
+    'Trader':               { Icon: Briefcase,     iconCls: 'text-orange-500',  bgCls: 'bg-orange-100 dark:bg-orange-500/20', label: '交易员' },
+    'Aggressive Analyst':   { Icon: Flame,         iconCls: 'text-red-500',     bgCls: 'bg-red-100 dark:bg-red-500/20',      label: '激进' },
+    'Neutral Analyst':      { Icon: Scale,         iconCls: 'text-slate-500',   bgCls: 'bg-slate-100 dark:bg-slate-500/20',  label: '中性' },
+    'Conservative Analyst': { Icon: Shield,        iconCls: 'text-amber-500',   bgCls: 'bg-amber-100 dark:bg-amber-500/20',  label: '稳健' },
+    'Portfolio Manager':    { Icon: CheckCircle2,  iconCls: 'text-teal-500',    bgCls: 'bg-teal-100 dark:bg-teal-500/20',    label: '组合经理' },
+    '意图解析':             { Icon: Bot,            iconCls: 'text-slate-400',   bgCls: 'bg-slate-100 dark:bg-slate-700',     label: '意图解析' },
 }
 
 function ReportCard({
@@ -73,15 +102,21 @@ function ReportCard({
     onOpen: () => void
 }) {
     const title = REPORT_SECTION_TITLES[section] || section
-    const icon = SECTION_ICONS[section] || '📄'
+    const meta = SECTION_META[section]
     const preview = content.replace(/^#+\s*/gm, '').replace(/\*\*/g, '').slice(0, 80)
+
+    const IconEl = meta?.Icon || FileText
+    const iconCls = meta?.iconCls || 'text-slate-400'
+    const bgCls = meta?.bgCls || 'bg-slate-100 dark:bg-slate-700'
 
     if (streaming) {
         return (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-sm">
-                <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin shrink-0" />
-                <span className="text-blue-300 font-medium">{icon} {title}</span>
-                <span className="text-slate-500 text-xs ml-auto">撰写中...</span>
+            <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-sm">
+                <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg ${bgCls} shrink-0`}>
+                    <IconEl className={`w-4 h-4 ${iconCls}`} />
+                </span>
+                <span className="text-blue-300 font-medium text-xs">{title}</span>
+                <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin shrink-0 ml-auto" />
             </div>
         )
     }
@@ -89,9 +124,11 @@ function ReportCard({
     return (
         <button
             onClick={onOpen}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/50 hover:border-blue-400 dark:hover:border-blue-500/40 hover:bg-blue-50 dark:hover:bg-slate-800 transition-all text-left group"
+            className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/50 hover:border-blue-400 dark:hover:border-blue-500/40 hover:bg-blue-50 dark:hover:bg-slate-800 transition-all text-left group"
         >
-            <span className="text-base shrink-0">{icon}</span>
+            <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg ${bgCls} shrink-0`}>
+                <IconEl className={`w-4 h-4 ${iconCls}`} />
+            </span>
             <div className="flex-1 min-w-0">
                 <p className="text-sm font-medium text-slate-700 dark:text-slate-200 group-hover:text-blue-600 dark:group-hover:text-blue-300 transition-colors">{title}</p>
                 <p className="text-xs text-slate-500 truncate mt-0.5">{preview}...</p>
@@ -105,6 +142,12 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
     const [input, setInput] = useState(initialInput || '')
     const [streaming, setStreaming] = useState(false)
     const [showConfig, setShowConfig] = useState(false)
+    // Use refs for high-frequency token tracking to avoid re-renders on every token
+    const pendingAgentMsgIdsRef = useRef<Set<string>>(new Set())
+    const completedAgentMsgIdsRef = useRef<Set<string>>(new Set())
+    // Only used to trigger re-render when agent card status actually changes
+    const [, forceUpdate] = useState(0)
+    const [expandedAgentMsgId, setExpandedAgentMsgId] = useState<string | null>(null)
     const [selectedAnalysts, setSelectedAnalysts] = useState<string[]>(() => {
         try {
             const stored = localStorage.getItem('tradingagents-settings')
@@ -118,6 +161,10 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
     })
     // track which section IDs have been added to chatMessages and whether they're done
     const streamingReportIds = useRef<Map<string, boolean>>(new Map()) // section → isComplete
+    const agentMessageMapRef = useRef<Record<string, string>>({})
+    const firstTokenMapRef = useRef<Record<string, boolean>>({})
+    const sectionToMsgIdRef = useRef<Record<string, string>>({}) // section → agent bubble msgId
+    const typingIndicatorIdRef = useRef<string | null>(null)
     const messagesEndRef = useRef<HTMLDivElement>(null)
     const messagesContainerRef = useRef<HTMLDivElement>(null)
 
@@ -134,6 +181,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
         addReportChunk,
         addChatMessage,
         appendToChatMessage,
+        setMessageContent,
         setReport,
         setStructuredData,
         reset,
@@ -232,22 +280,36 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
         switch (eventName) {
             case 'job.ready':
                 setIsConnected(true)
+                // 把 typing indicator 换成"解析中"提示，告知用户正在识别标的
+                if (typingIndicatorIdRef.current) {
+                    setMessageContent(typingIndicatorIdRef.current, '__parsing__')
+                }
                 break
             case 'job.created': {
                 const jobId = String(data.job_id || '')
                 const symbol = String(data.symbol || '')
-                const tradeDate = String(data.trade_date || '')
                 if (jobId) setCurrentJobId(jobId)
                 if (symbol) {
                     setCurrentSymbol(symbol)
                     onSymbolDetected(symbol)
                 }
-                pushSystem(`已启动分析：${symbol} @ ${tradeDate}`)
+                // 切换 indicator 到"采集数据"阶段
+                if (typingIndicatorIdRef.current) {
+                    setMessageContent(typingIndicatorIdRef.current, `__status:collecting:${symbol}__`)
+                }
                 streamingReportIds.current.clear()
+                agentMessageMapRef.current = {}
+                firstTokenMapRef.current = {}
+                sectionToMsgIdRef.current = {}
+                pendingAgentMsgIdsRef.current = new Set(); completedAgentMsgIdsRef.current = new Set(); forceUpdate(n => n + 1)
                 break
             }
             case 'job.running':
                 setIsAnalyzing(true)
+                // 切换 indicator 到"分析启动"阶段
+                if (typingIndicatorIdRef.current) {
+                    setMessageContent(typingIndicatorIdRef.current, '__status:analyzing__')
+                }
                 break
             case 'agent.horizon_start': {
                 const h = String(data.horizon || '')
@@ -257,9 +319,14 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
             case 'agent.horizon_done':
                 // keep currentHorizon until job completes so badge stays visible
                 break
-            case 'job.completed':
+            case 'job.completed': {
                 setCurrentHorizon(null)
                 setIsAnalyzing(false)
+                // 任务结束：所有 agent 卡片标记为已完成
+                const allAgentMsgIds = new Set(Object.values(agentMessageMapRef.current))
+                pendingAgentMsgIdsRef.current = new Set()
+                completedAgentMsgIdsRef.current = allAgentMsgIds
+                forceUpdate(n => n + 1)
                 if (typeof data.result === 'object' && data.result && 'symbol' in data.result) {
                     const symbol = String((data.result as Record<string, unknown>).symbol || '')
                     if (symbol) {
@@ -285,14 +352,101 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                     })
                 }
                 break
+            }
             case 'job.failed':
                 setCurrentHorizon(null)
                 setIsAnalyzing(false)
                 pushAssistant(`分析失败：${String(data.error || 'unknown error')}`)
                 break
-            case 'agent.status':
-                updateAgentStatus(data as unknown as AgentStatusEvent)
+            case 'agent.status': {
+                const statusData = data as unknown as { agent: string; status: string; horizon?: string }
+                const agentKey2 = `${statusData.agent}-${statusData.horizon || 'main'}`
+
+                if (statusData.status === 'in_progress') {
+                    // 第一个 agent 开始工作，移除状态指示器
+                    if (typingIndicatorIdRef.current) {
+                        useAnalysisStore.setState(state => ({
+                            chatMessages: state.chatMessages.filter(m => m.id !== typingIndicatorIdRef.current)
+                        }))
+                        typingIndicatorIdRef.current = null
+                    }
+
+                    const agentName = statusData.agent
+                    const horizon = statusData.horizon ? `(${statusData.horizon === 'short' ? '短线' : '中线'})` : ''
+                    const msgId = `chat-agent-msg-${agentName}-${statusData.horizon || 'main'}-${Date.now()}`
+
+                    agentMessageMapRef.current[agentKey2] = msgId
+                    firstTokenMapRef.current[msgId] = true
+
+                    addChatMessage({
+                        id: msgId,
+                        role: 'assistant',
+                        agent: agentName,
+                        content: `**${agentName}** ${horizon} 正在思考并撰写报告中...`,
+                        timestamp: new Date().toISOString()
+                    })
+                    pendingAgentMsgIdsRef.current.add(msgId); forceUpdate(n => n + 1)
+                } else if (statusData.status === 'completed' || statusData.status === 'skipped') {
+                    // Agent 完成/跳过 → 移出 pending，标记为已完成
+                    const existingMsgId = agentMessageMapRef.current[agentKey2]
+                    if (existingMsgId) {
+                        pendingAgentMsgIdsRef.current.delete(existingMsgId)
+                        completedAgentMsgIdsRef.current.add(existingMsgId)
+                        forceUpdate(n => n + 1)
+                    }
+                }
+                updateAgentStatus(statusData as unknown as AgentStatusEvent)
                 break
+            }
+            case 'agent.token': {
+                const tokenData = data as unknown as { agent: string; report: string; token: string; horizon?: string }
+
+                // 意图解析的原始 JSON 不在对话框显示（parsing indicator 已提供 UX）
+                if (tokenData.agent === '意图解析') break
+
+                // 第一个 agent token 到达时移除 parsing/typing indicator
+                if (typingIndicatorIdRef.current) {
+                    useAnalysisStore.setState(state => ({
+                        chatMessages: state.chatMessages.filter(m => m.id !== typingIndicatorIdRef.current)
+                    }))
+                    typingIndicatorIdRef.current = null
+                }
+
+                const agentKey = `${tokenData.agent}-${tokenData.horizon || 'main'}`
+                let targetMsgId = agentMessageMapRef.current[agentKey]
+
+                // Fallback: create bubble on first token if agent.status was missed or arrived late
+                if (!targetMsgId) {
+                    const horizonSuffix = tokenData.horizon ? `(${tokenData.horizon === 'short' ? '短线' : '中线'})` : ''
+                    targetMsgId = `chat-agent-msg-${tokenData.agent}-${tokenData.horizon || 'main'}-${Date.now()}`
+                    agentMessageMapRef.current[agentKey] = targetMsgId
+                    firstTokenMapRef.current[targetMsgId] = true
+                    addChatMessage({
+                        id: targetMsgId,
+                        role: 'assistant',
+                        agent: tokenData.agent,
+                        content: `**${tokenData.agent}** ${horizonSuffix} 正在思考并撰写报告中...`,
+                        timestamp: new Date().toISOString(),
+                    })
+                    pendingAgentMsgIdsRef.current.add(targetMsgId); forceUpdate(n => n + 1)
+                }
+
+                // 记录 section → msgId 映射，用于后续转换成 ReportCard
+                if (tokenData.report) {
+                    sectionToMsgIdRef.current[tokenData.report] = targetMsgId
+                }
+
+                if (firstTokenMapRef.current[targetMsgId]) {
+                    const horizonText = tokenData.horizon ? `(${tokenData.horizon === 'short' ? '短线' : '中线'})` : ''
+                    setMessageContent(targetMsgId, `### ${tokenData.agent} ${horizonText}\n\n${tokenData.token}`)
+                    firstTokenMapRef.current[targetMsgId] = false
+                    // 第一个 token 到达，移出 pending 状态
+                    pendingAgentMsgIdsRef.current.delete(targetMsgId)
+                } else {
+                    appendToChatMessage(targetMsgId, tokenData.token)
+                }
+                break
+            }
             case 'agent.snapshot':
                 updateAgentSnapshot(data as unknown as AgentSnapshotEvent)
                 break
@@ -301,50 +455,43 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                 break
             case 'agent.report.chunk': {
                 const chunkData = data as unknown as ReportChunkEvent
-                const { section, chunk, is_complete } = chunkData
-                const msgId = `stream:${section}`
-                addReportChunk(chunkData)
+                const { section, is_complete } = chunkData
+                addReportChunk(chunkData) // 更新报告面板的打字机效果
 
-                if (!streamingReportIds.current.has(section)) {
-                    // First chunk → create new report message in the flow
-                    streamingReportIds.current.set(section, false)
-                    addChatMessage({
-                        id: msgId,
-                        role: 'report',
-                        section,
-                        content: chunk,
-                        complete: false,
-                        timestamp: new Date().toISOString(),
-                    })
-                } else if (!is_complete) {
-                    // Subsequent chunks → append
-                    appendToChatMessage(msgId, chunk)
-                }
-
-                if (is_complete) {
+                if (is_complete && !streamingReportIds.current.get(section)) {
                     streamingReportIds.current.set(section, true)
-                    // Mark the message as complete in the store
-                    // We update by replacing the message content isn't needed —
-                    // we track completion via a local completed set
-                    useAnalysisStore.setState(state => ({
-                        chatMessages: state.chatMessages.map(m =>
-                            m.id === msgId ? { ...m, complete: true } : m
-                        )
-                    }))
+                    const existingMsgId = sectionToMsgIdRef.current[section]
+
+                    if (existingMsgId) {
+                        // 把流式气泡直接转换成已完成的 ReportCard
+                        useAnalysisStore.setState(state => ({
+                            chatMessages: state.chatMessages.map(m =>
+                                m.id === existingMsgId
+                                    ? { ...m, role: 'report' as const, section, complete: true }
+                                    : m
+                            )
+                        }))
+                    } else {
+                        // 兜底：没找到对应气泡，直接创建 ReportCard
+                        const buffer = useAnalysisStore.getState().streamingSections[section]?.buffer || ''
+                        addChatMessage({
+                            id: `stream:${section}`,
+                            role: 'report',
+                            section,
+                            content: buffer,
+                            complete: true,
+                            timestamp: new Date().toISOString(),
+                        })
+                    }
                 }
                 break
             }
-            case 'agent.tool_call': {
-                const toolData = data as unknown as AgentToolCallDisplayEvent
-                const description = toolData.description || toolData.tool
-                pushSystem(`${toolData.agent}：${description}`)
+            case 'agent.tool_call':
+                // 工具调用信息不再在对话框显示，减少噪音
                 break
-            }
-            case 'agent.writing': {
-                const writingData = data as unknown as AgentWritingEvent
-                pushSystem(`${writingData.agent}：正在撰写 ${writingData.report_name}...`)
+            case 'agent.writing':
+                // 气泡已经表示 agent 正在撰写，不再额外发系统消息
                 break
-            }
             case 'agent.milestone': {
                 const { stage, title, summary } = data as { stage: string; title: string; summary: string }
                 if (stage === 'final_decision') {
@@ -432,6 +579,18 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
 
         reset()
         streamingReportIds.current.clear()
+        pendingAgentMsgIdsRef.current = new Set(); completedAgentMsgIdsRef.current = new Set(); forceUpdate(n => n + 1)
+
+        // 立刻插入 typing indicator，让用户知道系统正在响应
+        const typingId = `typing-${Date.now()}`
+        typingIndicatorIdRef.current = typingId
+        addChatMessage({
+            id: typingId,
+            role: 'assistant',
+            content: '__typing__',
+            timestamp: new Date().toISOString(),
+        })
+
         setStreaming(true)
         setIsAnalyzing(true)
         setIsConnected(false)
@@ -439,6 +598,13 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
         try {
             await streamChat(fullPrompt)
         } catch (error) {
+            // 出错时清理 typing indicator
+            if (typingIndicatorIdRef.current) {
+                useAnalysisStore.setState(state => ({
+                    chatMessages: state.chatMessages.filter(m => m.id !== typingIndicatorIdRef.current)
+                }))
+                typingIndicatorIdRef.current = null
+            }
             const errorMessage = error instanceof Error ? error.message : 'unknown error'
             const shouldRecover = /network|fetch|stream|sse|body/i.test(errorMessage)
             if (shouldRecover) {
@@ -554,9 +720,138 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                         )
                     }
 
-                    // Normal messages
+                    // Status indicator（提交后立即显示，随 SSE 事件切换阶段）
+                    if (msg.content.startsWith('__')) {
+                        const c = msg.content
+                        let label = ''
+                        let icon: 'dots' | 'spin' = 'dots'
+                        let colorCls = 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500'
+
+                        if (c === '__typing__') {
+                            label = ''
+                            icon = 'dots'
+                        } else if (c === '__parsing__') {
+                            label = '正在识别标的与意图...'
+                            icon = 'spin'
+                            colorCls = 'bg-blue-50 dark:bg-blue-500/10 border-blue-200 dark:border-blue-500/30 text-blue-500 dark:text-blue-400'
+                        } else if (c.startsWith('__status:collecting:')) {
+                            const sym = c.replace('__status:collecting:', '').replace('__', '')
+                            label = `已识别 ${sym}，正在采集行情数据...`
+                            icon = 'spin'
+                            colorCls = 'bg-cyan-50 dark:bg-cyan-500/10 border-cyan-200 dark:border-cyan-500/30 text-cyan-500 dark:text-cyan-400'
+                        } else if (c === '__status:analyzing__') {
+                            label = '数据就绪，多智能体协作分析启动中...'
+                            icon = 'spin'
+                            colorCls = 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/30 text-emerald-500 dark:text-emerald-400'
+                        }
+
+                        return (
+                            <div key={msg.id} className="flex items-center gap-2">
+                                <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs transition-colors duration-300 ${colorCls}`}>
+                                    {icon === 'spin' ? (
+                                        <>
+                                            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                                            <span className="animate-pulse">{label}</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: '0ms' }} />
+                                            <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: '150ms' }} />
+                                            <span className="w-1.5 h-1.5 rounded-full bg-current animate-bounce" style={{ animationDelay: '300ms' }} />
+                                        </>
+                                    )}
+                                </div>
+                            </div>
+                        )
+                    }
+
+                    // Agent streaming messages → compact card with live preview
+                    const agentMeta = msg.agent ? AGENT_META_MAP[msg.agent] : null
+                    const isPending = pendingAgentMsgIdsRef.current.has(msg.id)
+                    const isCompleted = completedAgentMsgIdsRef.current.has(msg.id)
+                    const isExpanded = expandedAgentMsgId === msg.id
+
+                    if (msg.agent && agentMeta && msg.role === 'assistant') {
+                        // Extract preview text: strip markdown headers, bold, collapse whitespace
+                        const textOnly = msg.content
+                            .replace(/^#{1,4}\s+.*$/gm, '')
+                            .replace(/\*\*/g, '')
+                            .replace(/\n{2,}/g, ' ')
+                            .trim()
+                        const preview = textOnly.slice(0, 80)
+
+                        // 已完成的 agent 卡片 → 和 ReportCard 视觉统一
+                        if (isCompleted) {
+                            return (
+                                <div key={msg.id} className="rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/50 overflow-hidden transition-all">
+                                    <button
+                                        onClick={() => setExpandedAgentMsgId(prev => prev === msg.id ? null : msg.id)}
+                                        className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left hover:border-blue-400 dark:hover:bg-slate-800 transition-colors group"
+                                    >
+                                        <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg ${agentMeta.bgCls} shrink-0`}>
+                                            <agentMeta.Icon className={`w-4 h-4 ${agentMeta.iconCls}`} />
+                                        </span>
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-medium text-slate-700 dark:text-slate-200 group-hover:text-blue-600 dark:group-hover:text-blue-300 transition-colors">{agentMeta.label}</p>
+                                            <p className="text-xs text-slate-500 truncate mt-0.5">{preview}...</p>
+                                        </div>
+                                        <ChevronRight className={`w-4 h-4 shrink-0 transition-transform ${isExpanded ? 'rotate-90 text-blue-400' : 'text-slate-500 group-hover:text-blue-400'}`} />
+                                    </button>
+                                    {isExpanded && (
+                                        <div className="px-3 pb-2 border-t border-slate-200 dark:border-slate-700/50 max-h-60 overflow-y-auto">
+                                            <div className="prose dark:prose-invert prose-xs max-w-none mt-2 text-[12px] leading-relaxed">
+                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                    {msg.content}
+                                                </ReactMarkdown>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            )
+                        }
+
+                        // 进行中的 agent 卡片（pending / streaming）
+                        return (
+                            <div key={msg.id} className="rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700/50 transition-all overflow-hidden">
+                                <button
+                                    onClick={() => !isPending && setExpandedAgentMsgId(prev => prev === msg.id ? null : msg.id)}
+                                    className="w-full flex items-center gap-2.5 px-3 py-2 text-left hover:bg-slate-100 dark:hover:bg-slate-700/30 transition-colors"
+                                >
+                                    <span className={`inline-flex items-center justify-center w-7 h-7 rounded-lg ${agentMeta.bgCls} shrink-0`}>
+                                        <agentMeta.Icon className={`w-4 h-4 ${agentMeta.iconCls}`} />
+                                    </span>
+                                    <div className="flex-1 min-w-0">
+                                        <p className="text-xs font-medium text-slate-600 dark:text-slate-300">{agentMeta.label}</p>
+                                        {isPending ? (
+                                            <p className="text-[11px] text-slate-400 dark:text-slate-500 animate-pulse">正在推理分析中...</p>
+                                        ) : (
+                                            <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate" dir="rtl">
+                                                <bdi>{textOnly.slice(-120) || '撰写中...'}</bdi>
+                                            </p>
+                                        )}
+                                    </div>
+                                    {isPending ? (
+                                        <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin shrink-0" />
+                                    ) : (
+                                        <span className="text-[10px] text-emerald-500 dark:text-emerald-400 font-medium shrink-0 animate-pulse">撰写中</span>
+                                    )}
+                                </button>
+                                {isExpanded && !isPending && (
+                                    <div className="px-3 pb-2 border-t border-slate-200 dark:border-slate-700/50 max-h-60 overflow-y-auto">
+                                        <div className="prose dark:prose-invert prose-xs max-w-none mt-2 text-[12px] leading-relaxed">
+                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                                {msg.content}
+                                            </ReactMarkdown>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )
+                    }
+
+                    // Normal messages (user / assistant without agent / system)
                     return (
-                        <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                        <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                             <div
                                 className={`max-w-[92%] rounded-xl px-3 py-2 text-sm leading-relaxed ${
                                     msg.role === 'user'

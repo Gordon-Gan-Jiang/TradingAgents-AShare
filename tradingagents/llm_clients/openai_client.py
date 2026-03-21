@@ -13,40 +13,46 @@ class UnifiedChatOpenAI(ChatOpenAI):
     """ChatOpenAI subclass that strips incompatible params for certain models."""
 
     def __init__(self, **kwargs):
-        parse_retries = kwargs.pop("response_parse_retries", 2)
-        parse_retry_delay = kwargs.pop("response_parse_retry_delay", 1.0)
-        model = kwargs.get("model", "")
+        # 彻底移除重试参数，由构造函数统一控制
+        kwargs.pop("response_parse_retries", None)
+        kwargs.pop("response_parse_retry_delay", None)
+        
+        model = kwargs.get("model") or kwargs.get("model_name", "")
+        base_url = kwargs.get("base_url")
+        
+        # 1. Reasoning models (O1 etc) typically don't support temperature
         if self._is_reasoning_model(model):
             kwargs.pop("temperature", None)
             kwargs.pop("top_p", None)
+            
+        # 2. Moonshot (Kimi) models often strictly require temperature=1
+        if self._is_moonshot_model(model, base_url):
+            kwargs["temperature"] = 1
+
         super().__init__(**kwargs)
-        object.__setattr__(self, "response_parse_retries", parse_retries)
-        object.__setattr__(self, "response_parse_retry_delay", parse_retry_delay)
 
     def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
-        """Retry transient malformed-response errors from OpenAI-compatible gateways."""
-        attempts = self.response_parse_retries + 1
-        last_err = None
-        for i in range(attempts):
-            try:
-                return super().invoke(input=input, config=config, **kwargs)
-            except (JSONDecodeError, ValueError) as exc:
-                # Some OpenAI-compatible gateways occasionally return non-JSON payloads.
-                last_err = exc
-                if i == attempts - 1:
-                    break
-                time.sleep(self.response_parse_retry_delay * (i + 1))
-        raise last_err
+        return super().invoke(input=input, config=config, **kwargs)
 
     @staticmethod
     def _is_reasoning_model(model: str) -> bool:
-        """Check if model is a reasoning model that doesn't support temperature."""
-        model_lower = model.lower()
+        """Check if model is a reasoning model."""
+        model_lower = str(model).lower()
         return (
             model_lower.startswith("o1")
             or model_lower.startswith("o3")
             or "gpt-5" in model_lower
+            or "-r1" in model_lower
+            or "thinking" in model_lower
+            or "reasoning" in model_lower
         )
+
+    @staticmethod
+    def _is_moonshot_model(model: str, base_url: Optional[str] = None) -> bool:
+        """Check if model or base_url is from Moonshot (Kimi)."""
+        m = str(model).lower()
+        b = (base_url or "").lower()
+        return "moonshot" in m or "kimi" in m or "moonshot" in b or "kimi" in b
 
 
 class OpenAIClient(BaseLLMClient):
@@ -63,38 +69,46 @@ class OpenAIClient(BaseLLMClient):
         self.provider = provider.lower()
 
     def get_llm(self) -> Any:
-        """Return configured ChatOpenAI instance."""
+        """Return configured ChatOpenAI instance with long timeout and no retries."""
         llm_kwargs = {"model": self.model}
 
-        # Default temperature=0 for non-reasoning models; user-provided value in kwargs takes precedence
         if not UnifiedChatOpenAI._is_reasoning_model(self.model):
             llm_kwargs["temperature"] = self.kwargs.get("temperature", 0)
+
+        # ── 极致稳定性配置 ──
+        # 1. 禁用一切重试：避免 Thinking 模型重复扣费或因重连导致的状态丢失
+        llm_kwargs["max_retries"] = 0
+        
+        # 2. 超长超时：默认 300 秒，给足推理模型思考时间
+        llm_kwargs["timeout"] = self.kwargs.get("timeout", 300.0)
+        
+        target_url = self.base_url or "https://api.openai.com/v1"
+        if self.provider == "xai": target_url = "https://api.x.ai/v1"
+        elif self.provider == "openrouter": target_url = "https://openrouter.ai/api/v1"
+        elif self.provider == "ollama": target_url = "http://localhost:11434/v1"
+        
+        print(f"[LLM Client] Init {self.provider} ({self.model}) at {target_url} (Retries=0, Timeout={llm_kwargs['timeout']}s)")
 
         if self.provider == "xai":
             llm_kwargs["base_url"] = "https://api.x.ai/v1"
             api_key = os.environ.get("XAI_API_KEY")
-            if api_key:
-                llm_kwargs["api_key"] = api_key
+            if api_key: llm_kwargs["api_key"] = api_key
         elif self.provider == "openrouter":
             llm_kwargs["base_url"] = "https://openrouter.ai/api/v1"
             api_key = os.environ.get("OPENROUTER_API_KEY")
-            if api_key:
-                llm_kwargs["api_key"] = api_key
+            if api_key: llm_kwargs["api_key"] = api_key
         elif self.provider == "ollama":
             llm_kwargs["base_url"] = "http://localhost:11434/v1"
-            llm_kwargs["api_key"] = "ollama"  # Ollama doesn't require auth
+            llm_kwargs["api_key"] = "ollama"
         elif self.base_url:
             llm_kwargs["base_url"] = self.base_url
 
-        for key in (
-            "timeout", "max_retries", "reasoning_effort", "api_key", "callbacks",
-            "response_parse_retries", "response_parse_retry_delay",
-        ):
+        # Pass remaining keys
+        for key in ("api_key", "callbacks", "reasoning_effort"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
         return UnifiedChatOpenAI(**llm_kwargs)
 
     def validate_model(self) -> bool:
-        """Validate model for the provider."""
         return validate_model(self.provider, self.model)

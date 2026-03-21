@@ -12,6 +12,7 @@ import type {
     AgentSnapshotEvent,
     ReportChunkEvent,
     AgentMilestoneEvent,
+    AgentTokenEvent,
     StreamingSectionState,
     MilestoneMessage,
     RiskItem,
@@ -23,6 +24,7 @@ export interface ChatMessage {
     role: 'user' | 'assistant' | 'system' | 'report'
     content: string
     timestamp: string
+    agent?: string      // The name of the agent who sent the message
     section?: string    // only for role='report'
     complete?: boolean  // only for role='report'
 }
@@ -84,6 +86,7 @@ interface AnalysisState {
     addAgentToolCall: (event: AgentToolCallEvent) => void
     addAgentReport: (event: AgentReportEvent) => void
     addReportChunk: (event: ReportChunkEvent) => void
+    addAgentToken: (event: AgentTokenEvent) => void
     addMilestone: (event: AgentMilestoneEvent) => void
     addLog: (log: LogEntry) => void
     setReport: (report: AnalysisReport | null) => void
@@ -99,6 +102,7 @@ interface AnalysisState {
     setCurrentHorizon: (horizon: string | null) => void
     addChatMessage: (message: ChatMessage) => void
     appendToChatMessage: (id: string, chunk: string) => void
+    setMessageContent: (id: string, content: string) => void
     clearChatMessages: () => void
     clearSession: () => void
     reset: () => void
@@ -130,6 +134,29 @@ const initialAgents: Agent[] = [
     // Portfolio Management
     { id: 'portfolio_manager', name: 'Portfolio Manager', team: 'Portfolio Management', status: 'pending' },
 ]
+
+// Debounced localStorage storage to avoid blocking the main thread on every token
+function createDebouncedStorage(delay = 800) {
+    let pending: [string, string] | null = null
+    let timer: ReturnType<typeof setTimeout> | null = null
+    return {
+        getItem: (name: string) => localStorage.getItem(name),
+        setItem: (name: string, value: string) => {
+            pending = [name, value]
+            if (timer) clearTimeout(timer)
+            timer = setTimeout(() => {
+                if (pending) { localStorage.setItem(pending[0], pending[1]); pending = null }
+                timer = null
+            }, delay)
+        },
+        removeItem: (name: string) => {
+            pending = null
+            if (timer) { clearTimeout(timer); timer = null }
+            localStorage.removeItem(name)
+        },
+    }
+}
+const debouncedStorage = createDebouncedStorage()
 
 export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
     currentJobId: null,
@@ -234,6 +261,32 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
         }
     }),
 
+    addAgentToken: (event) => set((state) => {
+        const { report: section, token } = event
+        if (!section) return state
+
+        const current = state.streamingSections[section] || {
+            buffer: '',
+            displayed: '',
+            isTyping: false,
+            isComplete: false
+        }
+
+        const newBuffer = current.buffer + token
+        return {
+            streamingSections: {
+                ...state.streamingSections,
+                [section]: {
+                    ...current,
+                    buffer: newBuffer,
+                    displayed: newBuffer,
+                    isTyping: true,
+                    isComplete: false
+                }
+            }
+        }
+    }),
+
     // 添加里程碑消息（用于对话框显示）
     addMilestone: (event) => set((state) => {
         const milestone: MilestoneMessage = {
@@ -257,6 +310,12 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
     appendToChatMessage: (id, chunk) => set((state) => ({
         chatMessages: state.chatMessages.map(m =>
             m.id === id ? { ...m, content: m.content + chunk } : m
+        )
+    })),
+
+    setMessageContent: (id, content) => set((state) => ({
+        chatMessages: state.chatMessages.map(m =>
+            m.id === id ? { ...m, content } : m
         )
     })),
 
@@ -330,7 +389,7 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
 }), {
     name: 'tradingagents-analysis',
     version: 1,
-    storage: createJSONStorage(() => localStorage),
+    storage: createJSONStorage(() => debouncedStorage),
     partialize: (state) => ({
         currentSymbol: state.currentSymbol,
         report: state.report,
@@ -339,7 +398,9 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
         jobConfidence: state.jobConfidence,
         jobTargetPrice: state.jobTargetPrice,
         jobStopLoss: state.jobStopLoss,
-        chatMessages: state.chatMessages,
+        // Filter out transient status indicator messages (e.g. __typing__, __parsing__)
+        // so they don't persist across page refreshes
+        chatMessages: state.chatMessages.filter(m => !m.content.startsWith('__')),
     }),
     merge: (persistedState, currentState) => {
         const persisted = (persistedState ?? {}) as Partial<AnalysisState>

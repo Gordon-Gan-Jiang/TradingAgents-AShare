@@ -3,6 +3,8 @@ import time
 import json
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
+from tradingagents.graph.intent_parser import build_horizon_context
+from tradingagents.agents.utils.agent_states import current_tracker_var
 from tradingagents.agents.utils.debate_utils import (
     format_claim_subset_for_prompt,
     format_claims_for_prompt,
@@ -11,7 +13,7 @@ from tradingagents.agents.utils.debate_utils import (
 
 
 def create_bear_researcher(llm, memory):
-    def bear_node(state) -> dict:
+    async def bear_node(state) -> dict:
         investment_debate_state = state["investment_debate_state"]
         history = investment_debate_state.get("history", "")
         current_response = investment_debate_state.get("current_response", "")
@@ -25,6 +27,12 @@ def create_bear_researcher(llm, memory):
         round_summary = investment_debate_state.get("round_summary", "")
         round_goal = investment_debate_state.get("round_goal", "")
 
+        horizon = state.get("horizon", "medium")
+        user_intent = state.get("user_intent") or {}
+        focus_areas = user_intent.get("focus_areas", [])
+        specific_questions = user_intent.get("specific_questions", [])
+        horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="bear")
+
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
 
@@ -32,7 +40,7 @@ def create_bear_researcher(llm, memory):
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
 
-        prompt = get_prompt("bear_prompt", config=get_config()).format(
+        prompt = horizon_ctx + get_prompt("bear_prompt", config=get_config()).format(
             market_research_report=market_research_report,
             sentiment_report=sentiment_report,
             news_report=news_report,
@@ -47,11 +55,18 @@ def create_bear_researcher(llm, memory):
             round_goal=round_goal,
         )
 
-        response = llm.invoke(prompt)
+        # ── 实现 Token 级流式输出 ──────────────────
+        tracker = current_tracker_var.get()
+        full_content = ""
+        async for chunk in llm.astream(prompt):
+            content = chunk.content if hasattr(chunk, "content") else str(chunk)
+            full_content += content
+            if tracker:
+                tracker._emit_token("Bear Researcher", "investment_debate_state", content)
 
         new_investment_debate_state = update_debate_state_with_payload(
             state=investment_debate_state,
-            raw_response=response.content,
+            raw_response=full_content,
             speaker_label="Bear Analyst",
             speaker_key="Bear",
             stance="bearish",

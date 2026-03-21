@@ -5,6 +5,9 @@ import { getBaseUrl } from '@/services/api'
 
 export function useSSE(jobId: string | null) {
     const eventSourceRef = useRef<EventSource | null>(null)
+    const agentMessageMapRef = useRef<Record<string, string>>({})
+    const firstTokenMapRef = useRef<Record<string, boolean>>({})
+
     const {
         setIsConnected,
         updateAgentStatus,
@@ -12,10 +15,14 @@ export function useSSE(jobId: string | null) {
         addAgentMessage,
         addAgentToolCall,
         addAgentReport,
+        addAgentToken,
         addLog,
         setReport,
         setStructuredData,
-        setIsAnalyzing
+        setIsAnalyzing,
+        addChatMessage,
+        appendToChatMessage,
+        setMessageContent,
     } = useAnalysisStore()
 
     const connect = useCallback(() => {
@@ -48,6 +55,12 @@ export function useSSE(jobId: string | null) {
 
                 case 'job.running':
                     setIsAnalyzing(true)
+                    addChatMessage({
+                        id: `job-running-${Date.now()}`,
+                        role: 'system',
+                        content: String(data.msg || `🚀 深度投研分析已启动...`),
+                        timestamp: new Date().toISOString()
+                    })
                     addLog({
                         id: Date.now().toString(),
                         timestamp: new Date().toISOString(),
@@ -66,6 +79,12 @@ export function useSSE(jobId: string | null) {
                         targetPrice: data.target_price as number | null | undefined,
                         stopLoss: data.stop_loss_price as number | null | undefined,
                     })
+                    addChatMessage({
+                        id: `job-complete-${Date.now()}`,
+                        role: 'system',
+                        content: `✅ 分析完成。最终建议：${String(data.decision || '')}`,
+                        timestamp: new Date().toISOString()
+                    })
                     addLog({
                         id: Date.now().toString(),
                         timestamp: new Date().toISOString(),
@@ -76,6 +95,12 @@ export function useSSE(jobId: string | null) {
 
                 case 'job.failed':
                     setIsAnalyzing(false)
+                    addChatMessage({
+                        id: `job-failed-${Date.now()}`,
+                        role: 'system',
+                        content: `❌ 分析失败: ${String(data.error || '未知错误')}`,
+                        timestamp: new Date().toISOString()
+                    })
                     addLog({
                         id: Date.now().toString(),
                         timestamp: new Date().toISOString(),
@@ -85,11 +110,46 @@ export function useSSE(jobId: string | null) {
                     break
 
                 case 'agent.status':
+                    const statusData = data as { agent: string; status: string; horizon?: string }
+                    if (statusData.status === 'in_progress') {
+                        const agentName = statusData.agent
+                        const horizon = statusData.horizon ? `(${statusData.horizon === 'short' ? '短线' : '中线'})` : ''
+                        const msgId = `agent-msg-${agentName}-${statusData.horizon || 'main'}-${Date.now()}`
+                        
+                        agentMessageMapRef.current[`${agentName}-${statusData.horizon || 'main'}`] = msgId
+                        firstTokenMapRef.current[msgId] = true
+
+                        addChatMessage({
+                            id: msgId,
+                            role: 'assistant',
+                            agent: agentName,
+                            content: `**${agentName}** ${horizon} 正在思考并撰写报告中...`,
+                            timestamp: new Date().toISOString()
+                        })
+                    }
                     updateAgentStatus(data as { agent: string; status: 'pending' | 'in_progress' | 'completed' | 'error' | 'skipped'; previous_status?: 'pending' | 'in_progress' | 'completed' | 'error' | 'skipped' })
                     break
 
                 case 'agent.snapshot':
                     updateAgentSnapshot(data as { agents: Array<{ team: string; agent: string; status: 'pending' | 'in_progress' | 'completed' | 'error' | 'skipped' }> })
+                    break
+
+                case 'agent.token':
+                    const tokenData = data as { agent: string; report: string; token: string; horizon?: string }
+                    const agentKey = `${tokenData.agent}-${tokenData.horizon || 'main'}`
+                    const targetMsgId = agentMessageMapRef.current[agentKey]
+                    
+                    if (targetMsgId) {
+                        if (firstTokenMapRef.current[targetMsgId]) {
+                            // 第一个 token 时，清除占位文字
+                            const horizonText = tokenData.horizon ? `(${tokenData.horizon === 'short' ? '短线' : '中线'})` : ''
+                            setMessageContent(targetMsgId, `### ${tokenData.agent} ${horizonText}\n\n${tokenData.token}`)
+                            firstTokenMapRef.current[targetMsgId] = false
+                        } else {
+                            appendToChatMessage(targetMsgId, tokenData.token)
+                        }
+                    }
+                    addAgentToken(data as { agent: string; report: string; token: string; horizon?: string })
                     break
 
                 case 'agent.message':
@@ -128,6 +188,7 @@ export function useSSE(jobId: string | null) {
             'agent.message',
             'agent.tool_call',
             'agent.report',
+            'agent.token',
             'done',
             'ping',
         ]
