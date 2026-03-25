@@ -39,8 +39,23 @@ from pydantic import BaseModel, Field, field_serializer
 from sqlalchemy.orm import Session
 import pandas as pd
 
-from api.database import UserDB, UserLLMConfigDB, VersionStatsDB, init_db, get_db, SessionLocal
+from api.database import UserDB, UserLLMConfigDB, ScheduledAnalysisDB, VersionStatsDB, init_db, get_db, SessionLocal
 from api.services import auth_service, report_service, token_service, watchlist_service, scheduled_service
+
+def _get_real_ip(request: Request) -> Optional[str]:
+    """Extract real client IP, preferring Cloudflare/proxy headers."""
+    if request is None:
+        return None
+    # Cloudflare Tunnel injects the real client IP here
+    ip = request.headers.get("CF-Connecting-IP")
+    if ip:
+        return ip.strip()
+    # Standard proxy header fallback
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else None
+
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -129,9 +144,21 @@ async def _scheduler_loop():
                     task.last_run_status = "running"
                 db.commit()
 
-                _log(f"[Scheduler] Launching {len(tasks)} tasks")
-                for task in tasks:
-                    _create_tracked_task(_run_scheduled_job(task, today))
+                # commit 后 SQLAlchemy 会 expire 属性，db.close() 后访问会抛
+                # DetachedInstanceError，所以这里拷贝成 dict 传给 job 函数
+                task_snapshots = [
+                    {
+                        "id": task.id,
+                        "user_id": task.user_id,
+                        "symbol": task.symbol,
+                        "horizon": task.horizon,
+                    }
+                    for task in tasks
+                ]
+
+                _log(f"[Scheduler] Launching {len(task_snapshots)} tasks")
+                for snap in task_snapshots:
+                    _create_tracked_task(_run_scheduled_job(snap, today))
             finally:
                 db.close()
 
@@ -139,36 +166,36 @@ async def _scheduler_loop():
             logger.error(f"[Scheduler] Error: {e}")
 
 
-async def _run_scheduled_job(task, trade_date: str):
-    """Execute a single scheduled analysis job with optional shared data collector."""
-    _log(f"[Scheduler] Running {task.symbol} for user={task.user_id}")
+async def _run_scheduled_job(task: dict, trade_date: str):
+    """Execute a single scheduled analysis job.
+
+    Args:
+        task: dict with keys id, user_id, symbol, horizon (plain values,
+              not an ORM instance, to avoid DetachedInstanceError).
+        trade_date: YYYY-MM-DD string.
+    """
+    task_id = task["id"]
+    user_id = task["user_id"]
+    symbol = task["symbol"]
+    horizon = task.get("horizon") or "short"
+
+    _log(f"[Scheduler] Running {symbol} for user={user_id}")
     job_id = uuid4().hex
     try:
         _ensure_job_event_queue(job_id)
 
-        # Load user LLM config
-        db = SessionLocal()
-        try:
-            user_config = db.query(UserLLMConfigDB).filter(
-                UserLLMConfigDB.user_id == task.user_id
-            ).first()
-        finally:
-            db.close()
-
         # 使用最近交易日（非交易日时回退到上一个交易日）
         from tradingagents.dataflows.trade_calendar import is_cn_trading_day, previous_cn_trading_day
         actual_trade_date = trade_date if is_cn_trading_day(trade_date) else previous_cn_trading_day(trade_date)
-        _log(f"[Scheduler] {task.symbol} trade_date={actual_trade_date} (requested={trade_date})")
+        _log(f"[Scheduler] {symbol} trade_date={actual_trade_date} (requested={trade_date})")
 
-        horizon = task.horizon or "short"
         req = AnalyzeRequest(
-            symbol=task.symbol,
+            symbol=symbol,
             trade_date=actual_trade_date,
             horizons=[horizon],
-            query=f"定时分析 {task.symbol}",
-            # 直接设置 user_intent，跳过 LLM 意图解析（省 30+ 秒）
+            query=f"定时分析 {symbol}",
             user_intent={
-                "ticker": task.symbol,
+                "ticker": symbol,
                 "horizons": [horizon],
                 "focus_areas": [],
                 "specific_questions": [],
@@ -176,22 +203,22 @@ async def _run_scheduled_job(task, trade_date: str):
             },
         )
 
-        await _run_job(job_id, req, user_id=task.user_id)
+        await _run_job(job_id, req, user_id=user_id)
 
         # Mark success
         db = SessionLocal()
         try:
-            scheduled_service.mark_run_success(db, task.id, trade_date, job_id)
+            scheduled_service.mark_run_success(db, task_id, trade_date, job_id)
         finally:
             db.close()
-        _log(f"[Scheduler] Completed {task.symbol}")
+        _log(f"[Scheduler] Completed {symbol}")
 
     except Exception as e:
         import traceback
-        logger.error(f"[Scheduler] Failed {task.symbol}: {e}\n{traceback.format_exc()}")
+        logger.error(f"[Scheduler] Failed {symbol}: {e}\n{traceback.format_exc()}")
         db = SessionLocal()
         try:
-            scheduled_service.mark_run_failed(db, task.id, trade_date)
+            scheduled_service.mark_run_failed(db, task_id, trade_date)
         finally:
             db.close()
     finally:
@@ -205,6 +232,20 @@ async def lifespan(app: FastAPI):
     init_db()
     _log("Database initialized.")
     _report_version_stats()
+    # 启动时把卡在 running 的定时任务重置，让它们今天可以重新触发
+    db = SessionLocal()
+    try:
+        stale = db.query(ScheduledAnalysisDB).filter(
+            ScheduledAnalysisDB.last_run_status == "running"
+        ).all()
+        if stale:
+            for item in stale:
+                item.last_run_status = "stale"
+                item.last_run_date = None  # 允许今天重新触发
+            db.commit()
+            _log(f"[Scheduler] Reset {len(stale)} stale 'running' tasks on startup.")
+    finally:
+        db.close()
     # Pre-load trade calendar (uses mini_racer/V8 which is not thread-safe)
     from tradingagents.dataflows.trade_calendar import _load_cn_trade_dates
     _load_cn_trade_dates()
@@ -710,9 +751,9 @@ def _build_runtime_config(overrides: Dict[str, Any], user_id: Optional[str] = No
     if _global_config_overrides:
         config = _deep_merge(config, dict(_global_config_overrides))
     
-    # Fetch user specific overrides from DB
-    user_overrides = _user_config_overrides(user_id)
-    
+    # Fetch user specific overrides from DB (pass db to reuse caller's session)
+    user_overrides = _user_config_overrides(user_id, db=db)
+
     # ── Critical: Filter out empty strings before merging ──
     # This prevents an empty DB field from wiping out an Env Var default.
     filtered_user_overrides = {k: v for k, v in user_overrides.items() if v not in (None, "", [])}
@@ -722,22 +763,17 @@ def _build_runtime_config(overrides: Dict[str, Any], user_id: Optional[str] = No
         config = _deep_merge(config, filtered_user_overrides)
     if filtered_request_overrides:
         config = _deep_merge(config, filtered_request_overrides)
-    
+
     # ── Intelligent fallback between models ──
     # If one is provided but the other is missing (even after env var merge), cross-fill.
     quick = config.get("quick_think_llm")
     deep = config.get("deep_think_llm")
-    
+
     if not deep and quick:
         config["deep_think_llm"] = quick
     if not quick and deep:
         config["quick_think_llm"] = deep
-        
-    user_overrides = _user_config_overrides(user_id, db=db)
-    if user_overrides:
-        config = _deep_merge(config, user_overrides)
-    if overrides:
-        config = _deep_merge(config, overrides)
+
     return config
 
 
@@ -1235,46 +1271,49 @@ async def _run_job(
     display_name = request.symbol
     normalized_symbol = _normalize_symbol(request.symbol)
     
-    # ── Step 0: Initialize report in DB immediately ──
-    db = SessionLocal()
+    # ── Step 0: Initialize report in DB (short-lived session) ──
+    init_db = SessionLocal()
     try:
         def _init_report_sync():
             report_service.init_report(
-                db=db,
+                db=init_db,
                 report_id=job_id,
                 symbol=normalized_symbol,
                 trade_date=request.trade_date,
                 user_id=user_id,
             )
-            report_service.update_report_partial(db, job_id, status="running")
-            db.commit()
+            report_service.update_report_partial(init_db, job_id, status="running")
+            init_db.commit()
 
         try:
             await asyncio.to_thread(_init_report_sync)
         except Exception as e:
             _log(f"CRITICAL: Failed to initialize report in DB: {e}")
-            await asyncio.to_thread(db.rollback)
+            await asyncio.to_thread(init_db.rollback)
 
-        _set_job(job_id, status="running", started_at=_utcnow_iso(), symbol=normalized_symbol)
-        
-        _emit_job_event(
-            job_id,
-            "job.running",
-            {
-                "job_id": job_id, 
-                "symbol": normalized_symbol, 
-                "display_name": display_name, 
-                "trade_date": request.trade_date
-            },
-        )
-        # Ensure request object uses the normalized symbol for internal logic
-        request.symbol = normalized_symbol
-        user_context_payload = _extract_request_user_context(request)
-        tracker = AgentProgressTracker(request.selected_analysts, job_id)
-        _emit_job_event(job_id, "agent.snapshot", tracker.snapshot())
-        
-        # Build config using the active session
-        config = await asyncio.to_thread(_build_runtime_config, request.config_overrides, user_id=user_id, db=db)
+        config = await asyncio.to_thread(_build_runtime_config, request.config_overrides, user_id=user_id, db=init_db)
+    finally:
+        await asyncio.to_thread(init_db.close)
+
+    _set_job(job_id, status="running", started_at=_utcnow_iso(), symbol=normalized_symbol)
+
+    _emit_job_event(
+        job_id,
+        "job.running",
+        {
+            "job_id": job_id,
+            "symbol": normalized_symbol,
+            "display_name": display_name,
+            "trade_date": request.trade_date
+        },
+    )
+    # Ensure request object uses the normalized symbol for internal logic
+    request.symbol = normalized_symbol
+    user_context_payload = _extract_request_user_context(request)
+    tracker = AgentProgressTracker(request.selected_analysts, job_id)
+    _emit_job_event(job_id, "agent.snapshot", tracker.snapshot())
+
+    try:
         if request.dry_run:
             result = {
                 "mode": "dry_run",
@@ -1551,27 +1590,33 @@ async def _run_job(
             # 自动保存报告到数据库
             if save_report:
                 def _save_report_sync():
-                    report_service.create_report(
-                        db=db,
-                        symbol=request.symbol,
-                        trade_date=request.trade_date,
-                        decision=decision,
-                        result_data=result,
-                        user_id=user_id,
-                        risk_items=([r.model_dump() for r in structured.risks] if structured else None),
-                        key_metrics=([m.model_dump() for m in structured.key_metrics] if structured else None),
-                        confidence_override=result["confidence"],
-                        target_price_override=result["target_price"],
-                        stop_loss_override=result["stop_loss_price"],
-                        report_id=job_id,
-                        analyst_traces=result.get("analyst_traces"),
-                    )
-                    db.commit()
+                    save_db = SessionLocal()
+                    try:
+                        report_service.create_report(
+                            db=save_db,
+                            symbol=request.symbol,
+                            trade_date=request.trade_date,
+                            decision=decision,
+                            result_data=result,
+                            user_id=user_id,
+                            risk_items=([r.model_dump() for r in structured.risks] if structured else None),
+                            key_metrics=([m.model_dump() for m in structured.key_metrics] if structured else None),
+                            confidence_override=result["confidence"],
+                            target_price_override=result["target_price"],
+                            stop_loss_override=result["stop_loss_price"],
+                            report_id=job_id,
+                            analyst_traces=result.get("analyst_traces"),
+                        )
+                        save_db.commit()
+                    except Exception:
+                        save_db.rollback()
+                        raise
+                    finally:
+                        save_db.close()
 
                 try:
                     await asyncio.to_thread(_save_report_sync)
                 except Exception as e:
-                    await asyncio.to_thread(db.rollback)
                     _log(f"Failed to save report: {e}")
 
             # 所有后处理完成后再标记 completed，防止 SSE 超时提前关闭流
@@ -1675,7 +1720,13 @@ async def _run_job(
                             tracker._emit_report_chunked(job_id, key, str(value))
                     
                     if db_updates:
-                        await asyncio.to_thread(report_service.update_report_partial, db, job_id, **db_updates)
+                        def _partial_update(updates=db_updates):
+                            _db = SessionLocal()
+                            try:
+                                report_service.update_report_partial(_db, job_id, **updates)
+                            finally:
+                                _db.close()
+                        await asyncio.to_thread(_partial_update)
                     
                     # ── Message & Tool Call Handling ──
                     messages = chunk.get("messages", [])
@@ -1777,27 +1828,33 @@ async def _run_job(
         # 自动保存/收口报告到数据库
         if save_report:
             def _save_report_final_sync():
-                report_service.create_report(
-                    db=db,
-                    symbol=request.symbol,
-                    trade_date=request.trade_date,
-                    decision=decision,
-                    result_data=result,
-                    user_id=user_id,
-                    risk_items=([r.model_dump() for r in structured.risks] if structured else None),
-                    key_metrics=([m.model_dump() for m in structured.key_metrics] if structured else None),
-                    confidence_override=result["confidence"],
-                    target_price_override=result["target_price"],
-                    stop_loss_override=result["stop_loss_price"],
-                    report_id=job_id,
-                    analyst_traces=result.get("analyst_traces"),
-                )
-                db.commit()
+                save_db = SessionLocal()
+                try:
+                    report_service.create_report(
+                        db=save_db,
+                        symbol=request.symbol,
+                        trade_date=request.trade_date,
+                        decision=decision,
+                        result_data=result,
+                        user_id=user_id,
+                        risk_items=([r.model_dump() for r in structured.risks] if structured else None),
+                        key_metrics=([m.model_dump() for m in structured.key_metrics] if structured else None),
+                        confidence_override=result["confidence"],
+                        target_price_override=result["target_price"],
+                        stop_loss_override=result["stop_loss_price"],
+                        report_id=job_id,
+                        analyst_traces=result.get("analyst_traces"),
+                    )
+                    save_db.commit()
+                except Exception:
+                    save_db.rollback()
+                    raise
+                finally:
+                    save_db.close()
 
             try:
                 await asyncio.to_thread(_save_report_final_sync)
             except Exception as e:
-                await asyncio.to_thread(db.rollback)
                 _log(f"Failed to finalize report: {e}")
         # 所有后处理完成后再标记 completed，防止 SSE 超时提前关闭流
         _set_job(
@@ -1834,9 +1891,15 @@ async def _run_job(
             finished_at=_utcnow_iso(),
         )
         
-        # ── Persistent failure recording ──
+        # ── Persistent failure recording (short-lived session) ──
         try:
-            await asyncio.to_thread(report_service.mark_report_failed, db, job_id, f"{err_msg}\n\n{traceback.format_exc()}")
+            def _record_failure():
+                err_db = SessionLocal()
+                try:
+                    report_service.mark_report_failed(err_db, job_id, f"{err_msg}\n\n{traceback.format_exc()}")
+                finally:
+                    err_db.close()
+            await asyncio.to_thread(_record_failure)
         except Exception as db_exc:
             _log(f"Failed to record failure in DB: {db_exc}")
 
@@ -1845,8 +1908,6 @@ async def _run_job(
             "job.failed",
             {"job_id": job_id, "error": err_msg},
         )
-    finally:
-        await asyncio.to_thread(db.close)
 
 
 def _normalize_symbol(raw: str) -> str:
@@ -2110,7 +2171,7 @@ _VS_RATE_INTERVAL = 3600  # at most once per hour per IP
 @app.post("/api/version-stats")
 def version_stats(payload: Dict[str, Any] = Body(...), request: Request = None, db: Session = Depends(get_db)):
     """Collect anonymous version statistics from deployed instances."""
-    remote_ip = request.client.host if request and request.client else None
+    remote_ip = _get_real_ip(request)
 
     # Rate limit by IP
     now = time.time()
@@ -2937,8 +2998,8 @@ def request_login_code(request: AuthRequestCodeRequest, db: Session = Depends(ge
 
 
 @app.post("/v1/auth/verify-code", response_model=AuthVerifyCodeResponse)
-def verify_login_code(request: AuthVerifyCodeRequest, db: Session = Depends(get_db)):
-    user = auth_service.verify_login_code(db, request.email, request.code)
+def verify_login_code(body: AuthVerifyCodeRequest, request: Request, db: Session = Depends(get_db)):
+    user = auth_service.verify_login_code(db, body.email, body.code, client_ip=_get_real_ip(request))
     if not user:
         raise HTTPException(status_code=400, detail="验证码错误或已过期")
     access_token = auth_service.create_access_token(user)
