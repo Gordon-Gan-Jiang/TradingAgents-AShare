@@ -113,7 +113,7 @@ def upsert_login_code(db: Session, email: str, purpose: str = "login") -> str:
     return code
 
 
-def verify_login_code(db: Session, email: str, code: str, purpose: str = "login") -> Optional[UserDB]:
+def verify_login_code(db: Session, email: str, code: str, purpose: str = "login", client_ip: Optional[str] = None) -> Optional[UserDB]:
     email = normalize_email(email)
     now = _utcnow()
     code_row = (
@@ -142,10 +142,12 @@ def verify_login_code(db: Session, email: str, code: str, purpose: str = "login"
             created_at=now,
             updated_at=now,
             last_login_at=now,
+            last_login_ip=client_ip,
         )
         db.add(user)
     else:
         user.last_login_at = now
+        user.last_login_ip = client_ip
         user.updated_at = now
     db.commit()
     db.refresh(user)
