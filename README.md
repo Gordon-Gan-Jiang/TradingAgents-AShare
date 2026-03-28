@@ -2,7 +2,7 @@
 
 本项目是基于多智能体协作的 A 股深度分析系统，模拟顶级投研机构的决策闭环，通过 15 名专业 Agent 的博弈与辩论，为投资者提供结构化的交易建议。
 
-[在线体验](https://app.510168.xyz) | [Releases](https://github.com/KylinMountain/TradingAgents-AShare/releases) | [OpenClaw 技能](https://openclaw.com)
+[在线体验](https://app.510168.xyz) | [Releases](https://github.com/KylinMountain/TradingAgents-AShare/releases) | [OpenClaw 技能](https://clawhub.ai/kylinmountain/tradingagents-analysis)
 
 <div align="center">
   <img src="assets/web/analysis.png" width="100%" alt="智能分析"/>
