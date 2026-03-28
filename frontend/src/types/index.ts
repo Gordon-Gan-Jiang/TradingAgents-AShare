@@ -132,6 +132,8 @@ export type SSEEventType =
     | 'agent.activity'
     | 'agent.activity_complete'
     | 'agent.token'
+    | 'agent.debate'
+    | 'agent.debate.token'
 
 export interface SSEEvent {
     event: SSEEventType
@@ -450,4 +452,14 @@ export interface UserToken {
 
 export interface UserTokenCreateRequest {
     name: string
+}
+
+// Debate message (for battle view)
+export interface DebateMessage {
+    debate: 'research' | 'risk'
+    agent: string
+    round: number        // -1 = verdict
+    content: string
+    isVerdict?: boolean
+    horizon?: string
 }

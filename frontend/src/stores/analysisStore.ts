@@ -17,6 +17,7 @@ import type {
     MilestoneMessage,
     RiskItem,
     KeyMetric,
+    DebateMessage,
 } from '@/types'
 
 export interface ChatMessage {
@@ -63,6 +64,10 @@ interface AnalysisState {
     // Milestones for chat display
     milestones: MilestoneMessage[]
 
+    // Debate messages (transient, for battle view)
+    debateMessages: Record<string, DebateMessage[]>
+    debateScrollTick: number
+
     // Chat messages (persisted across route changes)
     chatMessages: ChatMessage[]
 
@@ -104,6 +109,8 @@ interface AnalysisState {
     appendToChatMessage: (id: string, chunk: string) => void
     setMessageContent: (id: string, content: string) => void
     markAgentMessagesComplete: (msgIds?: string[]) => void
+    addDebateMessage: (msg: DebateMessage) => void
+    appendDebateToken: (debate: string, agent: string, round: number, token: string, horizon?: string) => void
     clearChatMessages: () => void
     clearSession: () => void
     reset: () => void
@@ -172,6 +179,8 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
     jobStopLoss: null,
     streamingSections: {},
     milestones: [],
+    debateMessages: {},
+        debateScrollTick: 0,
     chatMessages: createInitialChatMessages(),
     logs: [],
     isAnalyzing: false,
@@ -329,6 +338,41 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
         })
     })),
 
+    // upsert: 同 agent+round 则替换（流式结束时用完整内容覆盖）
+    addDebateMessage: (msg) => set((state) => {
+        const key = msg.debate
+        const existing = state.debateMessages[key] || []
+        const idx = existing.findIndex(m => m.agent === msg.agent && m.round === msg.round)
+        const updated = idx >= 0
+            ? existing.map((m, i) => i === idx ? msg : m)
+            : [...existing, msg]
+        return {
+            debateMessages: { ...state.debateMessages, [key]: updated }
+        }
+    }),
+
+    // 流式 token 追加：找到已有消息则追加 content，否则创建新消息
+    appendDebateToken: (debate, agent, round, token, horizon) => set((state) => {
+        const key = debate
+        const tick = state.debateScrollTick + 1
+        const existing = state.debateMessages[key] || []
+        const idx = existing.findIndex(m => m.agent === agent && m.round === round)
+        if (idx >= 0) {
+            const updated = existing.map((m, i) =>
+                i === idx ? { ...m, content: m.content + token } : m
+            )
+            return { debateMessages: { ...state.debateMessages, [key]: updated }, debateScrollTick: tick }
+        }
+        const isVerdict = round === -1
+        return {
+            debateMessages: {
+                ...state.debateMessages,
+                [key]: [...existing, { debate: debate as 'research' | 'risk', agent, round, content: token, isVerdict, horizon }],
+            },
+            debateScrollTick: tick,
+        }
+    }),
+
     // 清空聊天记录
     clearChatMessages: () => set({
         chatMessages: createInitialChatMessages()
@@ -346,6 +390,8 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
         jobTargetPrice: null,
         jobStopLoss: null,
         streamingSections: {},
+        debateMessages: {},
+        debateScrollTick: 0,
         milestones: [],
         chatMessages: createInitialChatMessages(),
         logs: [],
@@ -389,6 +435,8 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
         jobTargetPrice: null,
         jobStopLoss: null,
         streamingSections: {},
+        debateMessages: {},
+        debateScrollTick: 0,
         milestones: [],
         // 注意：reset时不清空chatMessages，保持对话历史
         logs: [],
@@ -421,6 +469,8 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
             jobStatus: null,
             agents: initialAgents.map(a => ({ ...a, status: 'pending' })),
             streamingSections: {},
+            debateMessages: {},
+        debateScrollTick: 0,
             milestones: [],
             logs: [],
             isAnalyzing: false,
