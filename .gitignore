@@ -1,3 +1,6 @@
+# Docs (local design/plan documents)
+docs/
+
 # LangGraph Checkpoints
 graph_checkpoints.db
 graph_checkpoints.db-shm
@@ -229,16 +232,12 @@ reports/
 results/
 
 # Private dirs (not open-source for now)
-docs/*
-!docs/design-game-theory-agents.zh-CN.md
-!docs/design-agent-architecture-evolution.zh-CN.md
-!docs/implementation-plan-agent-architecture.zh-CN.md
 deploy/
 
 # Local development artifacts
 .DS_Store
 .vscode/
-plans/
+/plans/
 tradingagents.db
 tradingagents.db-shm
 tradingagents.db-wal

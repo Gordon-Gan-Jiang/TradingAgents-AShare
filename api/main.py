@@ -1153,6 +1153,52 @@ class AgentProgressTracker:
             },
         )
 
+    def emit_debate_token(
+        self, debate: str, agent: str, round_num: int, token: str,
+    ) -> None:
+        """推送辩论 token（流式输出，每个 chunk 调用一次）"""
+        if not token:
+            return
+        try:
+            _emit_job_event(
+                self.job_id,
+                "agent.debate.token",
+                {
+                    "debate": debate,
+                    "agent": agent,
+                    "round": round_num,
+                    "token": token,
+                    "horizon": self.horizon,
+                },
+            )
+        except Exception:
+            pass
+
+    def emit_debate_message(
+        self, debate: str, agent: str, round_num: int,
+        content: str, is_verdict: bool = False,
+    ) -> None:
+        """推送辩论消息（每个 agent 每轮完成后调用一次）"""
+        if not content:
+            return
+        try:
+            _emit_job_event(
+                self.job_id,
+                "agent.debate",
+                {
+                    "debate": debate,
+                    "agent": agent,
+                    "round": round_num,
+                    "content": content,
+                    "is_verdict": is_verdict,
+                    "horizon": self.horizon,
+                },
+            )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Failed to emit debate message for %s in %s", agent, debate, exc_info=True,
+            )
+
     def apply_chunk(self, chunk: Dict[str, Any]) -> None:
         # 分析师阶段状态推进
         found_active = False

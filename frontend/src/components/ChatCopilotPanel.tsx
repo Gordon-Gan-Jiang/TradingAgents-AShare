@@ -186,6 +186,8 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
         setStructuredData,
         markAgentMessagesComplete,
         clearSession,
+        addDebateMessage,
+        appendDebateToken,
         reset,
     } = useAnalysisStore()
 
@@ -505,6 +507,47 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                 if (stage === 'final_decision') {
                     pushAssistant(`**${title}**\n\n${summary}`)
                 }
+                break
+            }
+            case 'agent.debate.token': {
+                const raw = data as Record<string, unknown>
+                const debate = raw.debate
+                const token = raw.token
+                if (
+                    (debate !== 'research' && debate !== 'risk') ||
+                    typeof raw.agent !== 'string' ||
+                    typeof raw.round !== 'number' ||
+                    typeof token !== 'string'
+                ) break
+                appendDebateToken(
+                    debate, raw.agent, raw.round, token,
+                    typeof raw.horizon === 'string' ? raw.horizon : undefined,
+                )
+                break
+            }
+            case 'agent.debate': {
+                const raw = data as Record<string, unknown>
+                const debate = raw.debate
+                const agent = raw.agent
+                const round = raw.round
+                const content = raw.content
+                if (
+                    (debate !== 'research' && debate !== 'risk') ||
+                    typeof agent !== 'string' ||
+                    typeof round !== 'number' ||
+                    typeof content !== 'string'
+                ) {
+                    console.warn('[SSE] Malformed agent.debate payload, skipping:', raw)
+                    break
+                }
+                addDebateMessage({
+                    debate,
+                    agent,
+                    round,
+                    content,
+                    isVerdict: raw.is_verdict === true,
+                    horizon: typeof raw.horizon === 'string' ? raw.horizon : undefined,
+                })
                 break
             }
             default:
