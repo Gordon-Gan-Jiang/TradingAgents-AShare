@@ -1,6 +1,40 @@
 {
   "announcements": [
     {
+      "id": "2026-03-28-v060-debate-view",
+      "tag": "Major",
+      "title": "V0.6.0：辩论对战可视化、安全加固与稳定性大幅提升",
+      "summary": "新增多空辩论 & 风控辩论实时对战 Drawer，全链路流式输出；API Token 安全存储升级；根治数据库连接池耗尽问题。",
+      "published_at": "2026-03-28",
+      "items": [
+        {
+          "title": "辩论对战可视化 (Debate Battle View)",
+          "detail": "点击多头/空头/研究总监卡片可打开「多空辩论」Drawer，点击激进/中性/稳健/组合经理卡片可打开「风控三方辩论」Drawer。辩论过程以垂直时间线呈现，按 Round 分组，支持 Token 级流式输出实时显示 Agent 发言，裁决卡片独立高亮展示。"
+        },
+        {
+          "title": "风控辩论全面异步化",
+          "detail": "风控三方辩论（激进/稳健/中性分析师）和风控裁决（组合经理）从同步 llm.invoke() 升级为异步 llm.astream()，辩论内容逐字流式输出到 Drawer，不再需要等待整段发言完成。"
+        },
+        {
+          "title": "A 股决策颜色适配",
+          "detail": "决策卡片颜色遵循 A 股惯例：红色代表看多/买入，绿色代表看空/卖出，符合国内投资者视觉直觉。"
+        },
+        {
+          "title": "API Token 安全存储升级",
+          "detail": "用户 API Token 改用 HMAC-SHA256 哈希存储（不可逆），仅保留末 4 位用于辨识；用户 LLM API Key 使用 AES 加密存储，支持密钥轮换时自动重加密。"
+        },
+        {
+          "title": "数据库连接池稳定性",
+          "detail": "根治 QueuePool 耗尽问题：分析任务不再长期占用数据库连接（从分钟级降至毫秒级），邮件发送不再阻塞连接池。所有手动 Session 统一改为 Context Manager 管理，杜绝连接泄漏。"
+        },
+        {
+          "title": "前端工程优化",
+          "detail": "ESLint 从 v8 迁移至 v9 flat config，解决 Vercel 部署依赖冲突；移除回测页面及连接状态指示器，简化界面。"
+        }
+      ],
+      "active": true
+    },
+    {
       "id": "2026-03-22-v050-release",
       "tag": "功能更新",
       "title": "V0.5.0 正式版：自选股定时分析、流式输出、依赖瘦身",
