@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field, field_serializer
 from sqlalchemy.orm import Session
 import pandas as pd
 
-from api.database import UserDB, UserLLMConfigDB, ScheduledAnalysisDB, VersionStatsDB, init_db, get_db, get_db_ctx
+from api.database import UserDB, UserLLMConfigDB, ScheduledAnalysisDB, VersionStatsDB, ReportDB, init_db, get_db, get_db_ctx
 from api.services import auth_service, report_service, token_service, watchlist_service, scheduled_service
 
 def _get_real_ip(request: Request) -> Optional[str]:
@@ -207,6 +207,25 @@ async def _run_scheduled_job(task: dict, trade_date: str):
             scheduled_service.mark_run_success(db, task_id, trade_date, job_id)
         _log(f"[Scheduler] Completed {symbol}")
 
+        # Send email report (fire-and-forget so it doesn't block the scheduler)
+        try:
+            from api.services.email_report_service import send_report_email_with_retry
+            _email_user = None
+            _email_report = None
+            with get_db_ctx() as db:
+                user = db.query(UserDB).filter(UserDB.id == user_id).first()
+                report = db.query(ReportDB).filter(ReportDB.id == job_id).first()
+                if user and report and getattr(user, 'email_report_enabled', True):
+                    db.expunge(user)
+                    db.expunge(report)
+                    _email_user = user
+                    _email_report = report
+            if _email_user and _email_report:
+                _log(f"[Scheduler] Sending email report for {symbol} to {_email_user.email}")
+                asyncio.create_task(send_report_email_with_retry(_email_user, _email_report))
+        except Exception as e:
+            logger.warning(f"[Scheduler] Email send failed for {symbol}: {e}")
+
     except Exception as e:
         import traceback
         logger.error(f"[Scheduler] Failed {symbol}: {e}\n{traceback.format_exc()}")
@@ -232,15 +251,24 @@ async def lifespan(app: FastAPI):
         _log("=" * 70)
 
     _report_version_stats()
-    # 启动时把卡在 running 的定时任务重置，让它们今天可以重新触发
+    # 启动时把卡在 running 的定时任务重置
     with get_db_ctx() as db:
         stale = db.query(ScheduledAnalysisDB).filter(
             ScheduledAnalysisDB.last_run_status == "running"
         ).all()
         if stale:
             for item in stale:
-                item.last_run_status = "stale"
-                item.last_run_date = None  # 允许今天重新触发
+                # 检查是否已有对应的成功报告（任务实际完成了但状态卡在 running）
+                has_report = item.last_report_id and db.query(ReportDB).filter(
+                    ReportDB.id == item.last_report_id,
+                    ReportDB.status == "completed",
+                ).first()
+                if has_report:
+                    item.last_run_status = "success"
+                    # 保留 last_run_date，不重新触发
+                else:
+                    item.last_run_status = "stale"
+                    item.last_run_date = None  # 真正未完成，允许重新触发
             db.commit()
             _log(f"[Scheduler] Reset {len(stale)} stale 'running' tasks on startup.")
     # Pre-load trade calendar (uses mini_racer/V8 which is not thread-safe)
@@ -641,6 +669,7 @@ class UserResponse(BaseModel):
     email: str
     created_at: Optional[datetime] = None
     last_login_at: Optional[datetime] = None
+    email_report_enabled: bool = True
 
     model_config = {"from_attributes": True}
 
@@ -673,6 +702,7 @@ class UserRuntimeConfigResponse(BaseModel):
     max_risk_discuss_rounds: int
     has_api_key: bool = False
     server_fallback_enabled: bool = True
+    email_report_enabled: bool = True
 
 
 class UserRuntimeConfigUpdateRequest(BaseModel):
@@ -682,6 +712,7 @@ class UserRuntimeConfigUpdateRequest(BaseModel):
     backend_url: Optional[str] = None
     max_debate_rounds: Optional[int] = None
     max_risk_discuss_rounds: Optional[int] = None
+    email_report_enabled: Optional[bool] = None
     api_key: Optional[str] = None
     clear_api_key: bool = False
 
@@ -3033,6 +3064,7 @@ def _config_response_for_user(user: Optional[UserDB], db: Session) -> UserRuntim
         max_risk_discuss_rounds=cfg["max_risk_discuss_rounds"],
         has_api_key=bool(user_cfg and user_cfg.api_key_encrypted),
         server_fallback_enabled=bool(cfg.get("server_fallback_enabled", True)),
+        email_report_enabled=user.email_report_enabled if user and hasattr(user, 'email_report_enabled') else True,
     )
 
 
@@ -3093,6 +3125,9 @@ def update_runtime_config(
         api_key=updates.api_key,
         clear_api_key=updates.clear_api_key,
     )
+    if updates.email_report_enabled is not None:
+        current_user.email_report_enabled = updates.email_report_enabled
+        db.commit()
     filtered = {
         k: v
         for k, v in updates.model_dump().items()
