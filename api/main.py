@@ -700,6 +700,7 @@ ANALYST_REPORT_MAP = {
     "fundamentals": "fundamentals_report",
     "macro": "macro_report",
     "smart_money": "smart_money_report",
+    "volume_price": "volume_price_report",
 }
 
 # All analysts always run — each uses its own natural time window
@@ -870,6 +871,7 @@ class ReportDetailResponse(ReportResponse):
     fundamentals_report: Optional[str]
     macro_report: Optional[str]
     smart_money_report: Optional[str]
+    volume_price_report: Optional[str]
     game_theory_report: Optional[str]
     investment_plan: Optional[str]
     trader_investment_plan: Optional[str]
@@ -1338,6 +1340,7 @@ def _build_result_payload(final_state: Dict[str, Any]) -> Dict[str, Any]:
         "fundamentals_report": final_state.get("fundamentals_report"),
         "macro_report": final_state.get("macro_report"),
         "smart_money_report": final_state.get("smart_money_report"),
+        "volume_price_report": final_state.get("volume_price_report"),
         "game_theory_report": final_state.get("game_theory_report"),
         "game_theory_signals": final_state.get("game_theory_signals"),
         "analyst_traces": final_state.get("analyst_traces"),
@@ -1374,6 +1377,7 @@ class AgentProgressTracker:
             "fundamentals_report": None,
             "macro_report": None,
             "smart_money_report": None,
+            "volume_price_report": None,
             "game_theory_report": None,
             "investment_plan": None,
             "trader_investment_plan": None,
@@ -1878,7 +1882,7 @@ async def _run_job_inner(
 
             report_keys = (
                 "market_report", "sentiment_report", "news_report", "fundamentals_report",
-                "macro_report", "smart_money_report",
+                "macro_report", "smart_money_report", "volume_price_report",
                 "investment_plan", "trader_investment_plan", "final_trade_decision",
             )
 
@@ -2043,6 +2047,7 @@ async def _run_job_inner(
                 "fundamentals_report": primary_r.get("fundamentals_report", ""),
                 "macro_report": primary_r.get("macro_report", ""),
                 "smart_money_report": primary_r.get("smart_money_report", ""),
+                "volume_price_report": primary_r.get("volume_price_report", ""),
                 "analyst_traces": (
                     short_r.get("analyst_traces", []) + medium_r.get("analyst_traces", [])
                 ),
@@ -2141,6 +2146,7 @@ async def _run_job_inner(
                 "fundamentals_report",
                 "macro_report",
                 "smart_money_report",
+                "volume_price_report",
                 "investment_plan",
                 "trader_investment_plan",
                 "final_trade_decision",

@@ -95,6 +95,7 @@ class TestBuildHorizonResult:
             "fundamentals_report": "",
             "macro_report": "",
             "smart_money_report": "",
+            "volume_price_report": "",
         }
         result = self.ta._build_horizon_result("short", state)
         assert result["horizon"] == "short"
@@ -131,6 +132,7 @@ class TestPropagateAsync:
             "fundamentals_report": "",
             "macro_report": "",
             "smart_money_report": "",
+            "volume_price_report": "",
         }
 
     def test_returns_short_term_result_and_reserved_medium_slot(self):
