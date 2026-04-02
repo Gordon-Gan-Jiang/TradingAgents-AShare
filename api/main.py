@@ -105,7 +105,7 @@ def _report_version_stats() -> None:
 
 
 _scheduler_task: Optional[asyncio.Task] = None
-_scheduled_analysis_max_concurrency = int(os.getenv("TA_SCHEDULED_ANALYSIS_MAX_CONCURRENCY", "2"))
+_scheduled_analysis_max_concurrency = int(os.getenv("TA_SCHEDULED_ANALYSIS_MAX_CONCURRENCY", "10"))
 _scheduled_analysis_semaphore: Optional[asyncio.Semaphore] = None
 _scheduled_analysis_queue_lock: Optional[asyncio.Lock] = None
 _scheduled_analysis_waiting_job_ids: list[str] = []
