@@ -1,31 +1,27 @@
 import { useEffect, useState } from 'react'
 import { ArrowLeft, Github, Heart, Cpu, Code2, ExternalLink } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
+import { getBaseUrl } from '@/services/api'
 
 const GITHUB_REPO = 'KylinMountain/TradingAgents-AShare'
 const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPO}/contributors?per_page=100`
 const CACHE_KEY = 'ta-contributors-cache'
 const CACHE_TTL = 10 * 60 * 1000 // 10 minutes
 
-interface MoneySponsor {
+interface SponsorItem {
+    id: string
+    sponsor_type: string
     name: string
-    github?: string
-    avatar?: string
-    email?: string
-    date: string
-}
-
-interface TokenSponsor {
-    name: string
-    github?: string
-    provider: string
+    github?: string | null
+    avatar?: string | null
+    email?: string | null
+    provider?: string | null
     date: string
 }
 
 interface SponsorsData {
-    money: MoneySponsor[]
-    token: TokenSponsor[]
-    excludeContributors?: string[]
+    money: SponsorItem[]
+    token: SponsorItem[]
 }
 
 interface GitHubContributor {
@@ -105,17 +101,22 @@ export default function Thanks() {
     const [sponsors, setSponsors] = useState<SponsorsData | null>(null)
     const [contributors, setContributors] = useState<GitHubContributor[]>([])
     const [loadingContributors, setLoadingContributors] = useState(true)
+    const [excludeContributors, setExcludeContributors] = useState<string[]>([])
 
     useEffect(() => {
-        fetch('/sponsors.json')
+        fetch(`${getBaseUrl()}/v1/sponsors`)
             .then(res => res.json())
             .then(setSponsors)
             .catch(() => setSponsors({ money: [], token: [] }))
+
+        fetch('/sponsors.json')
+            .then(res => res.json())
+            .then(data => setExcludeContributors(data.excludeContributors ?? []))
+            .catch(() => {})
     }, [])
 
     useEffect(() => {
-        if (!sponsors) return
-        const excludeSet = new Set(sponsors.excludeContributors ?? [])
+        const excludeSet = new Set(excludeContributors)
 
         const cached = localStorage.getItem(CACHE_KEY)
         if (cached) {
@@ -137,7 +138,7 @@ export default function Thanks() {
             })
             .catch(() => {})
             .finally(() => setLoadingContributors(false))
-    }, [sponsors])
+    }, [excludeContributors])
 
     const hasMoney = sponsors && sponsors.money.length > 0
     const hasToken = sponsors && sponsors.token.length > 0
@@ -194,7 +195,7 @@ export default function Thanks() {
                                             name={s.name}
                                             github={s.github || undefined}
                                             date={s.date}
-                                            badge={s.provider}
+                                            badge={s.provider ?? ""}
                                             badgeColor="bg-violet-50 text-violet-600 dark:bg-violet-500/15 dark:text-violet-300"
                                             extra="Token 赞助"
                                         />

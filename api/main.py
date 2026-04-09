@@ -39,8 +39,8 @@ from pydantic import BaseModel, Field, field_serializer
 from sqlalchemy.orm import Session
 import pandas as pd
 
-from api.database import UserDB, UserLLMConfigDB, ScheduledAnalysisDB, VersionStatsDB, ReportDB, ImportedPortfolioPositionDB, init_db, get_db, get_db_ctx
-from api.services import auth_service, portfolio_import_service, report_service, token_service, watchlist_service, scheduled_service, tracking_board_service
+from api.database import UserDB, UserLLMConfigDB, ScheduledAnalysisDB, VersionStatsDB, ReportDB, ImportedPortfolioPositionDB, FeedbackDB, SponsorDB, init_db, get_db, get_db_ctx
+from api.services import auth_service, portfolio_import_service, report_service, token_service, watchlist_service, scheduled_service, tracking_board_service, feedback_service, sponsor_service
 
 def _get_real_ip(request: Request) -> Optional[str]:
     """Extract real client IP, preferring Cloudflare/proxy headers."""
@@ -4575,6 +4575,153 @@ def delete_scheduled_analysis(
 ):
     if not scheduled_service.delete_scheduled(db, current_user.id, item_id):
         raise HTTPException(404, "未找到该定时任务")
+
+
+# ─── Sponsor endpoints (public, no auth) ────────────────────────────────────
+
+
+class SponsorItem(BaseModel):
+    id: str
+    sponsor_type: str
+    name: str
+    github: Optional[str] = None
+    avatar: Optional[str] = None
+    email: Optional[str] = None
+    provider: Optional[str] = None
+    date: str
+    # NOTE: amount is intentionally excluded from the public API
+
+
+class SponsorsResponse(BaseModel):
+    money: List[SponsorItem]
+    token: List[SponsorItem]
+
+
+def _sponsor_to_item(s: SponsorDB) -> SponsorItem:
+    return SponsorItem(
+        id=s.id,
+        sponsor_type=s.sponsor_type,
+        name=s.name,
+        github=s.github,
+        avatar=s.avatar,
+        email=s.email,
+        provider=s.provider,
+        date=s.date,
+    )
+
+
+@app.get("/v1/sponsors", response_model=SponsorsResponse)
+def list_sponsors(db: Session = Depends(get_db)):
+    """Public endpoint: list all visible sponsors grouped by type."""
+    all_sponsors = sponsor_service.list_sponsors(db)
+    money = [_sponsor_to_item(s) for s in all_sponsors if s.sponsor_type == "money"]
+    token = [_sponsor_to_item(s) for s in all_sponsors if s.sponsor_type == "token"]
+    return SponsorsResponse(money=money, token=token)
+
+
+# ─── Feedback endpoints ─────────────────────────────────────────────────────
+
+
+class FeedbackCreateRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1, max_length=5000)
+
+
+class FeedbackItem(BaseModel):
+    id: str
+    user_email: str
+    subject: str
+    content: str
+    admin_reply: Optional[str] = None
+    replied_at: Optional[datetime] = None
+    is_read: bool = False
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @field_serializer("replied_at", "created_at", "updated_at")
+    def serialize_dt(self, v: Optional[datetime], _info: Any) -> Optional[str]:
+        return v.isoformat() if v else None
+
+
+class FeedbackListResponse(BaseModel):
+    total: int
+    feedbacks: List[FeedbackItem]
+
+
+class FeedbackUnreadResponse(BaseModel):
+    unread_count: int
+
+
+def _fb_to_item(fb: FeedbackDB) -> FeedbackItem:
+    return FeedbackItem(
+        id=fb.id,
+        user_email=fb.user_email,
+        subject=fb.subject,
+        content=fb.content,
+        admin_reply=fb.admin_reply,
+        replied_at=fb.replied_at,
+        is_read=fb.is_read,
+        created_at=fb.created_at,
+        updated_at=fb.updated_at,
+    )
+
+
+@app.post("/v1/feedbacks", response_model=FeedbackItem, status_code=201)
+def create_feedback(
+    req: FeedbackCreateRequest,
+    current_user: UserDB = Depends(_require_web_user),
+    db: Session = Depends(get_db),
+):
+    fb = feedback_service.create_feedback(db, current_user, req.subject, req.content)
+    return _fb_to_item(fb)
+
+
+@app.get("/v1/feedbacks", response_model=FeedbackListResponse)
+def list_feedbacks(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: UserDB = Depends(_require_web_user),
+    db: Session = Depends(get_db),
+):
+    items, total = feedback_service.list_feedbacks(db, current_user.id, page, page_size)
+    return FeedbackListResponse(total=total, feedbacks=[_fb_to_item(fb) for fb in items])
+
+
+@app.get("/v1/feedbacks/unread-count", response_model=FeedbackUnreadResponse)
+def feedback_unread_count(
+    current_user: UserDB = Depends(_require_web_user),
+    db: Session = Depends(get_db),
+):
+    count = feedback_service.unread_count(db, current_user.id)
+    return FeedbackUnreadResponse(unread_count=count)
+
+
+@app.get("/v1/feedbacks/{feedback_id}", response_model=FeedbackItem)
+def get_feedback(
+    feedback_id: str,
+    current_user: UserDB = Depends(_require_web_user),
+    db: Session = Depends(get_db),
+):
+    fb = feedback_service.get_feedback(db, feedback_id)
+    if not fb or fb.user_id != current_user.id:
+        raise HTTPException(404, "未找到该反馈")
+    # auto mark read
+    if not fb.is_read and fb.admin_reply:
+        feedback_service.mark_read(db, feedback_id, current_user.id)
+        fb.is_read = True
+    return _fb_to_item(fb)
+
+
+@app.post("/v1/feedbacks/{feedback_id}/read")
+def mark_feedback_read(
+    feedback_id: str,
+    current_user: UserDB = Depends(_require_web_user),
+    db: Session = Depends(get_db),
+):
+    fb = feedback_service.mark_read(db, feedback_id, current_user.id)
+    if not fb:
+        raise HTTPException(404, "未找到该反馈")
+    return {"ok": True}
 
 
 from fastapi.staticfiles import StaticFiles
