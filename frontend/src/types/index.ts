@@ -655,6 +655,28 @@ export interface UserTokenCreateRequest {
     name: string
 }
 
+// Feedback types
+export interface FeedbackItem {
+    id: string
+    user_email: string
+    subject: string
+    content: string
+    admin_reply?: string | null
+    replied_at?: string | null
+    is_read: boolean
+    created_at?: string
+    updated_at?: string
+}
+
+export interface FeedbackListResponse {
+    total: number
+    feedbacks: FeedbackItem[]
+}
+
+export interface FeedbackUnreadResponse {
+    unread_count: number
+}
+
 // Debate message (for battle view)
 export interface DebateMessage {
     debate: 'research' | 'risk'
