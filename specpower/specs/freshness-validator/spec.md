@@ -29,6 +29,14 @@ The DataCollector SHALL aggregate per-source `freshness_meta` into a `freshness_
 - **WHEN** a provider returns a response that cannot be parsed into the expected cutoff fields
 - **THEN** its `freshness_meta` MUST have `status: error` with `error_code: parse_error`
 
+#### Scenario: Intraday-only source omitted on historical analysis
+- **WHEN** a source has `intraday_only: true` in the freshness contract
+- **THEN** the validator MUST mark that source `not_applicable`
+- **THEN** the source MUST NOT contribute `error` to overall freshness aggregation
+
+#### Scenario: Intraday-only source fetched but empty on same-day analysis
+- **WHEN** a source has `intraday_only: true`
+- **THEN** the validator MUST mark the source `error` with an appropriate fetch error message
 ### Requirement: Criticality-based stale and error handling
 The freshness contract MUST assign criticality (`critical`, `important`, `informational`) determining downstream impact when status is `stale`, `warning`, or `error`.
 

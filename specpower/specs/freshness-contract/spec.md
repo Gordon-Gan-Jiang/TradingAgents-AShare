@@ -58,6 +58,11 @@ The system SHALL maintain a machine-readable freshness contract (YAML) mapping e
 - **WHEN** a fetched source has no contract entry
 - **THEN** the system MUST assign status `unknown` and MUST NOT alone elevate report `overall_status` to `stale`
 
+#### Scenario: Board fund flow provider compatibility
+- **WHEN** the board fund flow provider fetches industry sector fund-flow rankings
+- **THEN** it MUST attempt the legacy akshare API when available
+- **THEN** it MUST fall back to a supported sector fund-flow ranking API when the legacy symbol is absent
+- **THEN** successful responses MUST include a parseable calendar anchor (e.g. `数据截止 YYYY-MM-DD`) for freshness evaluation
 ### Requirement: Per-source freshness status enumeration
 The system SHALL assign each evaluated data source one of: `fresh`, `warning`, `stale`, `error`, `empty_ok`, `not_applicable`, or `unknown`.
 
