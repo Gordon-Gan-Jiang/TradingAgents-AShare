@@ -31,7 +31,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Protocol, Sequence
+from typing import Callable, Any, Iterable, Mapping, Protocol, Sequence
 
 TIER_LIGHT = "light"
 TIER_MEDIUM = "medium"
@@ -567,3 +567,298 @@ def tier_distribution(decisions: Sequence[RouteDecision]) -> dict[str, int]:
     for decision in decisions:
         out[decision.tier] = out.get(decision.tier, 0) + 1
     return out
+
+
+# ── 计划（Plan）：LLM 规划层与规则层共用的落点 ────────────────────────────
+#
+# 为什么要有独立的结构而不是直接返回 RouteDecision：规划层要回答的不只是
+# "哪一档"，还有"打算调哪些工具、要不要追问"。计划**必须可校验、可落库、可重放**
+# ——否则同一句话两次运行走不同路径，校准与回测就失去意义（这正是本平台与
+# "随手写个 agent" 的分界）。
+
+# 意图枚举与黄金集（tests/golden/questions.jsonl）保持一致：同一套词汇才能用
+# 同一把尺子度量，否则规划准确率无从计算。
+PLAN_INTENTS: tuple[str, ...] = (
+    "single_symbol_judgement",
+    "factual_lookup",
+    "portfolio_review",
+    "market_screen",
+    "multi_symbol_compare",
+    "market_view",
+    "history_lookup",
+    "concept_qa",
+    "action_request",
+)
+
+PLAN_SOURCES: tuple[str, ...] = ("rules", "llm")
+
+# 单轮计划最多几个工具步骤。上限存在的意义是成本：步数不可预知 = 成本不可预知，
+# 而档位预算是硬约束。
+MAX_PLAN_STEPS = 3
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    tool: str
+    arguments: Mapping[str, Any] = field(default_factory=dict)
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class Plan:
+    """一次对话回合的**计划**。可校验、可落库、可重放。"""
+
+    intent: str
+    tier: str = TIER_MEDIUM
+    symbol: str | None = None
+    symbols: tuple[str, ...] = ()
+    screen: bool = False
+    market_level: bool = False
+    steps: tuple[PlanStep, ...] = ()
+    need_clarify: bool = False
+    clarify_question: str = ""
+    confidence: float = 0.0
+    source: str = "rules"
+
+    def as_record(self) -> dict[str, Any]:
+        """落库用扁平记录。"""
+        return {
+            "intent": self.intent,
+            "tier": self.tier,
+            "symbol": self.symbol,
+            "symbols": list(self.symbols),
+            "screen": self.screen,
+            "market_level": self.market_level,
+            "need_clarify": self.need_clarify,
+            "confidence": round(float(self.confidence), 4),
+            "source": self.source,
+            "steps": [
+                {"tool": step.tool, "arguments": dict(step.arguments), "reason": step.reason}
+                for step in self.steps
+            ],
+        }
+
+
+def parse_plan(
+    payload: Mapping[str, Any] | None,
+    *,
+    known_tools: Iterable[str],
+    max_steps: int = MAX_PLAN_STEPS,
+) -> Plan | None:
+    """把 LLM 的结构化输出解析成 `Plan`；**任何违规都返回 None**（由调用方降级）。
+
+    为什么整体拒绝而不是"修一修"：计划的每一步都改变答案的含义。悄悄丢掉一个
+    未知工具步骤，会让回答看起来"查过了"，而实际上少了一大块证据——那正是
+    本平台最不能接受的失败形态。宁可降级到规则层 + 追问。
+    """
+    if not isinstance(payload, Mapping):
+        return None
+
+    intent = str(payload.get("intent") or "").strip()
+    if intent not in PLAN_INTENTS:
+        return None
+
+    tier = str(payload.get("tier") or TIER_MEDIUM).strip()
+    if tier not in TIERS:
+        return None
+
+    known = {str(name) for name in known_tools}
+    raw_steps = payload.get("steps") or []
+    if not isinstance(raw_steps, (list, tuple)):
+        return None
+    if len(raw_steps) > max_steps:
+        return None
+
+    steps: list[PlanStep] = []
+    for raw in raw_steps:
+        if not isinstance(raw, Mapping):
+            return None
+        tool = str(raw.get("tool") or "").strip()
+        if not tool or tool not in known:
+            # 未知工具 = 计划不可执行。整体拒绝，不静默跳过。
+            return None
+        arguments = raw.get("arguments") or {}
+        if not isinstance(arguments, Mapping):
+            return None
+        steps.append(
+            PlanStep(tool=tool, arguments=dict(arguments), reason=str(raw.get("reason") or ""))
+        )
+
+    symbol_raw = payload.get("symbol")
+    symbol = str(symbol_raw).strip() if isinstance(symbol_raw, str) and symbol_raw.strip() else None
+
+    symbols_raw = payload.get("symbols") or ()
+    if not isinstance(symbols_raw, (list, tuple)):
+        return None
+    symbols: list[str] = []
+    for item in symbols_raw:
+        text = str(item or "").strip()
+        if text and text not in symbols:
+            symbols.append(text)
+
+    need_clarify = bool(payload.get("need_clarify"))
+    clarify_question = str(payload.get("clarify_question") or "").strip()
+    if need_clarify and not clarify_question:
+        # 追问却没有问题文本 = 用户只会看到空白
+        return None
+
+    try:
+        confidence = float(payload.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    confidence = min(max(confidence, 0.0), 1.0)
+
+    source = str(payload.get("source") or "llm").strip()
+    if source not in PLAN_SOURCES:
+        return None
+
+    return Plan(
+        intent=intent,
+        tier=tier,
+        symbol=symbol,
+        symbols=tuple(symbols),
+        screen=bool(payload.get("screen")),
+        market_level=bool(payload.get("market_level")),
+        steps=tuple(steps),
+        need_clarify=need_clarify,
+        clarify_question=clarify_question,
+        confidence=confidence,
+        source=source,
+    )
+
+
+# ── LLM 规划层 ────────────────────────────────────────────────────────────
+#
+# 定位：**规则定不了标的时候才用它**。规则层已经能判定的高频问句（带代码/公司名
+# 的研判、事实、筛选）走零 LLM 路径；规则层判不出标的——也就是"任意自然语言"
+# 失败的场景——才交给 LLM 规划。这样成本花在真正需要的地方，且规则层仍是
+# 确定性降级目标（LLM 一挂就回落）。
+
+# 规则判定"已有落点"的最低置信度。低于它说明分类器自己也没把握，交给 LLM。
+RULES_DECISIVE_CONFIDENCE = 0.75
+
+
+class PlanError(RuntimeError):
+    """规划失败。调用方据此降级到规则层，而不是把异常抛给用户。"""
+
+
+def _rules_are_decisive(decision: RouteDecision) -> bool:
+    """规则层是否已经定下了这一回合的落点。
+
+    判据只有一条但很关键：**是否已解析出标的或多候选**。已解析出来的问句不需要
+    规划（工具是机械决定的），而"没解析出任何标的"正是自然语言失败的场景——
+    旧实现在这里直接 400 追问，正是要交给 LLM 的地方。
+    """
+    if decision.needs_clarification:
+        return False
+    return decision.confidence >= RULES_DECISIVE_CONFIDENCE
+
+
+class LlmPlanner:
+    """让 LLM 给"规则定不了"的问句出结构化计划。
+
+    实现 `TierClassifier` 协议，因此可以被既有的 `DegradingClassifier` 包裹
+    ——降级语义只有一处实现，不必在这里重复写 try/except。
+    """
+
+    name = "llm"
+
+    def __init__(
+        self,
+        *,
+        inner: TierClassifier,
+        complete: Callable[[str], str],
+        known_tools: Iterable[str] | Sequence[str] = (),
+        tool_digest: str = "",
+        max_steps: int = MAX_PLAN_STEPS,
+    ) -> None:
+        self._inner = inner
+        self._complete = complete
+        self._known_tools = tuple(known_tools)
+        self._tool_digest = tool_digest
+        self._max_steps = max_steps
+
+    # ── 规划 ──────────────────────────────────────────────────────────────
+    def plan(self, text: str) -> Plan | None:
+        """返回计划；规则层已定或 LLM 不可用时返回 None（调用方用规则结果）。"""
+        try:
+            decision = self._inner.classify(text)
+        except Exception:  # noqa: BLE001 — 规则层异常等于"定不了"
+            decision = None
+
+        if decision is not None and _rules_are_decisive(decision):
+            return None  # 零 LLM 路径：高频问句不该付规划成本
+
+        prompt = self.build_prompt(text)
+        try:
+            raw = self._complete(prompt)
+        except Exception as exc:  # noqa: BLE001 — 规划失败必须降级而非中断
+            raise PlanError(f"规划器调用失败：{type(exc).__name__}") from exc
+
+        return parse_plan(
+            _loads_json(raw), known_tools=self._known_tools, max_steps=self._max_steps
+        )
+
+    def classify(self, text: str) -> RouteDecision:
+        """`TierClassifier` 兼容入口：计划 → 路由决策（供既有编排使用）。"""
+        try:
+            plan = self.plan(text)
+        except PlanError:
+            return self._fallback(text)
+        if plan is None:
+            return self._inner.classify(text)
+        return route_decision_from_plan(plan)
+
+    # ── 提示词 ────────────────────────────────────────────────────────────
+    def build_prompt(self, text: str) -> str:
+        """把可用工具摘要与问句交给模型，要求**只输出 JSON**。
+
+        工具摘要由调用方注入（`tool_digest`）：规划层不该自己去翻注册表——
+        它只该看到一个名字与一句话说明的清单，避免把整个工具 schema 塞进上下文。
+        """
+        return (
+            "你是投研对话的规划器。根据用户问句产出一个 JSON 计划，只输出 JSON。\n"
+            f"可用工具：\n{self._tool_digest or '（无）'}\n\n"
+            f"意图取值：{'/'.join(PLAN_INTENTS)}\n"
+            f"档位取值：{'/'.join(TIERS)}\n"
+            f"最多 {self._max_steps} 个工具步骤；不需要工具时 steps 为空数组。\n"
+            '必须输出这些键：intent, tier, symbol, symbols, screen, market_level, '
+            'steps, need_clarify, clarify_question, confidence。\n'
+            f"用户问句：{text}"
+        )
+
+    def _fallback(self, text: str) -> RouteDecision:
+        """规划失败时的降级：沿用规则结果；规则也没结果则追问。"""
+        try:
+            return self._inner.classify(text)
+        except Exception:  # noqa: BLE001
+            return RouteDecision(
+                tier=TIER_MEDIUM, confidence=0.0,
+                reason="planner unavailable and rules failed; awaiting clarification",
+                needs_clarification=True, classifier=self.name,
+            )
+
+
+def route_decision_from_plan(plan: Plan) -> RouteDecision:
+    """计划 → 路由决策。让既有编排（档位预算、工具计划）无需改签名即可用上规划。"""
+    return RouteDecision(
+        tier=plan.tier,
+        confidence=plan.confidence or 0.5,
+        symbol=plan.symbol,
+        symbols=plan.symbols,
+        reason=f"llm plan: {plan.intent}",
+        needs_clarification=plan.need_clarify,
+        classifier="llm",
+    )
+
+
+def _loads_json(raw: str) -> Any:
+    """解析模型输出；容忍 ```json 代码围栏（模型很爱加）。"""
+    import json as _json
+
+    text = str(raw or "").strip()
+    text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        return _json.loads(text)
+    except (ValueError, TypeError):
+        return None
