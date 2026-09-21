@@ -1,6 +1,14 @@
 from langchain_core.tools import tool
 from typing import Annotated
-from tradingagents.dataflows.interface import route_to_vendor
+from tradingagents.tools.data import data_tool_impl as _data_tool_impl
+
+def _delegate(name: str):
+    """委托到工具层的唯一实现（design D1：能力定义只有一份）。
+
+    本模块只保留 `@tool` 包装与 docstring——它们是分析图的接口面，
+    行为必须逐字不变；取数逻辑与参数顺序收敛到 `tools/data.py` 的声明表。
+    """
+    return _data_tool_impl(name)
 
 @tool
 def get_indicators(
@@ -20,4 +28,4 @@ def get_indicators(
     Returns:
         str: A formatted dataframe containing the technical indicators for the specified ticker symbol and indicator.
     """
-    return route_to_vendor("get_indicators", symbol, indicator, curr_date, look_back_days)
+    return _delegate("get_indicators")(symbol, indicator, curr_date, look_back_days)

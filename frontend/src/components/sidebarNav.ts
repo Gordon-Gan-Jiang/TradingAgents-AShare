@@ -13,6 +13,7 @@ import {
     TrendingUp,
     Cpu,
     Compass,
+    ShieldQuestion,
 } from 'lucide-react'
 
 export interface SidebarNavItem {
@@ -39,6 +40,7 @@ export const navGroups: SidebarNavGroup[] = [
         label: '研究分析',
         items: [
             { path: '/analysis', icon: Activity, label: '智能分析' },
+            { path: '/judgement', icon: ShieldQuestion, label: '研判对话' },
             { path: '/mainline', icon: Compass, label: '市场主线' },
             { path: '/recommendations', icon: Sparkles, label: '股票推荐' },
         ],

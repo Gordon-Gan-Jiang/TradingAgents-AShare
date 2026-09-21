@@ -45,6 +45,21 @@ TOOLS_CATEGORIES = {
             "get_hot_stocks_xq",
         ],
     },
+    "cn_research_data": {
+        "description": (
+            "A 股研究类数据：结构化日线、分时、筹码分布、资金流、板块基准、个股新闻。"
+            "对话式研判依赖这些源；放在同一类别下使用户配置一处即可调整全部。"
+        ),
+        "tools": [
+            "get_daily_bars_df",
+            "get_intraday_bars",
+            "get_chip_distribution",
+            "get_flow_frame",
+            "get_peer_frames",
+            "get_stock_turnover",
+            "get_symbol_news",
+        ],
+    },
     "cn_board_data": {
         "description": "China A-share sector/board data: spot rankings, fund flow, history, constituents (mainline analysis)",
         "tools": [

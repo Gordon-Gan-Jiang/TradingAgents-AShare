@@ -775,6 +775,41 @@ def format_board_cons_table(
     return f"{label}板块「{board_name}」成分股 Top{top_n}（按当日涨幅）：\n{sub.to_string(index=False)}"
 
 
+# 结构化日线的列契约：与平台通用 OHLCV 约定一致（见 `graph/data_collector.py`）
+_SIGNAL_BAR_COLUMNS = ("date", "open", "high", "low", "close", "volume")
+
+
+def to_signal_bars(frame: pd.DataFrame) -> pd.DataFrame:
+    """把内部大写帧转成**信号层契约**的小写 OHLCV。
+
+    事故记录：`get_daily_bars_df` 曾经直接把 `_fetch_hist_df` 的输出交出去，
+    而那是给提示词表格用的**大写**列（`Date`/`Close`…）。纯信号层
+    （`signals/context.py::_normalize_daily`）要求小写 `date`/`close`，于是每次
+    真实取数都变成 `InsufficientHistory: daily bars missing required columns`——
+    **洗盘判定因此从未在真实数据上跑通过**，只在测试里通过（测试桩恰好造小写列）。
+
+    两条路的消费者不同，所以在这里转换，而不是改任何一边去迁就另一边：
+    `_normalize_hist_df` 保持大写（提示词表格用），信号层保持小写（数值计算用）。
+    """
+    if frame is None or len(frame) == 0:
+        return pd.DataFrame(columns=list(_SIGNAL_BAR_COLUMNS))
+
+    out = frame.copy()
+    out.columns = [str(c).strip().lower() for c in out.columns]
+    # 只保留契约列，其余（outstanding_share / turnover 之类）不往下传：
+    # 信号层按列名取值，多带列不会更安全，只会让上游改动无声穿透。
+    keep = [c for c in _SIGNAL_BAR_COLUMNS if c in out.columns]
+    out = out[keep]
+
+    for column in ("date",):
+        if column in out.columns:
+            out[column] = pd.to_datetime(out[column], errors="coerce").dt.strftime("%Y-%m-%d")
+    for column in ("open", "high", "low", "close", "volume"):
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce")
+    return out.reset_index(drop=True)
+
+
 class CnAkshareProvider(BaseMarketDataProvider):
     """A-share provider backed by AkShare."""
 
@@ -1159,6 +1194,50 @@ class CnAkshareProvider(BaseMarketDataProvider):
             + self.INDICATOR_DESCRIPTIONS[indicator]
         )
         return result
+
+    # ── 研究类数据（对话式研判依赖）────────────────────────────────────
+    # 取数实现集中在 cn_research_data，这里只做端口适配，避免两套实现漂移。
+
+    def get_intraday_bars(self, symbol: str, day: str, freq: str = "5"):
+        from . import cn_research_data
+
+        return cn_research_data.fetch_intraday_frame(symbol, day, freq)
+
+    def get_chip_distribution(self, symbol: str, day: str):
+        from . import cn_research_data
+
+        return cn_research_data.fetch_chip_frame(symbol, day)
+
+    def get_flow_frame(self, symbol: str, day: str):
+        from . import cn_research_data
+
+        return cn_research_data.fetch_flow_frame(symbol, day)
+
+    def get_peer_frames(self, symbol: str, day: str):
+        from . import cn_research_data
+
+        return cn_research_data.fetch_peer_frames(symbol, day)
+
+    def get_stock_turnover(self, symbol: str, day: str):
+        from . import cn_research_data
+
+        return cn_research_data.fetch_stock_turnover(symbol, day)
+
+    def get_symbol_news(self, symbol: str, start_date: str, end_date: str):
+        from . import cn_research_data
+
+        return cn_research_data.fetch_symbol_news(symbol, start_date, end_date)
+
+    def get_daily_bars_df(self, symbol: str, start_date: str, end_date: str):
+        """结构化日线（DataFrame）。
+
+        `get_stock_data` 返回的是**预格式化的中文表格字符串**，适合喂提示词，
+        但不适合数值计算——确定性信号层需要 DataFrame。这里直接复用既有的
+        多源降级取数路径（`_fetch_hist_df`），不复制任何取数逻辑，避免两套
+        实现随着时间漂移。
+        """
+        # 说信号层的语言：小写 OHLCV（`_fetch_hist_df` 的输出是提示词表格形态）
+        return to_signal_bars(self._fetch_hist_df(symbol, start_date, end_date))
 
     def get_fundamentals(self, ticker: str, curr_date: str = None) -> str:
         with AKSHARE_CALL_LOCK:

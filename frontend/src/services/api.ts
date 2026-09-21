@@ -1,4 +1,5 @@
-import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, RecommendationRequest, RecommendationResponse, DailyProductRunRequest, DailyProductRunResponse, RecommendationHistoryItem, RecommendationStrategyStat, RecommendationEvalRun, InsightsT1RecommendationPoint, InsightsT1ReportAccuracyPoint, InsightsT1ReportAccuracySummary, InsightsT1MultiModelConsensusPoint, InsightsT1MultiModelConsensusDetail, InsightsT1RecommendationDetail, InsightsT1ReportDetail, ModelArenaLeaderboardResponse, ModelArenaSymbolCompareResponse, ModelArenaPromoteRequest, ModelArenaRunRequest, ModelArenaRunResponse, ModelArenaDriftAlertResponse, ModelArenaModelDetailResponse, ModelArenaModelTrendResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, WpsWarmupRequest, WpsWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse, PaperPortfolioSnapshot, PaperPortfolioBootstrapRequest, PaperTradeRequest as PaperTradePayload, DailyOperationRequest as DailyOperationPayload, DailyOperationResult, PaperDailyReviewSummary, PromptTemplate, ModelProfile, ModelProfileCreateRequest, ModelProfileUpdateRequest, ModelProfileWarmupResponse, TradePlan, ExitAdviceResponse } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, RecommendationRequest, RecommendationResponse, DailyProductRunRequest, DailyProductRunResponse, RecommendationHistoryItem, RecommendationStrategyStat, RecommendationEvalRun, InsightsT1RecommendationPoint, InsightsT1ReportAccuracyPoint, InsightsT1ReportAccuracySummary, InsightsT1MultiModelConsensusPoint, InsightsT1MultiModelConsensusDetail, InsightsT1RecommendationDetail, InsightsT1ReportDetail, ModelArenaLeaderboardResponse, ModelArenaSymbolCompareResponse, ModelArenaPromoteRequest, ModelArenaRunRequest, ModelArenaRunResponse, ModelArenaDriftAlertResponse, ModelArenaModelDetailResponse, ModelArenaModelTrendResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, WpsWarmupRequest, WpsWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse, PaperPortfolioSnapshot, PaperPortfolioBootstrapRequest, PaperTradeRequest as PaperTradePayload, DailyOperationRequest as DailyOperationPayload, DailyOperationResult, PaperDailyReviewSummary, PromptTemplate, ModelProfile, ModelProfileCreateRequest, ModelProfileUpdateRequest, ModelProfileWarmupResponse, TradePlan, ExitAdviceResponse, WashoutVerdict, VerdictHistoryItem, CalibrationReport, ConversationSummary, ConversationDetail } from '@/types'
+import { describeChatHttpError } from '@/services/chatStream'
 
 export function getBaseUrl(): string {
     const envUrl = (import.meta.env.VITE_API_URL as string) || ''
@@ -1046,6 +1047,98 @@ class ApiService {
     async getMainlineDailyLog(tradeDate?: string): Promise<import('@/types').MainlineDailyLog> {
         const q = tradeDate ? `?trade_date=${encodeURIComponent(tradeDate)}` : ''
         return this.request(`/v1/mainline/logs/daily${q}`)
+    }
+
+    // ── 对话式研判 ────────────────────────────────────────────────────────
+    // 判定直取端点**不调用模型**：判定卡片可以独立于对话链路渲染，
+    // 调试与回归也能把「模型说错了」与「信号算错了」分开定位。
+
+    async getWashoutVerdict(
+        symbol: string,
+        options: { asOf?: string; windowDays?: number; persist?: boolean } = {},
+    ): Promise<WashoutVerdict> {
+        const params = new URLSearchParams({ symbol })
+        if (options.asOf) params.set('as_of', options.asOf)
+        if (options.windowDays) params.set('window_days', String(options.windowDays))
+        if (options.persist) params.set('persist', 'true')
+        return this.request<WashoutVerdict>(`/v1/signals/washout?${params.toString()}`)
+    }
+
+    async listVerdicts(options: { symbol?: string; limit?: number } = {}): Promise<{
+        items: VerdictHistoryItem[]
+        count: number
+    }> {
+        const params = new URLSearchParams()
+        if (options.symbol) params.set('symbol', options.symbol)
+        if (options.limit) params.set('limit', String(options.limit))
+        const q = params.toString()
+        return this.request(`/v1/signals/verdicts${q ? `?${q}` : ''}`)
+    }
+
+    async getCalibration(symbol?: string): Promise<CalibrationReport> {
+        const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''
+        return this.request<CalibrationReport>(`/v1/signals/calibration${q}`)
+    }
+
+    /** 手动触发 T+3/T+5 回填。幂等且不改写已记录结果。 */
+    async triggerBackfill(options: { horizonDays?: number; limit?: number } = {}) {
+        const params = new URLSearchParams()
+        if (options.horizonDays) params.set('horizon_days', String(options.horizonDays))
+        if (options.limit) params.set('limit', String(options.limit))
+        const q = params.toString()
+        return this.request(`/v1/signals/backfill${q ? `?${q}` : ''}`, { method: 'POST' }, 120000)
+    }
+
+    async listConversations(limit = 50): Promise<{ items: ConversationSummary[]; count: number }> {
+        return this.request(`/v1/conversations?limit=${limit}`)
+    }
+
+    async getConversation(conversationId: string, limit = 100): Promise<ConversationDetail> {
+        return this.request(`/v1/conversations/${encodeURIComponent(conversationId)}?limit=${limit}`)
+    }
+
+    /**
+     * 对话：建立 SSE 连接并把 `Response` 交给调用方消费。
+     *
+     * 刻意返回 `Response` 而不是直接渲染：流解析在 `services/chatStream.ts`
+     * 里（纯函数、有单测），组件只负责把状态映射成 UI。
+     */
+    async streamChat(
+        payload: {
+            messages: Array<{ role: string; content: string }>
+            symbol?: string
+            asOf?: string
+            tier?: string
+            windowDays?: number
+            conversationId?: string
+            modelProfileId?: string
+        },
+        signal?: AbortSignal,
+    ): Promise<Response> {
+        const token = getAuthToken()
+        const response = await fetch(`${getBaseUrl()}/v1/chat`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'text/event-stream',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({
+                messages: payload.messages,
+                symbol: payload.symbol,
+                as_of: payload.asOf,
+                tier: payload.tier,
+                window_days: payload.windowDays ?? 20,
+                conversation_id: payload.conversationId,
+                model_profile_id: payload.modelProfileId,
+            }),
+            signal,
+        })
+        if (!response.ok) {
+            const body = await response.text().catch(() => '')
+            throw new Error(describeChatHttpError(response.status, body))
+        }
+        return response
     }
 }
 

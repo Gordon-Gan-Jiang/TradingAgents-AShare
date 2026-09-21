@@ -27,6 +27,9 @@
 - **新增 L2 统一工具注册表** `tradingagents/tools/`：`ToolSpec` / `ToolResult` 单一来源；19 个既有 `@tool` 登记并迁移；LangChain 与 MCP 两种适配器从同一份注册表生成
 - **新增 L3 意图三档路由**：轻（数据问答，<5s）/ 中（研判问答，10-30s）/ 重（深度分析，沿用现有管道）。不可靠时降级到**中档而非重档**
 - **新增对话 Agent 与会话持久化**：tool-calling loop（工具轮数上限 ≤4）+ `POST /v1/chat` **SSE 流式回答**（回答文本 + 工具轨迹 + 判定卡片事件）；新增 `chat_conversations` / `chat_messages` 表
+- **新增回答证据锚定链路**：正文由结构化 `claims[]` + `refs[]` 渲染而非自由书写；机械校验器比对引用与数值（含单位归一与日期），**未溯源的数值断言不得出门**；数据未覆盖的维度必须显式声明；无工具可支撑的问句必须拒答。**不依赖提示词自律**——本仓库已有一次「要求了但没检查」的先例（`analyst_structured.py` 的 evidence anchor 只有提示词要求、全仓库零校验器）
+- **新增组合级批量工具**：`signal_washout_probe_batch` —— 让「我持仓里哪只最危险」在 1 次调用内可答（逐只调用需 30 次，任何轮数上限都装不下）
+- **新增能力**：HITL 升级**提议**（替代 D3 原本的「绝不升级」）、主动追问（不得按空仓假设回答）、行动**提议**（转成已有预警/定时任务，需用户显式确认）
 - **新增领域探针 `signal_washout_probe`**：输出**四态判定**（洗盘 / 派发 / 趋势破坏 / 证据不足）+ 置信度 + 逐项证据分解 + **证伪条件**；LLM 只做表达，**不得改动 verdict 与 confidence**
 - **新增 `signal_hold_or_exit_probe`**：结合已有持仓（`trade_ledger` / `exit_engine_service`）回答「还能不能拿」
 - **新增 MCP 出口 `/mcp`**：`streamable-http` transport，复用现有 `UserTokenDB` API Token 鉴权与用户隔离；只暴露 `signal_*` / `data_*` / `plan_*`，**不暴露 `pipeline_*`**（分钟级任务不适合同步工具）
@@ -45,6 +48,7 @@
 - `mcp-egress`: MCP server 挂载、工具白名单、API Token 鉴权与用户隔离、审计
 - `signal-calibration`: 判定落库、T+3/T+5 回填、维度判别力统计、权重校准与版本切换（含离线回放 / 前瞻积累的权限分离与最小样本闸门）
 - `architecture-guardrails`: 分层依赖方向、信号层纯函数性、显式组合与显式注入、adapter 隔离传输、Protocol 扩展点、新路由不进入口模块、**「新增功能不修改旧文件」的可验证判据**
+- `answer-grounding`: 证据完备性（`ToolResult.evidence` 覆盖 `data` 全部标量 + `Coverage` 声明）、**引用式生成**（结构化 `claims[]` + `refs[]`，渲染器生成正文）、**机械校验器**（引用存在性 / 数值与所引证据一致 / 单位归一 / 日期校验）、兜底校验与 `fallback_rate`、无答案通道与拒答
 
 ### Modified Capabilities
 

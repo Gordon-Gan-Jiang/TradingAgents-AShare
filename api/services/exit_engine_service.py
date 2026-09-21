@@ -444,6 +444,7 @@ def evaluate_holding(
     trading_days_held: Optional[int] = None,
     peak_price: Any = None,
     suspended: bool = False,
+    market_state: Optional[Dict[str, Any]] = None,
 ) -> HoldingDecision:
     """对单只持仓做一次确定性退出评估。
 
@@ -628,6 +629,16 @@ def evaluate_holding(
     if plan_available and anchor_status == ANCHOR_INCOHERENT:
         constraints.append(_DIRECTION_GATE_CONSTRAINT)
 
+    # 市场侧判定作为新触发信号并入（只降级、不升级；不传则行为不变）
+    action, priority = _apply_market_state(
+        action=action,
+        priority=priority,
+        triggers=triggers,
+        reasons=reasons,
+        constraints=constraints,
+        market_state=market_state,
+    )
+
     return HoldingDecision(
         symbol=sym,
         name=nm,
@@ -652,6 +663,71 @@ def evaluate_holding(
         long_side_ok=long_ok,
         label=EXIT_DISCLAIMER,
     )
+
+
+
+def _apply_market_state(
+    *,
+    action: str,
+    priority: str,
+    triggers: List[str],
+    reasons: List[str],
+    constraints: List[str],
+    market_state: Optional[Dict[str, Any]],
+) -> tuple:
+    """把确定性判定（洗盘/派发/结构破坏）作为**新触发信号**并入退出评估。
+
+    设计边界（D17）：平台是研究工具，判定属于对他人意图的概率化推断。因此本
+    函数**只降级、不升级**——它绝不会把一个「持有」变成「清仓」，只会在市场侧
+    证据指向风险时，把「无事可做」的默认降级为「观察」，让用户去看一眼。
+
+    价格纪律（跌破止损等）优先级高于本信号：前者是客观事实，后者是推断。
+    """
+    if not market_state:
+        return action, priority
+
+    state = str(market_state.get("state") or "").strip()
+    if not state:
+        return action, priority
+
+    confidence = market_state.get("confidence")
+    version = market_state.get("signal_version") or ""
+
+    if state == "insufficient_evidence":
+        # 弃权必须显式披露：静默忽略会让用户以为「市场侧没问题」，
+        # 而实际上是没有结论
+        triggers.append("市场侧证据不足（insufficient_evidence）：本次未给出方向性判定")
+        reasons.append("市场行为维度未形成结论，退出判断仅基于价格纪律与计划锚点")
+        return action, priority
+
+    label = {
+        "washout": "洗盘（震仓）",
+        "distribution": "派发（出货）",
+        "trend_break": "趋势破坏",
+    }.get(state, state)
+    suffix = f"，置信 {confidence}" if isinstance(confidence, (int, float)) else ""
+    triggers.append(f"市场侧判定 {state}（{label}{suffix}）")
+    reasons.append(
+        f"确定性判定为{label}{suffix}；该结论为概率化推断，请结合失效条件观察"
+    )
+
+    if market_state.get("daily_only"):
+        constraints.append("该判定仅基于日线数据（缺少分时承接证据），置信度已相应限制")
+
+    falsifiers = market_state.get("falsifiers") or []
+    descriptions = [
+        str(f.get("description") or f) if isinstance(f, dict) else str(f)
+        for f in falsifiers
+        if f
+    ]
+    if descriptions:
+        constraints.append("失效条件：" + "；".join(descriptions[:3]))
+
+    if state in ("distribution", "trend_break") and action == ACTION_HOLD:
+        # 只降级到「观察」：从「无需操作」到「值得看一眼」
+        return ACTION_WATCH, PRIORITY_MEDIUM if priority == PRIORITY_LOW else priority
+
+    return action, priority
 
 
 def _plan_conditions(plan: Optional[Dict[str, Any]]) -> List[str]:
@@ -694,6 +770,25 @@ def _plan_int(value: Any) -> Optional[int]:
 # --------------------------------------------------------------------------- #
 
 
+def exit_engine_positions(db: Session, *, user_id: str) -> List[Any]:
+    """该用户用于退出评估的持仓行。
+
+    单独暴露是为了让路由层能取到「退出评估实际看的是哪些标的」——若路由自己
+    再拼一次查询，两处口径迟早分叉（例如一边过滤了停牌、另一边没有）。
+    """
+    if not user_id:
+        return []
+    try:
+        return (
+            db.query(ImportedPortfolioPositionDB)
+            .filter(ImportedPortfolioPositionDB.user_id == user_id)
+            .all()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ExitEngine] 读取持仓失败 user=%s: %s", user_id, exc)
+        return []
+
+
 def evaluate_portfolio(
     db: Session,
     *,
@@ -701,26 +796,20 @@ def evaluate_portfolio(
     quotes: Optional[Dict[str, Any]] = None,
     today: Optional[str] = None,
     peak_price_provider: Optional[Callable[[str], Any]] = None,
+    market_states: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[HoldingDecision]:
     """对该用户全部导入持仓给出退出纪律信号。
 
     ``quotes`` 为空时自动取实时行情；无行情的标的会落到"观察/停牌"分支而不是被丢掉。
     ``peak_price_provider`` 用于外部注入可靠峰值（如自高点统计表），默认不传——
     没有可靠数据就不做移动止盈判断。
+    ``market_states`` 是按标的索引的确定性判定（洗盘/派发/结构破坏）。传入时
+    会作为附加触发信号并入每只持仓的评估；不传则行为与之前逐字一致。
     """
     if not user_id:
         return []
 
-    try:
-        rows = (
-            db.query(ImportedPortfolioPositionDB)
-            .filter(ImportedPortfolioPositionDB.user_id == user_id)
-            .all()
-        )
-    except Exception as exc:  # 数据库异常也不能让持仓页整页挂掉
-        logger.warning("[ExitEngine] 读取持仓失败 user=%s: %s", user_id, exc)
-        return []
-
+    rows = exit_engine_positions(db, user_id=user_id)
     if not rows:
         return []
 
@@ -749,6 +838,7 @@ def evaluate_portfolio(
                 quotes=quotes,
                 today=ref_day,
                 peak_price_provider=peak_price_provider,
+                market_state=(market_states or {}).get(_clean_symbol(row.symbol)),
             )
         except Exception as exc:
             # 单只标的失败只跳过自己，组合视图必须能出结果
@@ -774,6 +864,7 @@ def _evaluate_row(
     quotes: Dict[str, Any],
     today: str,
     peak_price_provider: Optional[Callable[[str], Any]] = None,
+    market_state: Optional[Dict[str, Any]] = None,
 ) -> HoldingDecision:
     sym = _clean_symbol(getattr(row, "symbol", ""))
     quote = _normalize_quote(quotes.get(sym) or quotes.get(getattr(row, "symbol", "")))
@@ -806,6 +897,7 @@ def _evaluate_row(
         today=today,
         trading_days_held=days_held,
         peak_price=peak,
+        market_state=market_state,
         suspended=bool(quote.get("suspended")),
     )
 

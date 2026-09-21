@@ -66,3 +66,18 @@ Every routing decision SHALL be recorded with its tier, the signals used, the cl
 #### Scenario: Tier distribution observable
 - **WHEN** routing records are queried over a period
 - **THEN** the tier distribution MUST be retrievable so that runaway `heavy` usage is detectable
+
+### Requirement: 多标的问句不得丢标的
+The system SHALL treat a message that names several explicit codes as a multi-instrument turn and SHALL judge every named instrument.
+
+#### Scenario: 两个代码的比较问句
+- **WHEN** 用户提交「600519 和 300750 哪个好」
+- **THEN** 系统 MUST 解析出两个标的并走批量判定，MUST NOT 只保留第一个
+
+#### Scenario: 逐只结论与比较
+- **WHEN** 回合涉及多只标的
+- **THEN** 回答 MUST 逐只给出结论再作比较，且 MUST NOT 把某一只的结论套到另一只上
+
+#### Scenario: 名称歧义仍要追问且列出候选
+- **WHEN** 用户用名称提到两只（如「茅台和宁德时代哪个好」）但未写代码
+- **THEN** 系统 MUST 追问选哪一只，且追问 MUST 列出已解析出的候选代码

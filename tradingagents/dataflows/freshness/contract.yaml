@@ -81,3 +81,28 @@ realtime_quotes:
   criticality: important
   grace_minutes: 0
   intraday_only: true
+
+# --- 对话式研判引入的源 ---------------------------------------------------
+# 分时承接是判定「下跌中有没有人接」的唯一来源，但它的可得性依赖接口与
+# 交易日：盘中/盘后尚未落定、或接口不提供历史分钟数据时都拿不到。
+# 因此按条件日度处理，缺失不算 stale（不算「数据过时」），由信号层显式
+# 报告 unavailable —— 「拿不到」与「拿到了但旧」是两种不同状态。
+intraday_bars:
+  category: conditional_daily
+  criticality: important
+  grace_minutes: 0
+  anchor_field: request_date
+  empty_ok: true
+
+# 筹码分布随日线更新，且只在交易日结束后才稳定。
+chip_distribution:
+  category: calendar_anchored
+  criticality: important
+  grace_minutes: 120
+  anchor_field: last_row_date
+
+# 个股新闻：事件型，只在窗口内判定新鲜度，不参与交易日锚点比较。
+symbol_news:
+  category: event_driven
+  criticality: informational
+  freshness_window_hours: 72

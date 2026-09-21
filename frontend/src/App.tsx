@@ -8,6 +8,7 @@ import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 import Portfolio from './pages/Portfolio'
 import TrackingBoard from './pages/TrackingBoard'
+import Judgement from './pages/Judgement'
 import Recommendations from './pages/Recommendations'
 import RecommendationInsights from './pages/RecommendationInsights'
 import QualityInsights from './pages/QualityInsights'
@@ -50,6 +51,7 @@ function App() {
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/tracking-board" element={<TrackingBoard />} />
                   <Route path="/analysis" element={<Analysis />} />
+                  <Route path="/judgement" element={<Judgement />} />
                   <Route path="/mainline" element={<Mainline />} />
                   <Route path="/model-profiles" element={<ModelProfiles />} />
                   <Route path="/reports" element={<Reports />} />

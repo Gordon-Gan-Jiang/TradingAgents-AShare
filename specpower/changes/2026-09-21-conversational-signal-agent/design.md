@@ -158,6 +158,8 @@ class ToolResult:
 
 **Rationale（为什么必须向下降级）：** 用户提交后长时间等待的代价高于得到一个「中等深度但立刻可读」的判断；且重档成本是 100×，误升级的代价不可逆。这条规则同时防止路由层成为新的成本黑洞。
 
+**与 D21 的关系（澄清，非矛盾）：** 本条的「绝不升级」约束的是**路由层不得静默升级**。**Agent 循环层**可以向用户**提议**升级并等待确认（见 D21 ①）——提议有明确告知与用户同意，与静默升级是两件事。
+
 ---
 
 ### D4: 方向权在信号层，表达权在 LLM
@@ -631,6 +633,115 @@ test_same_pattern_different_position_differs()  # D5 核心不变量
 
 ---
 
+### D20: 证据锚定必须由校验器强制，而非提示词约束
+
+**Options considered:**
+
+- A. 沿用现有做法——提示词要求「禁止编造数字」「value 必须能在上文检索到」
+- B. 事后用 LLM 自查（让另一个模型判有没有编造）
+- C. **引用式生成 + 机械校验器**：证据项带稳定 ID，模型输出结构化 `claims[]` 与 `refs[]`，校验器比对引用与数值
+
+**Chosen:** C
+
+**Rationale（这不是理论担忧，平台已经失败过一次）：** `agents/utils/analyst_structured.py:28,30,38` 的 `ANALYST_JSON` 提示词早已写明 evidence anchor 的 `value`「必须逐字拷贝自上文工具数据（禁止编造数字）」，但 `:67-81` 的实际代码只做 `f"{field}={value}"` 字符串拼接——**全仓库检索 anchor 校验逻辑零命中**。这是**格式化，不是校验**。
+
+而本仓库自己的规范文档已对这类做法下过结论（`specpower/changes/archive/2026-06-27-data-freshness-contract/design.md:169-172`，D8 Confidence 硬封顶）：选项 A「仅 prompt 建议 — LLM 可能忽略」被评估后**否决**，选择「写库硬 clamp + prompt 约束」双轨。**同一个教训必须在对话层被应用，而不是重演。**
+
+B 被否决的理由：用 LLM 校验 LLM 会引入第二个不可复现的判定源，且校验本身无法被单测。
+
+**Normative（L1 证据完备性）：** `ToolResult.evidence` 必须覆盖 `data` 中**每一个可陈述标量**（值 + 单位 + `source_key` + `as_of`），而不仅是参与评分的观测；并新增 `Coverage` 声明 `available` / `unavailable` 维度。理由：若「现价 1850」不在证据集内，校验器就无法判定其真伪。
+
+**Normative（L2 引用式生成）：** 模型输出的正文**必须由结构化 `claims[]` 渲染**，每条 claim 携带 `refs[]`；另含 `verdict_ref`（必须指向本轮探针）、`unavailable[]`（显式出口）、`falsifier_observed`。证据项在提示中以稳定 ID（`E1`/`E2`…）呈现。渲染与流式下发分离——`answer.delta` 仍逐 claim 流式，不牺牲体验。
+
+**Normative（L3 校验器，机械、可单测、零 LLM）：**
+
+```
+① 每条 claim 必须至少一个 refs，且每个 ref 必须存在于本轮证据集
+② claim 中的每个数值断言必须匹配【该 claim 所引证据】的标量集合
+   —— 不是"本轮任意证据里找得到就算过"（否则可引 E1 说 E2 的数）
+③ 单位归一：3200万 / 0.32亿 / 32000000 视为同一值
+④ 相对容差 2%（覆盖四舍五入，避免把 3204.7万→3200万 误判为编造）
+⑤ 百分比 / 比率同样是数值断言（"缩量至 54%" 须能匹配 0.54 或 54%）
+⑥ 日期断言（"昨天"/"3月3日"）必须落在证据 as_of 集合内
+⑦ verdict_ref 必须指向本轮探针结果
+→ 任一条失败：重写一次；再失败则降级为「证据不足」回答
+```
+
+**Normative（L4 兜底）：** 结构化输出会失败（部分厂商 / thinking 模型对 schema 遵循度不稳），因此两级处理：解析成功 → L3 全量校验；解析失败 → 降级为自由文本 + regex 数值后置校验（覆盖弱于 L3），并**记录 `fallback_rate`**。该比率是"提示词或 schema 需调整"的信号，**不是可接受的常态**。
+
+**Normative（L5 无答案通道）：** `coverage.unavailable` 中的维度**必须**在回答中显式声明「数据未覆盖」，**不得**用「暂无明显影响」这类模糊表述掩盖。无任何工具可支撑的问句（如「明天会涨吗」）**必须拒答并说明缺什么**——这是正确行为，不是失败。继承 `graph/signal_processing.py` 的弃权文化。
+
+---
+
+### D21: 自主性放在控制流，不放在事实与方向
+
+**Options considered:**
+
+- A. 提高 Agent 自主性（自由 ReAct、自由生成正文）
+- B. 压制自主性（固定工作流、模板化回答）
+- C. **切分——控制流自主，事实与方向不自主**
+
+**Chosen:** C
+
+**Rationale:** **Agent 自主性与「不乱说」是反向的**：越自主，自由生成面越大。A 会让幻觉面随自主性线性增长；B 会退化成"能回答但不好用"。C 让两者同时成立。
+
+| 维度 | Agent 自主 ✅ | Agent 不自主 ❌ |
+|---|---|---|
+| 控制流 | 选哪些工具、是否追问、是否重查、何时停止、是否**提议**升级 | — |
+| 事实 | — | 数值、来源、`as_of`、coverage（D20） |
+| 方向 | — | `verdict_state`、`confidence`（D4） |
+| 行动 | 提议（propose） | 执行（需用户显式确认） |
+
+**让「自动对话」真正成立的四条新增能力（normative）：**
+
+**① HITL 升级提议** —— D3 原为「绝不升级到重档」，过刚性。修正为：Agent 可以**提议**升级（「这个问题需要完整多分析师研判，要启动吗？约 3–5 分钟」）并等待确认。**提议 ≠ 静默升级**，成本仍不可逆地受控，但体验不再受阻。
+
+**② 主动追问而非假设** —— 「还能不能拿」而该股不在持仓中 → 必须问「你持有吗？成本多少？」，**不得**按空仓假设回答。路线图记录的 99.5% 盲评正是这个病。
+
+**③ 批量工具（关键）** —— 「我持仓里哪只最危险」有 30 只，逐只调用 = 30 次调用，**任何轮数上限都装不下**：
+
+```
+❌ signal_washout_probe(symbol)          × 30  → 超预算，Agent 只能中途放弃
+✅ signal_washout_probe_batch(symbols[]) × 1   → 1 次调用，N 只评估，返回排序
+```
+
+**批量变体不是优化项，是让组合级问句可回答的前提**；且它保持 L1 完备性（每只的 evidence 都在同一个 `ToolResult` 内）。
+
+**④ 行动工具** —— 「帮我盯着，跌破 180 告诉我」的正确响应是**转成已有的预警/自选/定时任务**（`tracking_price_alert_service` / `watchlist` / `scheduled_service` 均已存在），而不是口头答应。按 D10，MCP 面 V1 不开放写操作；**产品内对话可提议行动，需用户显式确认（两步）并记入会话**。
+
+---
+
+### D22: 「不能乱说」的可测量定义
+
+**Normative：** 无量化的"不乱说"只是愿望。必须区分**由构造保证**与**由监控校准**两类：
+
+| 指标 | 目标 | 性质 |
+|---|---|---|
+| **未溯源数值断言率** | **必须为 0** | 由 D20 校验器**构造保证**（拒绝即不出门），不是靠监控发现 |
+| 校验拒绝 / 重写率 | 监控趋势 | 高 → 提示词或工具输出有问题 |
+| 结构化解析 `fallback_rate` | 监控趋势 | 高 → schema 或模型选择有问题 |
+| 弃权率 | **30%–50%**（D14） | 从不弃权 = 装饰性探针 |
+| 覆盖率声明率 | 应接近 100% | 有 `unavailable` 就必须声明 |
+
+**Rationale:** 把"构造保证"与"监控校准"混为一谈，就会退化为「我们加了提示词，应该没问题」——正是 D20 所记录的先例。**未溯源率靠构造消灭，其余靠监控校准。**
+
+---
+
+### D23: 因果类问句需要事实来源与覆盖声明
+
+**Options considered:**
+
+- A. 只接量价/资金探针，让模型自由解释下跌原因
+- B. **接入已有新闻与公告能力，并要求 coverage 声明**
+
+**Chosen:** B
+
+**Rationale:** 「为什么今天跌」若只有量价资金数据，模型**必然会编原因**。而平台已有事实来源且无需新建：`get_news` / `get_global_news`（`agents/utils/news_data_tools.py`）、`GET /v1/announcements/latest`（`api/main.py:7547` + `api/announcements.json`）、龙虎榜与资金流工具。
+
+**Normative：** 因果类工具（新闻 / 公告 / 龙虎榜）必须纳入 `Coverage`；其不可得时，回答**必须**声明「该维度未覆盖」，**禁止**推断原因。Agent 只能就 `coverage.available` 的维度作答。
+
+---
+
 ## Risks / Trade-offs
 
 | 风险 | 缓解 |
@@ -651,6 +762,12 @@ test_same_pattern_different_position_differs()  # D5 核心不变量
 | **持仓数据为空**：`trade_ledger` 实测 **0 行**，持仓仅有静态导入快照（无成交流水、成本不随加减仓更新） | D17 把持仓侧接线拆到 P0.5，作为硬前置；P0 阶段明确按 `unknown` 处理，**不假装持仓感知已通** |
 | **分层腐化**：新代码逐层退化为第二个 9591 行 `main.py` | D19 的四条硬约束 + `tests/test_architecture_boundaries.py` 把边界变成会失败的测试 |
 | **全局 config 串味**：`dataflows/config.py` 的 `global _config` 在并发下可能跨请求污染 | 新链路不碰它；权重 / 端口 / 时钟全部显式传参，由组合根注入 |
+| **正文级幻觉**：`VerdictGuard` 只守 verdict / confidence，正文里的数字、日期、因果无人守；而 verdict 只有一个 token，**乱说全在正文** | D20 五层 grounding：证据完备性 → 引用式生成 → 机械校验器 → 兜底校验 → 无答案通道；**未溯源数值断言率由构造保证为 0** |
+| **重演「要求了但没检查」**：`analyst_structured.py` 提示词早已要求「禁止编造数字」，但全仓库零校验器（只做字符串拼接） | D20 以校验器替代提示词约束；理由已记录在案（本仓库 freshness D8 曾评估并否决「仅 prompt 建议」） |
+| **结构化输出不被遵守**：thinking 模型 / 部分厂商 schema 遵循度不稳 | D20 L4 两级兜底 + `fallback_rate` 监控；该比率是需调整的信号，**不是可接受的常态** |
+| **自主性放大幻觉面** | D21 切分：控制流自主，事实与方向不自主；行动只提议不执行 |
+| **组合级问句无法回答**：逐只调用 30 次，任何轮数上限都装不下 | D21 ③ **批量工具**（`signal_washout_probe_batch`）——1 次调用 N 只评估；这是可回答性的前提，非优化项 |
+| **因果类问句被迫编原因**：只有量价资金数据时，模型必然编下跌理由 | D23 接入已有 `get_news` / `/v1/announcements/latest` 并纳入 `Coverage`；未覆盖必须声明，**禁止推断原因** |
 
 ---
 
@@ -697,3 +814,102 @@ test_same_pattern_different_position_differs()  # D5 核心不变量
 
 **这不是"没想清楚"，而是刻意把"必须由数据决定"与"可以现在决定"分开**——前者的先验值带 `signal_version` 上线，被数据推翻时走 D12 的版本化激活。
 
+---
+
+## Implementation Status（实施记录 · 据实）
+
+> 本节记录**实际落地与设计的偏差**，供后续 review 与接手者判断「哪些是刻意的、哪些是欠账」。
+> 与仓库既有文档同样遵循「不给出未经实测的数字」的纪律。
+
+### 已交付（对应 D1–D23）
+
+| 层 | 落地位置 | 状态 |
+|---|---|---|
+| L1 确定性信号层 | `tradingagents/signals/`（15 个模块：8 维度 + 位置调制 + 探针 + 权重 + 兑现 + 回放 + 标定） | ✅ 197 个单测 |
+| L0 回答锚定 | `tradingagents/grounding/`（校验器 / 数值归一 / 渲染 / 文本兜底） | ✅ 42 个单测 |
+| L2 工具层 | `tradingagents/tools/`（注册表 / 契约 / 双适配器 / 信号 / 新闻 / **19 个既有工具的声明表**） | ✅ 85 个单测 |
+| L3 意图路由 | `tradingagents/agent/routing.py` | ✅ 29 个单测 |
+| 对话 Agent | `tradingagents/agent/{events,middleware,loop,model,actions,repository}.py` | ✅ 73 个单测 |
+| 持久化与校准 | `api/database.py` 4 张表、`signal_service` / `signal_outcome_service` / `signal_replay_service` | ✅ 40 个单测 |
+| HTTP 面 | `api/routers/{signals,chat}.py`（首次引入路由分层）、`api/dependencies.py` | ✅ 12 个单测 |
+| MCP 出口 | `api/mcp_server.py`（传输中立核心 + v2 传输挂载） | ✅ 已实现，23 个单测（含真实 uvicorn + 真实 MCP 客户端端到端） |
+| 前端 | `verdictPresentation` / `chatStream` / `VerdictCard` / `ConversationalPanel` / `/judgement` 页 | ✅ 39 个单测 + 构建通过 |
+| 架构护栏 | `tests/test_architecture_boundaries.py`（AST 扫描 import 与时钟调用） | ✅ 165 个参数化用例 |
+| 端到端验收 | `tests/test_acceptance_conversational_signal_agent.py` | ✅ 7 个用例 |
+
+### 与设计的偏差（刻意，非欠账）
+
+1. **模块位置**：D13 原定 `api/services/intent_router.py` 等放在应用层。实际把
+   编排逻辑放在 `tradingagents/agent/`，应用层只做接线。理由：D19 的依赖方向
+   要求编排逻辑不依赖 `api/`，否则无法在没有数据库与 FastAPI 的条件下测试。
+   收益是可测性——本轮 73 个 Agent 用例全部离线运行。
+2. **新增 `grounding/fallback.py` 弱校验路径**：设计只写了结构化严格路径。
+   实现时发现「结构化解析失败 → claims 为空 → 引用校验器**空过**」是一个真实
+   漏洞（未校验的散文能出门），因此补了文本数值后置校验并标记 `weak_verification`。
+3. **新增 `agent/actions.py`**：D21 的四条能力（HITL 提议 / 追问 / 批量 /
+   行动提议）中，行动提议需要独立模块承接「识别 → 确认 → 执行」三步。
+4. **新增 `signals/outcome.py` 与 `signals/replay.py`**：D12/D15 只描述了协议，
+   实现时把「兑现定义」与「标定协议」都写成纯函数——它们必须可单测，否则
+   校准结论无法被复核。
+
+### 实测到的依赖与 API 偏差（据实记录）
+
+1. **MCP SDK 是 v2（2.2.0），不是设计时假设的 v1**：
+   * `FastMCP` → `MCPServer`（`mcp.server.mcpserver`）
+   * 客户端 `streamablehttp_client` → `streamable_http_client`，且 headers 由
+     `create_mcp_http_client` 承载
+   * 结果字段为 snake_case（`is_error` / `structured_content`）
+   * **MCP SDK 从函数签名推导工具 schema**：`def handler(**kwargs)` 会推导出
+     无参数工具，任何调用都返回参数校验错误。因此 `_make_handler` 按 `ToolSpec`
+     的 JSON Schema **动态生成显式签名**——schema 仍只有一份来源。
+2. **挂载端点必须带尾斜杠**：FastAPI 对挂载点的无尾斜杠 POST 返回 405（请求
+   不进入子应用），而 `/mcp/` 正常。已在代码与文档中固化 `/mcp/`，并加 308
+   重定向兼容 `/mcp`。
+3. **子应用内部路径不能与挂载前缀相同**：`streamable_http_path="/mcp"` 挂在
+   `/mcp` 下会变成双重前缀（实际端点 `/mcp/mcp`）。已设为 `"/"`。
+4. **`pydantic` 被升级**（2.11.7 → 2.13.5，随 MCP SDK 依赖解析）。已跑全量回归
+   确认既有 1817 个用例不受影响。
+
+### 审计与修复记录（第 6–7 轮）
+
+第 6 轮做了**主动偷懒审计**，发现 10 项虚报与 10 项实现妥协，第 7 轮**全部修复**
+（每项先写失败测试再实现）。审计与修复的完整清单见 `tasks.md` 的「审计记录」
+与「修复记录」两节。这里只记三条对后续维护最有价值的结论：
+
+1. **偷懒集中在"最后一公里"**：算法与护栏层（信号层/校验层）经得起查——
+   位置是乘法调制、margin 是比值、弃权是结构性门控，都有"换实现就不成立"的断言。
+   而**跨边界的接线**（事件→前端、契约→工具、元数据→执行）倾向于"声明即完成"：
+   字段写进 dataclass、方法写进客户端、表建好，就算做完。
+2. **声明而不执行比不声明更糟**：`latency_budget_ms` / `requires` / `freshness_sources`
+   四个字段曾只赋不读，让 review 以为能力存在。修复后每个字段都有断言证明
+   "它真的改变了行为"。
+3. **最容易伪造的是"可用性声明"**：`_coverage_for` 曾恒返回 `available`，
+   而 vendor 失败时返回的是错误字符串。修复的关键不是加判断，而是确立
+   **"未验证一律标 unknown，绝不默认 fresh"** 这条纪律——它同时修掉了
+   `ToolResult.freshness` 恒为空的问题。
+
+### 实施中发现的既有缺陷（不由本变更引入，已据实记录）
+
+* `test_api_smoke.py::TestWatchlistAddEndpoint` 两个用例**单独运行必失败**
+  （依赖全局股票映射缓存），全量运行时因其他测试预热缓存而通过——
+  **掩盖而非修复**，属既有测试隔离缺陷。
+* `tradingagents/dataflows/config.py` 的 `global _config` 仍存在并发串味风险。
+  新链路不碰它（权重/端口/时钟全部显式传参），但既有链路未改。
+
+### 未完成与阻塞
+
+| 项 | 原因 | 影响 |
+|---|---|---|
+| 分时/筹码历史深度实测（1.8） | ⛔ 沙箱内 akshare 返回 `ConnectionError` | golden set（3.7）依赖它；但不影响前瞻路径可用 |
+| ~~MCP 传输挂载~~ | ✅ 已完成（本轮）。**SDK 实测版本偏差已记录**（见下） | — |
+| ~~`interface.py` vendor 路由（1.3）~~ | ✅ 已完成：新增 `cn_research_data` 类别（结构化日线/分时/筹码/资金流/板块基准/新闻），取数实现搬入 provider 层，应用层统一经 `route_to_vendor` 调用以共享三级降级链 | 新增 11 个路由测试（含回退链验证） |
+| ~~持仓数据前置（13.x）~~ | ✅ 只读解析与链路接线已完成（台账优先 → 导入快照 → 显式 unknown；判定作为附加触发信号接入退出引擎）。**仍未建台账录入入口**——`trade_ledger` 实测 0 行，成本与 T+1 可卖数量仍依赖静态导入快照 | 未提供持仓时由覆盖声明**强制回答披露**，不暗示持仓感知已通 |
+| token 级成本实测（14.2） | 需联网跑批 | 已测**架构保证的代理量**（模型/工具调用次数），**不当作成本上报** |
+
+### 验收证据
+
+```
+后端：1817 passed, 7 failed（全部为既有基线失败，经「移除新增包后重跑」验证）
+前端：54 passed（6 个文件）
+构建：tsc --noEmit 通过；vite build 通过
+```

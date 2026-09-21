@@ -7,7 +7,15 @@ fetch_* 函数拿结构化 DataFrame，不走文本工具。
 from langchain_core.tools import tool
 from typing import Annotated
 
-from tradingagents.dataflows.interface import route_to_vendor
+from tradingagents.tools.data import data_tool_impl as _data_tool_impl
+
+def _delegate(name: str):
+    """委托到工具层的唯一实现（design D1：能力定义只有一份）。
+
+    本模块只保留 `@tool` 包装与 docstring——它们是分析图的接口面，
+    行为必须逐字不变；取数逻辑与参数顺序收敛到 `tools/data.py` 的声明表。
+    """
+    return _data_tool_impl(name)
 
 
 @tool
@@ -15,7 +23,7 @@ def get_board_spot(
     sector_type: Annotated[str, "板块类型：industry=行业板块, concept=概念板块"],
 ) -> str:
     """获取 A 股板块涨幅榜（行业/概念），返回板块名称、当日涨跌幅、换手率、上涨/下跌家数、领涨股。"""
-    return route_to_vendor("get_board_spot", sector_type)
+    return _delegate("get_board_spot")(sector_type)
 
 
 @tool
@@ -24,7 +32,7 @@ def get_board_rank(
     period: Annotated[str, "资金流周期：1d=今日, 3d=3日, 5d=5日, 10d=10日"],
 ) -> str:
     """获取板块资金流排行（行业/概念），返回净流入排名，用于判断资金聚焦方向。"""
-    return route_to_vendor("get_board_rank", sector_type, period)
+    return _delegate("get_board_rank")(sector_type, period)
 
 
 @tool
@@ -33,7 +41,7 @@ def get_board_hist(
     sector_type: Annotated[str, "板块类型：industry=行业板块, concept=概念板块"],
 ) -> str:
     """获取板块历史行情（近60日涨跌幅），用于判断主线持续性与趋势斜率。"""
-    return route_to_vendor("get_board_hist", board_name, sector_type)
+    return _delegate("get_board_hist")(board_name, sector_type)
 
 
 @tool
@@ -42,4 +50,4 @@ def get_board_cons(
     sector_type: Annotated[str, "板块类型：industry=行业板块, concept=概念板块"],
 ) -> str:
     """获取板块成分股列表（按当日涨幅排序），用于主线内选股。"""
-    return route_to_vendor("get_board_cons", board_name, sector_type)
+    return _delegate("get_board_cons")(board_name, sector_type)

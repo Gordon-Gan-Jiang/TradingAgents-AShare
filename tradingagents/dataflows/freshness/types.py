@@ -43,6 +43,10 @@ class FreshnessMeta:
     lag_note: str | None = None
     lag_trading_days: int | None = None
     empty_ok: bool = False
+    # 通用说明：给「为什么是这个 status」一个落点。`unknown` 尤其需要它——
+    # 否则下游只看到「未知」，无从判断是没验证、还是契约里没这个源。
+    # 默认 None，`to_dict()` 会丢弃 None，因此对既有 freshness 路径零影响。
+    note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {}

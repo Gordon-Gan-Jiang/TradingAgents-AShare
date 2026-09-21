@@ -33,6 +33,9 @@ dependencies = [
     "cryptography>=45.0.3",
     "json-repair>=0.44.0",
     "markdown>=3.7",
+    # MCP 出口：把平台能力暴露给外部 Agent（Claude / Cursor / DSH）。
+    # 传输中立核心（api/mcp_server.py）不依赖它，只有 streamable-http 挂载需要。
+    "mcp>=1.0.0",
 ]
 
 [project.scripts]

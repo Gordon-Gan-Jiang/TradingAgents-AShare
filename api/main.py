@@ -1203,7 +1203,8 @@ async def lifespan(app: FastAPI):
     _auto_daily_ops_task = asyncio.create_task(_auto_daily_ops_loop())
     _strategy_feedback_task = asyncio.create_task(_strategy_feedback_loop())
     _auto_t1_eval_task = asyncio.create_task(_auto_t1_eval_loop())
-    yield
+    async with run_mcp_lifespan(_mcp_asgi):
+        yield
     _log("Shutting down: Cleaning up resources...")
     if _stock_map_warm_task:
         _stock_map_warm_task.cancel()
@@ -1267,6 +1268,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 对话式研判：新增端点走路由分层，不再写进入口模块。
+# 由 tests/test_architecture_boundaries.py 强制「新端点不得声明在此文件」。
+from api.routers import chat as _chat_router  # noqa: E402
+from api.routers import signals as _signals_router  # noqa: E402
+
+app.include_router(_signals_router.router)
+app.include_router(_chat_router.router)
+
+# MCP 出口：挂载 ASGI 应用，并把它的 session manager 交给主应用 lifespan。
+# FastAPI **不会**运行被挂载子应用的 lifespan，因此必须显式合并——否则
+# 端点连得上但会话初始化失败（见 api/mcp_server.py 的说明）。
+from api.mcp_server import mount_mcp, run_mcp_lifespan  # noqa: E402
+from api.routers import mcp as _mcp_router  # noqa: E402
+
+# 重定向必须**先**注册：挂载点与路由同路径时，先匹配者生效
+app.include_router(_mcp_router.router)
+def _mcp_registry_provider():
+    """惰性提供工具注册表：import 期不触网，且应用层配置在调用时已就绪。"""
+    from api.services import chat_service
+
+    return chat_service.build_registry(None)
+
+
+_mcp_asgi = mount_mcp(app, registry_provider=_mcp_registry_provider)
 
 _executor = ThreadPoolExecutor(max_workers=int(os.getenv("TA_MAX_WORKERS", "2")))
 # 登录/健康检查专用线程池，避免被 akshare 等同步任务占满默认 anyio 线程池。
@@ -8662,8 +8688,26 @@ def get_exit_advice(
     并已考虑 T+1 可卖数量、涨跌停不可成交与停牌。仅为纪律提示，不构成投资建议。
     """
     from api.services import exit_engine_service
+    from api.services.exit_engine_service import exit_engine_positions
 
-    decisions = exit_engine_service.evaluate_portfolio(db, user_id=current_user.id)
+    # 市场侧判定作为**附加触发信号**并入退出评估（只降级、不升级）。
+    # 取不到判定时传空字典，行为与之前逐字一致。
+    market_states: Dict[str, Any] = {}
+    try:
+        from api.services import signal_service as _signal_service
+
+        symbols = [row.symbol for row in exit_engine_positions(db, user_id=current_user.id)]
+        if symbol:
+            symbols = [symbol.strip().upper()]
+        market_states = _signal_service.latest_market_states(
+            user_id=current_user.id, symbols=symbols
+        )
+    except Exception as _exc:  # noqa: BLE001 — 判定缺失不得影响退出建议
+        _log(f"[ExitAdvice] market_states unavailable: {_exc}")
+
+    decisions = exit_engine_service.evaluate_portfolio(
+        db, user_id=current_user.id, market_states=market_states
+    )
     if symbol:
         target = symbol.strip().upper()
         decisions = [d for d in decisions if (d.symbol or "").upper() == target]

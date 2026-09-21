@@ -1870,3 +1870,236 @@ export interface ExitAdviceResponse {
     }
     decisions: ExitAdviceDecision[]
 }
+
+// ---------------------------------------------------------------------------
+// 对话式研判：确定性判定、流式事件、会话与校准
+//
+// 这些类型是「回答必须有依据」在前端的落点：判定卡片只渲染结构化字段，
+// 不从正文里解析状态；未覆盖维度、失效条件、位置调制因子都必须显式呈现，
+// 而不是被折叠成一句结论。
+// ---------------------------------------------------------------------------
+
+/** 判定状态。`insufficient_evidence` 是**合法结果**（弃权），不是失败。 */
+export type VerdictState =
+    | 'washout'
+    | 'distribution'
+    | 'trend_break'
+    | 'insufficient_evidence'
+
+/** 单个证据维度的结果。 */
+export interface SignalComponent {
+    key: string
+    available: boolean
+    /** 'washout' 指向洗盘侧，'distribution' 指向派发侧，'trend_break' 为结构破坏，null 为中性 */
+    side: 'washout' | 'distribution' | 'trend_break' | null
+    magnitude: number
+    weight: number
+    raw: Record<string, unknown>
+    unavailable_reason: string | null
+}
+
+/** 证伪条件：什么情况发生，这个判定就错了。 */
+export interface SignalFalsifier {
+    observable: string
+    threshold: string
+    window_days: number
+    description: string
+    /** 该条件由哪个组件的观测推导而来（阈值可追溯，不是凭空写的数字） */
+    derived_from: string
+}
+
+/** 位置调制器。**不是**独立加权维度，而是乘在量价证据上的因子。 */
+export interface SignalModulator {
+    key: string
+    factor: number
+    raw: Record<string, unknown>
+}
+
+/**
+ * 用户在标的上的持仓（只读解析结果）。
+ *
+ * `known=false` 表示**系统不知道**你是否持有——这与「已知空仓」截然不同
+ * （后者是 `known=true, is_flat=true`）。界面必须区分二者，否则会把
+ * 「你没告诉我」渲染成「你没有持仓」。
+ */
+export interface PositionContext {
+    symbol: string
+    known: boolean
+    source: 'trade_ledger' | 'imported_snapshot' | 'none' | string
+    quantity: number | null
+    sellable: number | null
+    average_cost: number | null
+    position_pct: number | null
+    market_value: number | null
+    security_name: string | null
+    as_of: string | null
+    is_flat: boolean
+    note: string
+}
+
+/** 一次洗盘/派发判定。 */
+export interface WashoutVerdict {
+    probe: string
+    symbol: string
+    as_of: string
+    state: VerdictState
+    state_label: string
+    confidence: number
+    /** 证据分离度 = (最大质量 − 次大质量) / 总质量。用比值而非绝对分数。 */
+    margin: number
+    scores: { washout: number; distribution: number; trend_break: number }
+    /** 结构条件：分时 + 筹码可得 且 margin ≥ 阈值。不是分数阈值。 */
+    high_confidence: boolean
+    /** 仅日线数据：缺分时承接证据，置信度已被限制 */
+    daily_only: boolean
+    signal_version: string
+    /** 被触发的门控（例如缩量证据因板块换手缺失而被撤回）——必须展示，不能藏 */
+    applied_gates: string[]
+    /** 未覆盖的维度。回答层必须显式声明，不能描述为「无影响」 */
+    unavailable: string[]
+    falsifiers: SignalFalsifier[]
+    components: SignalComponent[]
+    modulator: SignalModulator | null
+    disclaimer: string
+    /** 落库后的判定 ID；未落库时为 null */
+    verdict_id: string | null
+    /** 持仓上下文。未知时也必须返回（`known=false`），不得省略——省略界面就无从提示 */
+    position_context?: PositionContext | null
+}
+
+/** 判定 + 后续实际走势（判定可回看）。 */
+export interface VerdictHistoryItem {
+    verdict_id: string
+    symbol: string
+    as_of: string
+    probe: string
+    state: VerdictState
+    state_label: string
+    confidence: number
+    margin: number
+    daily_only: boolean
+    high_confidence: boolean
+    signal_version: string
+    falsifiers: SignalFalsifier[]
+    outcomes: Array<{
+        horizon_days: number
+        ref_date: string
+        ret_pct: number | null
+        threshold_hit: boolean
+        /** 停牌/退市时为 false：既不算命中也不算未命中 */
+        evaluable: boolean
+        reason: string | null
+    }>
+}
+
+/** 校准报告。刻意把「构造保证」与「监控校准」两类指标分列。 */
+export interface CalibrationReport {
+    signal_version: string
+    sample: {
+        total: number
+        directional: number
+        abstained: number
+        by_state: Record<string, number>
+    }
+    guaranteed_by_construction: {
+        unsourced_numeric_assertion_rate: number
+        note: string
+    }
+    monitored: {
+        abstention_rate: number
+        abstention_rate_healthy_range: [number, number]
+        evaluated_sample: number
+        hit_rate: number | null
+        per_horizon: Record<
+            string,
+            { sample: number; hit: number; by_state: Record<string, { sample: number; hit: number }> }
+        >
+        note: string
+    }
+    weight_activation_gate: {
+        min_forward_verdicts: number
+        min_per_dimension_samples: number
+        satisfied: boolean
+        offline_replay_may_only: string
+    }
+}
+
+/** 会话标识（回合开始即下发，前端据此续接下一轮）。 */
+export interface ChatSessionEvent {
+    conversation_id: string
+}
+
+/** 对话回合的 SSE 事件。事件类型名即 `event:` 字段。 */
+export interface ChatAnswerDelta {
+    text: string
+}
+
+export interface ChatAnswerDone {
+    text: string
+}
+
+export interface ChatToolStart {
+    tool: string
+    arguments: Record<string, unknown>
+}
+
+export interface ChatToolDone {
+    tool: string
+    ok: boolean
+    detail: string | null
+    elapsed_ms: number
+    evidence_count: number
+}
+
+export interface ChatVerdictEvent {
+    verdict: {
+        id: string
+        probe: string
+        symbol: string
+        as_of: string
+        state: VerdictState
+        confidence: number
+        falsifiers: string[]
+        unavailable: string[]
+        daily_only: boolean
+        high_confidence: boolean
+        signal_version: string
+    }
+}
+
+export interface ChatNotice {
+    text: string
+    kind: string
+}
+
+export interface ChatErrorEvent {
+    message: string
+}
+
+export interface ChatEndEvent {
+    status: 'completed' | 'degraded' | 'cancelled' | 'failed'
+    reason: string | null
+}
+
+export interface ConversationSummary {
+    conversation_id: string
+    title: string
+    primary_symbol: string | null
+    created_at: string | null
+}
+
+export interface ConversationDetail {
+    conversation_id: string
+    primary_symbol: string | null
+    messages: Array<{
+        role: string
+        content: string
+        tier: string
+        status: string
+        verdict_id: string | null
+        tool_calls: string[]
+        /** 本轮走的是弱校验（文本数值后置校验）而非引用校验 */
+        weak_verification: boolean
+        latency_ms: number
+    }>
+}

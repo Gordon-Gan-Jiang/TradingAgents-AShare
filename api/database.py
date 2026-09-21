@@ -104,6 +104,18 @@ def init_db() -> None:
     _ensure_t1_daily_stat_schema()
 
 
+def _ensure_weight_version_schema() -> None:
+    """为既有部署补齐权重版本表（create_all 不改造已存在的表）。"""
+    with engine.begin() as conn:
+        try:
+            existing = {row[1] for row in conn.execute(text("PRAGMA table_info(signal_weight_versions)"))}
+        except Exception:
+            return
+        for column, ddl in (("is_active", "BOOLEAN DEFAULT 0"), ("per_dimension", "JSON")):
+            if column not in existing:
+                conn.execute(text(f"ALTER TABLE signal_weight_versions ADD COLUMN {column} {ddl}"))
+
+
 def _ensure_report_schema() -> None:
     """Add lightweight columns for existing SQLite deployments without migrations."""
     try:
@@ -1223,4 +1235,207 @@ class TradeLedgerDB(Base):
     __table_args__ = (
         UniqueConstraint('user_id', 'symbol', 'trade_date', 'action', 'price', 'shares',
                          name='uq_trade_ledger_dedup'),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 对话式研判：会话、消息、判定、判定结果
+#
+# 判定（signal_verdicts）刻意是**一等实体**而不是聊天消息里的一个 JSON 字段：
+# T+3/T+5 校准闭环要按 (symbol, as_of, signal_version) 检索并回填结果，埋在
+# 消息里就无法索引、无法去重、无法按维度统计判别力。
+# ---------------------------------------------------------------------------
+
+
+class ChatConversationDB(Base):
+    """一次对话会话。"""
+
+    __tablename__ = "chat_conversations"
+
+    id = Column(String(36), primary_key=True, index=True)
+    user_id = Column(String(64), index=True, nullable=False)
+    title = Column(String(200), default="", nullable=False)
+    primary_symbol = Column(String(32), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ChatTurnTraceDB(Base):
+    """一轮对话的**完整路径**：计划、每步执行、校验结论、终态。
+
+    为什么单独一张表而不是塞进 `chat_messages`：消息表是给用户看的内容，
+    trace 是给**排查与评测**看的证据。混在一起会让消息表长成几十列宽表，
+    且用户删会话时不该顺手毁掉度量数据。
+
+    为什么存 plan 与 steps 而不是只存 tool_calls：`tool_calls` 只有名字，
+    无法回答"这一步为什么慢""哪个参数导致空结果""模型看到几张证据"。
+    而 Phase 0 的全部意义就是让这些问题可被回答。
+    """
+
+    __tablename__ = "chat_turn_traces"
+
+    id = Column(String(36), primary_key=True, index=True)
+    conversation_id = Column(String(36), index=True, nullable=False)
+    user_id = Column(String(64), index=True, nullable=False)
+    # 本轮的用户问句：评测要按问句比对期望（黄金集跑分依赖它）
+    text = Column(Text, default="", nullable=False)
+    tier = Column(String(16), default="", nullable=False)
+    status = Column(String(16), default="", nullable=False)
+    # 计划：{tier, symbol, symbols, screen, planned:[{tool,args,reason}]}
+    plan = Column(JSON, nullable=True)
+    # 每步：{tool, arguments, ok, elapsed_ms, evidence_count, detail}
+    steps = Column(JSON, nullable=True)
+    tool_calls = Column(JSON, nullable=True)
+    tokens = Column(Integer, default=0, nullable=False)
+    model_calls = Column(Integer, default=0, nullable=False)
+    model = Column(String(120), default="", nullable=False)
+    latency_ms = Column(Integer, default=0, nullable=False)
+    rejected_claims = Column(Integer, default=0, nullable=False)
+    weak_verification = Column(Boolean, default=False, nullable=False)
+    verdict_id = Column(String(36), nullable=True)
+    unavailable = Column(JSON, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class ChatMessageDB(Base):
+    """会话内的一条消息。
+
+    `tool_calls` 只存摘要（工具名），不存完整工具返回：单轮完整返回可达
+    10-50KB，按 1000 轮/天估算会把年增量从 ~1.5GB 推到 ~18GB。结构化判定
+    已在 signal_verdicts 里，原始数据按需重算比存旧快照更正确（可取到修正后数据）。
+    """
+
+    __tablename__ = "chat_messages"
+
+    id = Column(String(36), primary_key=True, index=True)
+    conversation_id = Column(String(36), index=True, nullable=False)
+    user_id = Column(String(64), index=True, nullable=False)
+    role = Column(String(16), nullable=False)
+    content = Column(Text, default="", nullable=False)
+    tier = Column(String(16), default="", nullable=False)
+    model = Column(String(120), default="", nullable=False)
+    tokens = Column(Integer, default=0, nullable=False)
+    latency_ms = Column(Integer, default=0, nullable=False)
+    status = Column(String(16), default="completed", nullable=False)
+    verdict_id = Column(String(36), nullable=True)
+    tool_calls = Column(JSON, nullable=True)
+    weak_verification = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class SignalVerdictDB(Base):
+    """一次确定性探针判定的完整快照（含权重与观测，供校准重放）。"""
+
+    __tablename__ = "signal_verdicts"
+
+    id = Column(String(36), primary_key=True, index=True)
+    user_id = Column(String(64), index=True, nullable=False)
+    symbol = Column(String(32), index=True, nullable=False)
+    as_of = Column(String(10), index=True, nullable=False)
+    probe = Column(String(32), index=True, nullable=False)
+    state = Column(String(32), index=True, nullable=False)
+    confidence = Column(Integer, default=0, nullable=False)
+    margin = Column(Float, default=0.0, nullable=False)
+    contributions = Column(JSON, nullable=True)
+    modulator = Column(JSON, nullable=True)
+    falsifiers = Column(JSON, nullable=True)
+    unavailable = Column(JSON, nullable=True)
+    daily_only = Column(Boolean, default=False, nullable=False)
+    high_confidence = Column(Boolean, default=False, nullable=False)
+    signal_version = Column(String(64), index=True, default="", nullable=False)
+    conversation_id = Column(String(36), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        # 唯一约束必须包含 user_id：判定是 (symbol, as_of, version) 的确定性函数，
+        # 但**归属**属于发起它的用户。若跨用户共享一行，第二个用户的
+        # list_for_user 就查不到自己的判定——用户隔离语义在数据层就破裂了。
+        # 统计口径上的重复由 calibration_report 按 (symbol, as_of, probe, version)
+        # 去重解决，而不是靠约束。
+        UniqueConstraint(
+            "user_id", "symbol", "as_of", "probe", "signal_version", name="uq_signal_verdict"
+        ),
+    )
+
+
+class SignalVerdictOutcomeDB(Base):
+    """判定在某个持有期上的实际结果。停牌/退市记 evaluable=False，不计命中。"""
+
+    __tablename__ = "signal_verdict_outcomes"
+
+    id = Column(String(36), primary_key=True, index=True)
+    verdict_id = Column(String(36), index=True, nullable=False)
+    horizon_days = Column(Integer, nullable=False)
+    ref_date = Column(String(10), nullable=False)
+    max_high = Column(Float, nullable=True)
+    close = Column(Float, nullable=True)
+    ret_pct = Column(Float, nullable=True)
+    threshold_hit = Column(Boolean, default=False, nullable=False)
+    evaluable = Column(Boolean, default=True, nullable=False)
+    reason = Column(String(200), nullable=True)
+    evaluated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("verdict_id", "horizon_days", name="uq_signal_verdict_outcome"),
+    )
+
+
+class SignalWeightVersionDB(Base):
+    """一次权重版本激活记录（审计 D2 修复）。
+
+    修复前只有 `check_activation_gate`（拒绝逻辑）与 `with_weight`（纯函数），
+    **没有任何机制产生并持久化新版本**——于是「权重被数据校准」无处落地，
+    也无法做版本对照。
+
+    刻意把 `sample_size` 与 `rationale` 设为必填：一次没有样本量、没有理由的
+    权重变更，等于把「拍脑袋」制度化。旧版本永久保留，用于同标的同日期的对照。
+    """
+
+    __tablename__ = "signal_weight_versions"
+
+    version = Column(String(64), primary_key=True, index=True)
+    weights = Column(JSON, nullable=False)
+    rationale = Column(Text, nullable=False)
+    sample_size = Column(Integer, nullable=False)
+    per_dimension = Column(JSON, nullable=True)
+    activated_by = Column(String(64), default="", nullable=False)
+    is_active = Column(Boolean, default=False, nullable=False, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class DailyBarDB(Base):
+    """本地日线库：判定不再逐次打外网，改为"查库、缺了再补网"。
+
+    为什么需要这张表：日线取数走的是 provider 降级链（东财 → 新浪 → 腾讯），
+    而东财系接口存在 **IP 级封禁**（实测 `RemoteDisconnected`）。每一次判定都
+    实时打一次外网，等于持续把自己推向封禁——一旦三家全挂，判定就没有日线可用。
+    把已取到的日线留在本地，补网频率就从"每次请求"降到"每只每天一次"。
+
+    为什么 `(symbol, date)` 必须唯一：盘后定时采集是**每天重跑**的，而且经常
+    回补同一段历史。没有唯一约束时，"采两次"= "库里两份日线"，而信号层是按
+    时间取尾部窗口的（`_normalize_daily` 的 `tail(window_days)`），重复行不会
+    报错，只会让窗口悄悄少覆盖一半时间——数值上完全看不出来。
+    """
+
+    __tablename__ = "daily_bars"
+
+    id = Column(String(36), primary_key=True, index=True)
+    # 规范形式是带市场后缀的 `600519.SH`（见 daily_bar_store.canonical_symbol）：
+    # 读取侧与采集侧若各用一种写法，本地库会永远查不中且不报错。
+    symbol = Column(String(16), index=True, nullable=False)
+    date = Column(String(10), index=True, nullable=False)  # YYYY-MM-DD
+    open = Column(Float, nullable=True)
+    high = Column(Float, nullable=True)
+    low = Column(Float, nullable=True)
+    close = Column(Float, nullable=True)
+    volume = Column(Float, nullable=True)
+    amount = Column(Float, nullable=True)  # 成交额
+    turnover = Column(Float, nullable=True)  # 换手率（百分数）
+    # 数据来自哪个源（provider/sina/tencent/local）。留这一列是为了让"某个源在
+    # 退化"可被事后追溯，而不是只能看日志。
+    source = Column(String(32), nullable=False)
+    ingested_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "date", name="uq_daily_bar_symbol_date"),
     )

@@ -86,6 +86,78 @@ def _row_to_series(d: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ── 个股资金流（东财直连 + 代理） ───────────────────────────────────────────
+#
+# 端点照 akshare 的实现（`stock_individual_fund_flow`），但这里**自己发请求**，
+# 目的只有一个：让出口代理生效。akshare 内部用 `requests.get` 且不传 proxies，
+# 于是"配了代理也没用"——东财封 IP 时只能干等超时。
+_FUND_FLOW_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+_FUND_FLOW_UT = "b2884a393a59ad64002292a3e90d46a5"
+
+# klines 每行字段顺序（与 akshare 的列名一一对应）
+# 0 日期 1 主力净额 2 小单 3 中单 4 大单 5 超大单 6..10 各类净占比 11 收盘 12 涨跌幅
+_FUND_FLOW_FIELDS = (
+    "date", "main_net_inflow", "small_net_inflow", "medium_net_inflow",
+    "large_net_inflow", "xlarge_net_inflow",
+    "main_net_ratio", "small_net_ratio", "medium_net_ratio",
+    "large_net_ratio", "xlarge_net_ratio", "close", "change_pct",
+)
+
+
+def fetch_em_individual_fund_flow_direct(symbol: str) -> Optional[pd.DataFrame]:
+    """个股资金流日线（单位：元，与既有内部契约一致）。
+
+    取不到返回 None——由上层声明该维度未覆盖，**不造空帧**。
+    """
+    code = "".join(ch for ch in str(symbol or "") if ch.isdigit())[-6:]
+    if not code:
+        return None
+    market = 1 if code.startswith(("5", "6", "9")) else 0
+    params = {
+        "lmt": "0",
+        "klt": "101",
+        "secid": f"{market}.{code}",
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+        "ut": _FUND_FLOW_UT,
+    }
+    try:
+        # `direct=True`：未配 `TA_EM_PROXY` 时**绕过系统代理**。系统代理会把请求
+        # 交给一个我们无法验证的出口（实测对东财是 `ProxyError`），而这条通道的
+        # 全部意义就是"我们自己控制出口"。
+        from ._http_utils import resolve_proxies
+
+        payload = http_get_json(
+            _FUND_FLOW_URL, params=params, headers=_HEADERS,
+            direct=resolve_proxies() is None,
+        )
+    except Exception:  # noqa: BLE001 — 东财不可用时如实返回 None
+        return None
+
+    klines = ((payload or {}).get("data") or {}).get("klines") or []
+    rows: list[dict[str, Any]] = []
+    for line in klines:
+        parts = str(line).split(",")
+        if len(parts) < 13:
+            continue
+        row: dict[str, Any] = {}
+        for index, name in enumerate(_FUND_FLOW_FIELDS):
+            raw = parts[index]
+            if name == "date":
+                row[name] = raw
+            else:
+                try:
+                    row[name] = float(raw)
+                except (TypeError, ValueError):
+                    row[name] = None
+        rows.append(row)
+    if not rows:
+        return None
+    frame = pd.DataFrame(rows)
+    frame["date"] = frame["date"].astype(str).str[:10]
+    return frame
+
+
 def fetch_em_board_spot_direct(sector_type: str = "concept") -> pd.DataFrame:
     """东财板块涨幅榜直连（push2delay）：industry / concept，归一化列。"""
     if sector_type not in _FS or sector_type == "market":

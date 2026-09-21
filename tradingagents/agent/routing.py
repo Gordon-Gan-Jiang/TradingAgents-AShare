@@ -1,0 +1,569 @@
+"""三档意图路由：成本与体验的全部杠杆。
+
+## 现状与目标
+
+`POST /v1/chat/completions` 今天的行为是：抽取标的 → **无条件**启动 7 分析师
+完整管道。于是「今天主力净流入多少」（1 次数据调用）与「全面分析一下」
+（分钟级、约 100× 成本）走同一条链路，且响应只有一个任务回执。
+
+三档把这件事拆开：
+
+| 档 | 典型问句 | 执行 | 目标延迟 | 相对成本 |
+|---|---|---|---|---|
+| light | 「现在多少钱」「今天主力净流入多少」 | 1 个数据工具 + 1 次汇总 | < 5s | 1× |
+| medium | **「是不是在洗盘」「还能不能拿」** | 确定性探针 + 1 次归纳 | < 30s | ~5× |
+| heavy | 「全面分析一下」「出份研报」 | 现有 7 分析师管道 | 分钟级 | ~100× |
+
+## 三条 normative 规则
+
+1. **仅解析到标的不足以判为重档**。这是现状最大的成本漏洞。
+2. **降级只能向下**：分类失败 / 超时 / 低置信 → 中档；相邻两档模糊 → 取更低档。
+   重档成本 100×，误升级不可逆；而等待时间过长比「中等深度但立刻可读」更糟。
+3. **无法定档必须追问**：缺标的就猜，等于制造一个错误答案。
+
+## 为什么不用 LLM 做规则层
+
+规则层零 LLM，可以在毫秒内穷举。LLM 分类器作为可插拔实现（`TierClassifier`），
+由 `DegradingClassifier` 包裹后获得统一的降级语义——这样「降级」是一处实现，
+而不是散落在每个分类器里的 try/except。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, replace
+from typing import Protocol, Sequence
+
+TIER_LIGHT = "light"
+TIER_MEDIUM = "medium"
+TIER_HEAVY = "heavy"
+TIERS: tuple[str, ...] = (TIER_LIGHT, TIER_MEDIUM, TIER_HEAVY)
+
+# 向下降级顺序：索引越小越廉阶
+_LOWER: dict[str, str] = {TIER_HEAVY: TIER_MEDIUM, TIER_MEDIUM: TIER_LIGHT, TIER_LIGHT: TIER_LIGHT}
+
+
+@dataclass(frozen=True)
+class TierBudget:
+    """档位的延迟与调用预算。编排层必须按它执行并显式报告截断。"""
+
+    target_latency_ms: int
+    max_tool_calls: int
+    max_model_calls: int
+
+
+TIER_BUDGETS: dict[str, TierBudget] = {
+    TIER_LIGHT: TierBudget(target_latency_ms=5000, max_tool_calls=2, max_model_calls=1),
+    TIER_MEDIUM: TierBudget(target_latency_ms=30000, max_tool_calls=5, max_model_calls=2),
+    # 重档由既有管道自管预算，这里只声明「不进同步工具面」的语义
+    TIER_HEAVY: TierBudget(target_latency_ms=600000, max_tool_calls=0, max_model_calls=0),
+}
+
+
+
+# ── 事实型问句 → 一个便宜的数据工具 ──────────────────────────────────────
+#
+# 档位表里写着轻档 =「1 个数据工具 + 1 次汇总」，但实现一度对轻档返回**空计划**，
+# 于是最高频的问题（"现在多少钱"）永远得到"本轮无可用证据"。这里把那份承诺
+# 落成规则：按问句语义挑**一个**便宜的取数工具，零 LLM、毫秒级、可穷举。
+
+FACTUAL_TOOL_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("净流入", "净流出", "主力", "资金流"), "get_individual_fund_flow"),
+    (("市盈率", "市净率", "估值", "基本面", "每股", "营收", "净利润"), "get_fundamentals"),
+    (("资产负债", "负债率"), "get_balance_sheet"),
+    (("现金流",), "get_cashflow"),
+    (("利润表", "营业利润", "毛利率"), "get_income_statement"),
+    (("新闻", "公告", "消息面"), "data_symbol_news"),
+    (("macd", "kdj", "rsi", "均线", "金叉", "死叉", "技术指标"), "get_indicators"),
+    (("龙虎榜",), "get_lhb_detail"),
+    (("涨停",), "get_zt_pool"),
+    (("板块", "行业涨幅"), "get_board_spot"),
+)
+
+# 这些工具需要代码作为参数；无标的的问句只能用市场级工具
+SYMBOL_REQUIRED_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_realtime_quotes",
+        "get_stock_data",
+        "get_indicators",
+        "get_fundamentals",
+        "get_balance_sheet",
+        "get_cashflow",
+        "get_income_statement",
+        "get_individual_fund_flow",
+        "data_symbol_news",
+        "get_hot_stocks_xq",
+    }
+)
+
+# 无标的时可用的**市场级**工具，以及默认选谁
+MARKET_LEVEL_TOOLS: tuple[str, ...] = ("get_zt_pool", "get_lhb_detail", "get_board_spot", "get_global_news")
+DEFAULT_MARKET_TOOL = "get_board_spot"
+DEFAULT_FACTUAL_TOOL = "get_realtime_quotes"
+
+
+# 参数名必须**从工具自己的 schema 推导**，不能猜：实测各工具并不统一
+# （`get_realtime_quotes` 要 `symbols`（列表）、`get_fundamentals` 要 `ticker`、
+# `get_zt_pool` 要 `date`）。曾经按 `symbol`/`as_of` 硬猜，结果每次调用都被
+# 注册表以 `unknown arguments` 拒掉——而回答只说"无可用证据"，原因看不出来。
+_INSTRUMENT_ARGS: tuple[str, ...] = ("symbol", "ticker", "code", "symbols")
+_DATE_ARGS: tuple[str, ...] = ("as_of", "curr_date", "date", "end_date", "trade_date")
+
+_INDICATOR_HINTS: tuple[tuple[str, str], ...] = (
+    ("macd", "macd"), ("kdj", "kdj"), ("rsi", "rsi"),
+    ("boll", "boll"), ("均线", "ma"), ("金叉", "macd"), ("死叉", "macd"),
+)
+
+
+def build_factual_arguments(
+    spec: Any, *, symbol: str | None, as_of: str, text: str = ""
+) -> dict[str, Any] | None:
+    """按工具 schema 生成参数；**填不满必填项就返回 None**（由调用方换工具）。
+
+    返回 None 表示"这个工具用不了"，而不是"随便填一个"——后者会变成一次必然
+    失败的调用，而失败原因（unknown arguments / missing required）对用户毫无意义。
+    """
+    schema = getattr(spec, "input_schema", None) or {}
+    properties = dict(schema.get("properties") or {})
+    required = set(schema.get("required") or ())
+
+    args: dict[str, Any] = {}
+    for key in _INSTRUMENT_ARGS:
+        if key in properties and symbol:
+            args[key] = [symbol] if key == "symbols" else symbol
+            break
+    for key in _DATE_ARGS:
+        if key in properties:
+            args[key] = as_of
+            break
+    if "indicator" in properties:
+        lowered = (text or "").lower()
+        for hint, value in _INDICATOR_HINTS:
+            if hint in lowered or hint in (text or ""):
+                args["indicator"] = value
+                break
+    if "lookback_days" in properties:
+        args["lookback_days"] = 30
+
+    if not required <= set(args):
+        return None
+    return args
+
+
+def plan_factual_tool(text: str, *, has_symbol: bool) -> str:
+    """选一个便宜的数据工具。规则优先，零 LLM。
+
+    无标的时**绝不**选需要代码的工具：那是一次注定失败的调用，还会让回答
+    看起来"查过了但没有数据"，比不查更误导。
+    """
+    lowered = (text or "").lower()
+    matched: str | None = None
+    for hints, tool in FACTUAL_TOOL_HINTS:
+        if any(hint in lowered or hint in (text or "") for hint in hints):
+            matched = tool
+            break
+
+    if has_symbol:
+        return matched or DEFAULT_FACTUAL_TOOL
+    if matched and matched not in SYMBOL_REQUIRED_TOOLS:
+        return matched
+    return DEFAULT_MARKET_TOOL
+
+
+def looks_like_market_level_factual(text: str) -> bool:
+    """无标的的**市场级事实**问句（「今天涨停板有多少只」）。
+
+    这类问句此前只有一个落点：全市场筛选（且要先过筛选标记词），否则直接 400
+    追问"请输入代码"。而平台本就有涨停池/龙虎榜/板块这些**不需要标的**的工具，
+    让用户为一句"涨停板有多少只"去补一个代码，是把平台的能力藏起来。
+
+    判据刻意收窄：必须命中轻档事实标记，且**不需要标的**的工具确实存在。
+    这样"今天大盘怎么样""现在市场情绪如何"仍不会被误放进流程——它们需要的是
+    P2 才有的主线/情绪工具，今天放进来只会答"无可用证据"。
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if any(marker in t for marker in _PORTFOLIO_MARKERS):
+        return False
+    if not any(marker in t for marker in _LIGHT_MARKERS):
+        return False
+    return plan_factual_tool(t, has_symbol=False) in MARKET_LEVEL_TOOLS
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """标的解析结果。`candidates` 非空表示需要用户选择。"""
+
+    symbols: tuple[str, ...] = ()
+    candidates: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RouteDecision:
+    """一次路由决策，同时是审计记录。"""
+
+    tier: str
+    confidence: float
+    symbol: str | None = None
+    symbols: tuple[str, ...] = ()
+    candidates: tuple[str, ...] = ()
+    degraded_from: str | None = None
+    reason: str = ""
+    needs_clarification: bool = False
+    classifier: str = ""
+
+    @property
+    def budget(self) -> TierBudget:
+        return TIER_BUDGETS[self.tier]
+
+    def as_record(self) -> dict[str, object]:
+        """落库/日志用的扁平记录。"""
+        return {
+            "tier": self.tier,
+            "confidence": self.confidence,
+            "symbol": self.symbol,
+            "symbols": list(self.symbols),
+            "candidates": list(self.candidates),
+            "degraded_from": self.degraded_from,
+            "reason": self.reason,
+            "needs_clarification": self.needs_clarification,
+            "classifier": self.classifier,
+        }
+
+
+# ── 第 4 类意图：无标的的全市场筛选 ──────────────────────────────────────
+#
+# 用户问「今天走到好的票，放量票找十个给我」，旧行为是 400「未能识别标的」——
+# 把一个**合法的筛选需求**误报成「你没说清楚」。而平台其实已有成熟的全市场
+# 扫描器（`api/services/market_scanner_service.py`），只是没接进对话工具面。
+#
+# 检测刻意放在这一层（零 LLM 规则层）：可在毫秒内穷举、可单测、不产生成本。
+
+# 强筛选名词：单独出现即可判为筛选意图
+_SCREEN_NOUNS: tuple[str, ...] = (
+    "选股",
+    "筛选",
+    "涨幅榜",
+    "涨停板",
+    "全市场",
+    "整个市场",
+    "扫一遍",
+    "扫全市场",
+    "放量票",
+    "强势票",
+    "哪些票",
+    "哪几只",
+)
+
+# 账户/持仓类措辞：这些问题的答案是**用户的组合**，不是市场行情。
+# 缺了这道护栏，「我账户现在仓位多少」会被当成市场级事实问题，然后用板块行情
+# 去回答——比诚实追问糟得多（黄金集 clarify 指标抓到的那次回归）。
+_PORTFOLIO_MARKERS: tuple[str, ...] = (
+    "我持仓", "我的持仓", "我账户", "我的账户", "我的仓位", "我仓位", "我买", "我持有",
+    "自选", "跟踪池", "持仓里", "仓位", "成本价", "我的票", "我这几只",
+)
+
+# 计数问句：要的是一个数，不是一份名单
+_COUNT_QUESTION_MARKERS: tuple[str, ...] = (
+    "有多少只", "有多少家", "有多少个", "几家", "几只涨停", "多少个涨停", "涨停家数",
+)
+
+# 数量信号（「找十只」「挑5个」）
+_QUANTITY_RE = None  # 延迟构造，见 `_quantity_requested`
+
+_SCREEN_ACTIONS: tuple[str, ...] = ("找", "挑", "选", "推荐", "来", "给")
+
+# 扫描器允许的候选数区间（与 `scan_market_candidates` 的夹取一致）
+SCREEN_MAX_TOP_K = 20
+SCREEN_DEFAULT_TOP_K = 10
+
+_CN_DIGITS: dict[str, int] = {
+    "一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+}
+
+# 措辞 → 评分档案。顺序即优先级：先匹配更具体的（「放量」先于「强势」）。
+_PROFILE_HINTS: tuple[tuple[str, str], ...] = (
+    ("放量", "breakout"),
+    ("突破", "breakout"),
+    ("强势", "ashare_aggressive"),
+    ("进攻", "ashare_aggressive"),
+    ("回调", "reversal"),
+    ("低吸", "reversal"),
+    ("超跌", "reversal"),
+    ("轮动", "sector_rotation"),
+    ("板块", "sector_rotation"),
+    ("稳健", "ashare_robust"),
+    ("低波动", "low_volatility_value"),
+    ("美股", "us_balanced"),
+)
+
+
+def _quantity_requested(text: str) -> bool:
+    """是否明确要了**数量**（几只/十只/5个）。"""
+    import re
+
+    if re.search(r"\d+\s*(?:只|个|支|票)", text):
+        return True
+    if re.search(r"[一二两三四五六七八九十]\s*(?:只|个|支|票)", text):
+        return True
+    return any(word in text for word in ("几只", "几支", "几个票"))
+
+
+def looks_like_market_screen(text: str) -> bool:
+    """是否属于「无标的的全市场筛选」。
+
+    **只判措辞，不判标的**：调用方必须在标的解析失败时才会用到它，
+    也因此「含显式代码」的问句不会走到这里（见 `build_turn_request`）。
+
+    两档判据，避免过宽：
+    * 强名词（选股/筛选/放量票/哪些票…）单独命中即可；
+    * 否则必须**同时**有动作词与数量词（「帮我找十只」），
+      这样「帮我看看哪只最危险」这类单标的/组合问句不会被误判成筛选。
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    # 计数问句不是筛选需求：「今天涨停板有多少只」问的是一个**数**，
+    # 平台有现成的涨停池工具，去跑一遍全市场扫描既慢又答非所问。
+    if any(marker in t for marker in _COUNT_QUESTION_MARKERS):
+        return False
+    if any(noun in t for noun in _SCREEN_NOUNS):
+        return True
+    return any(action in t for action in _SCREEN_ACTIONS) and _quantity_requested(t)
+
+
+@dataclass(frozen=True)
+class ScreenRequest:
+    """一次筛选请求的解析结果。纯函数产出，不触网、不调模型。"""
+
+    top_k: int = SCREEN_DEFAULT_TOP_K
+    profile: str | None = None
+    min_change_pct: float = 0.0
+
+
+def parse_screen_request(text: str) -> ScreenRequest:
+    """从筛选问句里解析候选数量、评分档案与最低涨幅。
+
+    数量**必须夹取**到扫描器区间内：让正则或模型去猜「多一些」是几十只，
+    必然两难——猜大了白扫，猜小了不够用。
+    """
+    import re
+
+    t = text or ""
+
+    top_k = SCREEN_DEFAULT_TOP_K
+    match = re.search(r"(\d+)\s*(?:只|个|支|票)", t)
+    if match:
+        top_k = int(match.group(1))
+    else:
+        match = re.search(r"([一二两三四五六七八九十])\s*(?:只|个|支|票)", t)
+        if match:
+            top_k = _CN_DIGITS.get(match.group(1), SCREEN_DEFAULT_TOP_K)
+    top_k = max(1, min(top_k, SCREEN_MAX_TOP_K))
+
+    profile: str | None = None
+    for hint, name in _PROFILE_HINTS:
+        if hint in t:
+            profile = name
+            break
+
+    # 回调/低吸要找的是**下跌或整理**中的票，用「最低涨幅 0」的过滤会自相矛盾
+    min_change_pct = -10.0 if profile == "reversal" else 0.0
+    return ScreenRequest(top_k=top_k, profile=profile, min_change_pct=min_change_pct)
+
+
+class SymbolResolver(Protocol):
+    """标的解析端口。实现由应用层提供（复用既有股票名解析能力）。"""
+
+    def resolve(self, text: str) -> Resolution: ...
+
+
+class TierClassifier(Protocol):
+    def classify(self, text: str) -> RouteDecision: ...
+
+
+# ── 规则分类器 ────────────────────────────────────────────────────────────
+
+# 事实型：问「是多少」而不是「怎么样」。这些只需取数。
+_LIGHT_MARKERS = (
+    "多少钱",
+    "什么价",
+    "现在价",
+    "价格是",
+    "换手",
+    "涨幅",
+    "跌幅",
+    "净流入多少",
+    "净流出多少",
+    "成交量",
+    "市值",
+    "市盈率",
+    "多少",
+    # 新闻/公告是事实型：此前没进这份表，于是「最近有什么新闻」落到中档去跑探针
+    # （5× 成本且答非所问）——黄金集 f06 抓到的。
+    "新闻",
+    "公告",
+    "消息面",
+)
+
+# 研判型：需要把多维证据合成一个判断。这是本变更的核心新增能力。
+_MEDIUM_MARKERS = (
+    "洗盘",
+    "震仓",
+    "派发",
+    "出货",
+    "是不是在",
+    "还能不能拿",
+    "还能拿",
+    "该不该",
+    "要不要",
+    "止损",
+    "止盈",
+    "会不会",
+    "怎么看",
+    "能买吗",
+    "可以买",
+    "风险大不大",
+    "能不能拿",
+)
+
+# 重档：必须由用户**明示**要求完整研究，而不是模型推断「他大概想要研报」
+_HEAVY_MARKERS = (
+    "全面分析",
+    "完整分析",
+    "深度分析",
+    "多智能体",
+    "全流程",
+    "全面研判",
+)
+
+# 「研报/报告」类是**组合判据**：必须同时出现产物名与生成动作。
+# 单看产物名会把「这份研报说了什么」（阅读既有报告）误判为重档——
+# 那是一个事实型问句，启动完整管道完全是浪费。
+_REPORT_NOUNS = ("研报", "研究报告", "分析报告", "报告")
+_REPORT_VERBS = ("出", "生成", "写", "做", "来一份", "来份", "给我一份", "整理")
+
+
+def _requests_report_generation(text: str) -> bool:
+    return any(noun in text for noun in _REPORT_NOUNS) and any(verb in text for verb in _REPORT_VERBS)
+
+
+class RuleTierClassifier:
+    """零 LLM 的规则分类器。
+
+    刻意保守：只认明确的措辞。含糊的问句落到中档（lower-cost adjacent tier），
+    宁可多花 5× 也不冒 100× 误升级的风险。
+    """
+
+    name = "rule"
+
+    def __init__(self, resolver: SymbolResolver) -> None:
+        self._resolver = resolver
+
+    def classify(self, text: str) -> RouteDecision:
+        text = (text or "").strip()
+        resolution = self._resolver.resolve(text)
+        symbols: Sequence[str] = resolution.symbols
+        candidates: Sequence[str] = resolution.candidates
+        symbol = symbols[0] if symbols else None
+
+        # 重档必须显式；不含重档措辞的一律向下
+        tier = TIER_MEDIUM
+        confidence = 0.6
+        reason = "default medium"
+
+        if any(marker in text for marker in _HEAVY_MARKERS) or _requests_report_generation(text):
+            tier, confidence, reason = TIER_HEAVY, 0.9, "explicit full-research request"
+        elif any(marker in text for marker in _MEDIUM_MARKERS):
+            tier, confidence, reason = TIER_MEDIUM, 0.75, "judgement question"
+        elif any(marker in text for marker in _LIGHT_MARKERS):
+            tier, confidence, reason = TIER_LIGHT, 0.8, "factual data question"
+
+        needs_clarification = not symbols and not candidates
+        if candidates and not symbols:
+            needs_clarification = True
+            reason = "multiple candidate instruments; awaiting selection"
+        elif needs_clarification:
+            reason = "no instrument resolved; awaiting clarification"
+
+        return RouteDecision(
+            tier=tier,
+            confidence=confidence,
+            symbol=symbol,
+            symbols=tuple(symbols),
+            candidates=tuple(candidates),
+            reason=reason,
+            needs_clarification=needs_clarification,
+            classifier=self.name,
+        )
+
+
+class DegradingClassifier:
+    """包装任意分类器，施加统一的向下降级语义。
+
+    这样「分类器失败怎么办」只有一处实现，而不是每个分类器各写一遍
+    try/except（那必然导致某些路径忘记降级而直接抛错或误判重档）。
+    """
+
+    name = "degrading"
+
+    def __init__(
+        self,
+        inner: TierClassifier,
+        *,
+        min_confidence: float = 0.6,
+        fallback_tier: str = TIER_MEDIUM,
+    ) -> None:
+        self._inner = inner
+        self._min_confidence = min_confidence
+        self._fallback_tier = fallback_tier
+
+    def classify(self, text: str) -> RouteDecision:
+        try:
+            decision = self._inner.classify(text)
+        except Exception as exc:  # noqa: BLE001 — 任何分类失败都必须降级而非中断
+            return RouteDecision(
+                tier=self._fallback_tier,
+                confidence=0.0,
+                reason=f"classifier unavailable ({type(exc).__name__}); degraded to {self._fallback_tier}",
+                classifier=self.name,
+            )
+
+        if decision.confidence >= self._min_confidence:
+            return replace(decision, classifier=decision.classifier or self.name)
+
+        lower = _LOWER.get(decision.tier, TIER_LIGHT)
+        return replace(
+            decision,
+            tier=lower,
+            degraded_from=decision.tier,
+            reason=f"{decision.reason}; low confidence {decision.confidence:.2f} degraded {decision.tier}→{lower}",
+            classifier=self.name,
+        )
+
+
+class FixedClassifier:
+    """测试与调试用的固定分类器。"""
+
+    name = "fixed"
+
+    def __init__(self, tier: str, confidence: float = 0.9) -> None:
+        self._tier = tier
+        self._confidence = confidence
+
+    def classify(self, text: str) -> RouteDecision:
+        return RouteDecision(
+            tier=self._tier,
+            confidence=self._confidence,
+            reason="fixed",
+            classifier=self.name,
+        )
+
+
+def tier_distribution(decisions: Sequence[RouteDecision]) -> dict[str, int]:
+    """档位分布：发现「重档失控」的唯一手段。"""
+    out = {tier: 0 for tier in TIERS}
+    for decision in decisions:
+        out[decision.tier] = out.get(decision.tier, 0) + 1
+    return out

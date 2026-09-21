@@ -53,6 +53,67 @@ The conversational agent SHALL treat deterministic probe verdicts as authoritati
 - **WHEN** the probe reports reduced confidence because inputs were unavailable or degraded
 - **THEN** the prose MUST NOT present the judgement as more certain than the probe reported
 
+### Requirement: Batch-capable tools for multi-instrument questions
+The tool surface SHALL provide batch variants for probes so that a question spanning many instruments is answerable within the tool-call budget.
+
+#### Scenario: Portfolio-wide question served in one call
+- **WHEN** a question concerns every instrument in a user's holdings
+- **THEN** the probe MUST be invocable once with a list of symbols, returning a per-symbol result and a ranking, rather than requiring one call per instrument
+
+#### Scenario: Per-symbol evidence preserved in batch
+- **WHEN** a batch probe returns
+- **THEN** each instrument's evidence MUST be present in the same result, so that grounding verification remains complete
+
+#### Scenario: Batch bounded
+- **WHEN** a batch request exceeds the configured instrument limit
+- **THEN** the request MUST be refused or truncated with an explicit notice, and MUST NOT silently evaluate a subset
+
+#### Scenario: Per-symbol abstention preserved
+- **WHEN** some instruments in a batch lack sufficient evidence
+- **THEN** those instruments MUST individually report `insufficient_evidence` and MUST NOT be dropped or coerced into a directional state
+
+### Requirement: Action proposals require explicit confirmation
+When a request implies an action on platform state, the assistant SHALL propose the action and MUST NOT execute it without explicit user confirmation.
+
+#### Scenario: Monitoring request becomes a proposal
+- **WHEN** a user asks to be alerted on a price condition
+- **THEN** the assistant MUST propose creating the corresponding alert or tracking task and MUST NOT create it unconfirmed
+
+#### Scenario: Confirmation executes
+- **WHEN** the user confirms a proposed action
+- **THEN** the action MUST be executed through the existing platform service for that capability rather than by a new parallel mechanism
+
+#### Scenario: Declined proposal recorded
+- **WHEN** the user declines or ignores a proposed action
+- **THEN** no state change MUST occur and the proposal MUST be recorded in the conversation
+
+#### Scenario: Actions unavailable on external surface
+- **WHEN** the request arrives over the external tool surface
+- **THEN** no state-changing action MUST be offered or performed in this version
+
+#### Scenario: Prompt acknowledgement is not execution
+- **WHEN** the assistant cannot execute an action
+- **THEN** it MUST NOT imply that the action has been set up
+
+### Requirement: Clarification before assumption
+When required context is missing, the assistant SHALL ask for it and MUST NOT proceed on an assumed default.
+
+#### Scenario: Position status unknown
+- **WHEN** a position-related question is asked for an instrument that is not in the user's resolved holdings
+- **THEN** the assistant MUST ask whether the user holds it and at what cost, and MUST NOT answer on the assumption of no position
+
+#### Scenario: Ambiguous instrument
+- **WHEN** a request matches more than one plausible instrument
+- **THEN** the assistant MUST present the candidates and await selection
+
+#### Scenario: Missing objective
+- **WHEN** a judgement depends on the user's objective, horizon, or risk tolerance and none is configured
+- **THEN** the assistant MUST ask, or explicitly state which assumption it is using, and MUST NOT silently apply a default
+
+#### Scenario: Context reuse within a conversation
+- **WHEN** the user has already supplied a missing value earlier in the same conversation
+- **THEN** the assistant MUST reuse it and MUST NOT ask again
+
 ### Requirement: Conversation persistence
 The system SHALL persist conversations and their messages with per-user isolation.
 
@@ -123,3 +184,22 @@ Each conversational turn SHALL record its tier, model, tool invocations, token u
 #### Scenario: Cost attribution queryable
 - **WHEN** turn records are queried
 - **THEN** cost and latency MUST be attributable per tier, so that medium-tier savings relative to the heavy tier are measurable
+
+### Requirement: 对话页可选择模型
+The system SHALL let the user choose which model profile answers on the conversational panel, and the chosen profile SHALL determine the model actually used.
+
+#### Scenario: 选择随请求发送
+- **WHEN** 用户在研判对话页选择一个模型档案并提问
+- **THEN** 请求 MUST 携带该档案的 `model_profile_id`，且回答 MUST 由该档案的 provider/模型/密钥产生
+
+#### Scenario: 选择被记住
+- **WHEN** 用户选择过某个档案后刷新页面
+- **THEN** 选择 MUST 保持；若该档案已被删除或停用，MUST 回落到默认档案而不是继续发送失效 id
+
+#### Scenario: 模型失败时可自助修复
+- **WHEN** 回答因模型鉴权/未配置而失败
+- **THEN** 界面 MUST 给出直达「系统 → 模型管理」的入口，且提示中的导航名 MUST 与界面实际一致
+
+#### Scenario: 未配置任何档案
+- **WHEN** 用户没有任何启用中的模型档案
+- **THEN** 界面 MUST 提示去新建，MUST NOT 呈现一个看似可用的空选择器
