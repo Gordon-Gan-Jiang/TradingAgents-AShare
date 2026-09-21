@@ -130,3 +130,110 @@ def make_portfolio_tools(holdings: HoldingsPort) -> tuple[ToolSpec, ...]:
         freshness_sources=(_SOURCE_KEY,),
     )
     return (spec,)
+
+
+# ── 市场主线（L1 决策）────────────────────────────────────────────────────
+#
+# 「最近哪个板块最强」「当前主线是什么」——答案来自平台的**主线判定**（定时任务
+# 产出、全用户只读共享）。Agent 的职责是读取与解释，而不是临场推一个主线出来：
+# 主线是平台的模型产出，模型改写它等于把"平台结论"和"模型即兴"混为一谈。
+
+
+class MainlinePort(Protocol):
+    def list_runs(self, *, limit: int) -> Sequence[Mapping[str, Any]]: ...
+
+
+def make_mainline_tools(mainline: MainlinePort) -> tuple[ToolSpec, ...]:
+    def market_mainline_view(*, limit: int = 3, as_of: str = "") -> ToolResult:
+        requested = 3 if limit is None else int(limit)
+        capped = max(1, min(requested, 10))
+        try:
+            rows = list(mainline.list_runs(limit=capped) or [])
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(
+                data={"runs": [], "error": type(exc).__name__},
+                evidence=(),
+                coverage=Coverage(available=(), unavailable=("market_mainline",)),
+                degraded=True,
+                degraded_reason=f"主线读取失败（{type(exc).__name__}）",
+                as_of=as_of,
+                disclaimer=RESEARCH_DISCLAIMER,
+            )
+
+        if not rows:
+            return ToolResult(
+                data={"runs": [], "count": 0},
+                evidence=(),
+                coverage=Coverage(
+                    available=("market_mainline",),
+                    unavailable=("market_mainline（尚未生成主线报告）",),
+                ),
+                as_of=as_of,
+                disclaimer=RESEARCH_DISCLAIMER,
+            )
+
+        evidence: list[EvidenceItem] = []
+        for index, row in enumerate(rows, start=1):
+            summary = row.get("summary") or row.get("headline") or row.get("title") or ""
+            parts = [
+                f"{row.get('trade_date') or row.get('as_of') or '未提供'}",
+                f"状态 {row.get('status') or '未提供'}",
+            ]
+            if summary:
+                parts.append(str(summary)[:200])
+            # 主线的核心是**板块强弱排序**：把前几名逐条列出，供逐一引用
+            boards = row.get("boards") or row.get("sectors") or []
+            if isinstance(boards, (list, tuple)) and boards:
+                ranked = []
+                for board in list(boards)[:5]:
+                    if isinstance(board, Mapping):
+                        ranked.append(
+                            f"{board.get('name') or board.get('board') or '?'}"
+                            f"（{_fmt(board.get('change_pct'), suffix='%')}）"
+                        )
+                    else:
+                        ranked.append(str(board))
+                parts.append("板块强弱：" + "、".join(ranked))
+            evidence.append(
+                EvidenceItem(
+                    id=f"E{index}",
+                    field=f"主线报告{index}",
+                    value="｜".join(parts),
+                    unit="",
+                    source_key="market_mainline",
+                    as_of=str(row.get("trade_date") or as_of),
+                )
+            )
+
+        return ToolResult(
+            data={"runs": [dict(row) for row in rows], "count": len(rows)},
+            evidence=tuple(evidence),
+            coverage=Coverage(available=("market_mainline",), unavailable=()),
+            as_of=as_of,
+            disclaimer=RESEARCH_DISCLAIMER,
+        )
+
+    spec = ToolSpec(
+        name="market_mainline_view",
+        title="市场主线（板块强弱）",
+        description=(
+            "读取平台生成的**市场主线报告**（板块强弱与主线判断，定时任务产出）。"
+            "用于回答「最近哪个板块最强」「当前市场主线是什么」。"
+            "结论来自平台的主线判定，不接受模型改写；没有报告时会显式声明。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "返回最近几份，1-10，默认 3"},
+                "as_of": {"type": "string", "description": "基准日 YYYY-MM-DD"},
+            },
+            "required": [],
+        },
+        output_contract="MARKET_MAINLINE",
+        handler=market_mainline_view,
+        cost="cheap",
+        plan_layer=PLAN_LAYER_DECISION,
+        latency_budget_ms=8000,
+        freshness_sources=("market_mainline",),
+    )
+    return (spec,)

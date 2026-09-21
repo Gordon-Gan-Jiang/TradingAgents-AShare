@@ -176,6 +176,21 @@ def build_registry(user_id: str | None = None) -> Any:
 
         return _Port()
 
+    def _mainline_port() -> Any:
+        """主线端口：读平台已生成的主线报告（含系统级共享报告的回退）。"""
+        from api.database import get_db_ctx
+
+        class _Port:
+            def list_runs(self, *, limit: int):
+                if not user_id:
+                    return []
+                from api.services import mainline_service
+
+                with get_db_ctx() as db:
+                    return mainline_service.list_runs(db, user_id=user_id, limit=limit)
+
+        return _Port()
+
     def lazy_screener() -> Any:
         from api.services.market_screen_ports import build_market_screener
 
@@ -191,6 +206,7 @@ def build_registry(user_id: str | None = None) -> Any:
         history_port=_history_port(),
         weight_port=_weight_port(),
         holdings_port=_holdings_port(),
+        mainline_port=_mainline_port(),
     )
 
 
