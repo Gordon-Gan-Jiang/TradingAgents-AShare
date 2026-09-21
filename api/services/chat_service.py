@@ -120,6 +120,52 @@ def build_registry(user_id: str | None = None) -> Any:
     )
 
 
+def build_planner(*, user_id: str | None = None) -> Callable[[str], Any] | None:
+    """按灰度开关构造规划器；**未启用时返回 None**（= 今天的行为）。
+
+    规划器与回答模型分开配置：规划每轮都跑、要便宜快，回答要质量（见
+    `tradingagents/agent/planner_config.py`）。
+    """
+    from tradingagents.agent.planner_config import llm_planner_enabled, planner_target
+
+    if not llm_planner_enabled():
+        return None
+
+    from tradingagents.agent.routing import LlmPlanner, RuleTierClassifier
+
+    profile_id, model_name = planner_target()
+    try:
+        completer = build_llm_completer(user_id=user_id, model_profile_id=profile_id)
+    except Exception as exc:  # noqa: BLE001 — 规划器造不出来就退回规则层
+        logger.warning("planner completer unavailable, planner disabled: %s", exc)
+        return None
+
+    registry = build_registry(user_id)
+    digest_lines = []
+    for name in registry.names():
+        spec = registry.get(name)
+        description = str(getattr(spec, "description", "") or "").splitlines()
+        digest_lines.append(f"- {name}：{description[0][:60] if description else ''}")
+    digest = "\n".join(digest_lines)
+
+    planner = LlmPlanner(
+        inner=RuleTierClassifier(_Resolver()),
+        complete=lambda prompt: _completion_text(completer(prompt)),
+        known_tools=registry.names(),
+        tool_digest=digest,
+    )
+
+    def _plan(text: str):
+        return planner.plan(text)
+
+    return _plan
+
+
+def _completion_text(result: Any) -> str:
+    """补全结果 → 文本。补全器返回 `Completion`（带用量），这里只取正文。"""
+    return str(getattr(result, "text", result) or "")
+
+
 def build_answer_model(
     *,
     user_id: str | None = None,
@@ -349,7 +395,9 @@ def extract_text(messages: Sequence[Mapping[str, Any]]) -> str:
     return ""
 
 
-def build_turn_request(body: ChatRequest, *, user_id: str) -> TurnRequest | None:
+def build_turn_request(
+    body: ChatRequest, *, user_id: str, planner: Callable[[str], Any] | None = None
+) -> TurnRequest | None:
     """构造回合请求。无可用标的时返回 None（路由转成 400 追问）。
 
     解析异常被收敛成「无标的」而不是向外抛：未处理异常会变成 500，而 500 的
@@ -393,6 +441,32 @@ def build_turn_request(body: ChatRequest, *, user_id: str) -> TurnRequest | None
             symbol=None, candidates=tuple(candidates),
             as_of=body.as_of or "", conversation_id=body.conversation_id,
         )
+    # ── 规划层：规则定不了标的时才启用 ──────────────────────────────────
+    # `planner` 由装配处注入（默认 None = 今天的行为，灰度关闭时不改变任何东西）。
+    # 位置很关键：放在"规则已经解析出标的"之后——那类高频问句不该付规划成本；
+    # 也放在 400 追问之前——那正是自然语言失败的场景，是规划层的用武之地。
+    if symbol is None and planner is not None:
+        try:
+            plan = planner(text)
+        except Exception as exc:  # noqa: BLE001 — 规划失败必须降级，不能中断回合
+            logger.warning("planner failed, falling back to rules: %s", exc)
+            plan = None
+        if plan is not None:
+            from tradingagents.dataflows.trade_calendar import cn_today_str
+
+            return TurnRequest(
+                text=text,
+                user_id=user_id,
+                tier=body.tier or plan.tier,
+                symbol=plan.symbol,
+                symbols=tuple(plan.symbols),
+                screen=bool(plan.screen),
+                market_level=bool(plan.market_level),
+                plan_source="llm",
+                as_of=body.as_of or cn_today_str(),
+                conversation_id=body.conversation_id,
+            )
+
     if symbol is None:
         from tradingagents.agent.routing import TIER_MEDIUM, looks_like_market_screen
 

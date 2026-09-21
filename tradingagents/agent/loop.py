@@ -126,6 +126,9 @@ class TurnRequest:
     # 无标的的全市场筛选回合（「放量票找十个给我」）。显式字段而不是靠文本
     # 在循环里二次猜测：意图判定只应有一处实现（routing 层）。
     screen: bool = False
+    # 本回合的计划来源（rules / llm）。落进 trace 才能回答"这轮为什么这么走"，
+    # 也是灰度期间对比两条路径的依据。
+    plan_source: str = "rules"
     # 市场级**事实**问句（「今天涨停板有多少只」）：本来就不需要标的。
     # 没有这个标记的话，澄清分支会把它当成"用户没给代码"而追问——那是把
     # 平台已有的市场级工具藏起来（实测踩到）。
@@ -748,7 +751,7 @@ def run_turn(
             "symbol": request.symbol,
             "symbols": list(request.symbols),
             "screen": bool(request.screen),
-            "intent_source": "rules",
+            "intent_source": request.plan_source,
             "planned": [
                 {"tool": call.tool, "arguments": dict(call.arguments), "reason": call.reason}
                 for call in planned

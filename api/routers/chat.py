@@ -80,7 +80,9 @@ async def chat(
     `AnswerDelta` / `AnswerDone` / `ToolStart` / `ToolDone` / `VerdictEvent` /
     `Notice` / `ErrorEvent` / `EndEvent`。
     """
-    request = chat_service.build_turn_request(body, user_id=user.id)
+    request = chat_service.build_turn_request(
+        body, user_id=user.id, planner=chat_service.build_planner(user_id=user.id)
+    )
     if request is None:
         raise HTTPException(
             status_code=400,

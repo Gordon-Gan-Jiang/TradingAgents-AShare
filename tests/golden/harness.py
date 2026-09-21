@@ -197,7 +197,12 @@ def warm_name_map() -> int:
     return len(main._get_stock_name_map_cached_only() or {})
 
 
-def probe(text: str, *, registry_names: Iterable[str] | None = None) -> Probe:
+def probe(
+    text: str,
+    *,
+    registry_names: Iterable[str] | None = None,
+    planner: Any = None,
+) -> Probe:
     """探测当前实现如何规划这句话。
 
     **只走规划层**（解析标的 → 构造回合 → 计划工具），不执行工具、不调模型、
@@ -212,7 +217,7 @@ def probe(text: str, *, registry_names: Iterable[str] | None = None) -> Probe:
     registry = warm_registry()
     body = chat_service.ChatRequest(messages=[{"role": "user", "content": text}])
     try:
-        request = chat_service.build_turn_request(body, user_id="golden")
+        request = chat_service.build_turn_request(body, user_id="golden", planner=planner)
     except Exception as exc:  # noqa: BLE001 — 探测不该因实现异常而中断整轮跑分
         return Probe(servable=False, clarifying=True, reason=f"resolve error: {exc}")
 
@@ -332,8 +337,11 @@ def score(items: Sequence[GoldenItem], probes: Mapping[str, Probe] | Sequence[Pr
     return metrics
 
 
-def run(registry_names: Iterable[str] | None = None) -> Metrics:
-    """端到端跑一遍当前实现。"""
+def run(registry_names: Iterable[str] | None = None, planner: Any = None) -> Metrics:
+    """端到端跑一遍当前实现（可注入规划器以度量规划层的增益）。"""
     items = load_golden()
-    probes = {item.id: probe(item.text, registry_names=registry_names) for item in items}
+    probes = {
+        item.id: probe(item.text, registry_names=registry_names, planner=planner)
+        for item in items
+    }
     return score(items, probes)

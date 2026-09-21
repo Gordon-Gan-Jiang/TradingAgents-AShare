@@ -32,11 +32,22 @@ def _fmt(value: float) -> str:
     return f"{value * 100:.1f}%"
 
 
-def run(*, verbose: bool = False) -> dict:
+def run(*, verbose: bool = False, with_planner: bool = False) -> dict:
     # 预热名称表：否则分数反映的是缓存状态而非实现（踩过）
     name_map_size = warm_name_map()
     items = load_golden()
-    probes = {item.id: probe(item.text) for item in items}
+    planner = None
+    if with_planner:
+        from api.services import chat_service
+        from tradingagents.agent.planner_config import describe_planner
+
+        # 模型档案是**按用户**存的：不给 user_id 就解析不到档案，会回落到
+        # 环境里的默认配置（实测打到 api.openai.com 并 401）。跑分必须指定用户。
+        import os as _os
+
+        planner = chat_service.build_planner(user_id=_os.getenv("TA_PLANNER_USER_ID") or None)
+        print("规划器配置:", describe_planner(), "| 构造成功:", planner is not None)
+    probes = {item.id: probe(item.text, planner=planner) for item in items}
     metrics = score(items, probes)
 
     by_intent: dict[str, Counter] = {}
@@ -122,9 +133,11 @@ def main() -> int:
     parser.add_argument("--fail-under", type=float, default=None, help="规划准确率门槛（CI 用）")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--no-write", action="store_true", help="不写 docs 报告")
+    parser.add_argument("--with-planner", action="store_true",
+                        help="启用真实 LLM 规划层跑分（需要模型可用；对比 ③ 的增益）")
     args = parser.parse_args()
 
-    payload = run(verbose=args.verbose)
+    payload = run(verbose=args.verbose, with_planner=args.with_planner)
     metrics = payload["metrics"]
 
     print("黄金集基线")

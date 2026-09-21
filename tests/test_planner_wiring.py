@@ -1,0 +1,168 @@
+"""规划层的灰度开关、独立模型配置、以及接入回合构造。
+
+## 为什么这些必须有测试
+
+规划层是**行为变更**（它改变了"什么问句能进来"）。三条不变量必须锁住：
+
+1. **默认关闭**：开关不开时行为与今天逐字一致——不改变默认行为是灰度的前提，
+   否则"上线了但没测过的路径"会悄悄接管。
+2. **关闭时一次 LLM 都不调**：开关的意义就是省钱与可控，读了开关却不生效是最
+   典型的失败（本仓库已经踩过"声明而不执行"多次）。
+3. **规划失败降级**：规划器抛错不能中断回合，要退回规则路径（含追问）。
+
+另外，规划器与回答模型的配置必须**分开**：规划每轮都跑、要便宜快；回答要质量。
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from tradingagents.agent.planner_config import (
+    PLANNER_ENABLED_ENV,
+    PLANNER_MODEL_ENV,
+    PLANNER_PROFILE_ENV,
+    describe_planner,
+    llm_planner_enabled,
+    planner_target,
+)
+
+
+def _clear(monkeypatch):
+    for name in (PLANNER_ENABLED_ENV, PLANNER_MODEL_ENV, PLANNER_PROFILE_ENV):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_planner_is_off_by_default(monkeypatch):
+    _clear(monkeypatch)
+    assert llm_planner_enabled() is False, "默认必须是关闭：灰度期间不改默认行为"
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", "enabled"])
+def test_truthy_values_enable_it(monkeypatch, value):
+    _clear(monkeypatch)
+    monkeypatch.setenv(PLANNER_ENABLED_ENV, value)
+    assert llm_planner_enabled() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "", "  ", "off", "no"])
+def test_other_values_keep_it_off(monkeypatch, value):
+    _clear(monkeypatch)
+    monkeypatch.setenv(PLANNER_ENABLED_ENV, value)
+    assert llm_planner_enabled() is False
+
+
+def test_planner_target_defaults_to_following_the_answer_model(monkeypatch):
+    _clear(monkeypatch)
+    assert planner_target() == (None, None)
+    assert describe_planner()["follows_answer_model"] is True
+
+
+def test_planner_target_can_be_configured_separately(monkeypatch):
+    _clear(monkeypatch)
+    monkeypatch.setenv(PLANNER_MODEL_ENV, "cheap-model")
+    monkeypatch.setenv(PLANNER_PROFILE_ENV, "profile-1")
+    assert planner_target() == ("profile-1", "cheap-model")
+    assert describe_planner()["model"] == "cheap-model"
+
+
+# ── 接入回合构造 ──────────────────────────────────────────────────────────
+
+
+def _body(text: str):
+    from api.services.chat_service import ChatRequest
+
+    return ChatRequest(messages=[{"role": "user", "content": text}])
+
+
+def _patch_map(monkeypatch):
+    import api.main as main
+
+    monkeypatch.setattr(
+        main, "_get_stock_name_map_cached_only",
+        lambda: {"贵州茅台": "600519.SH", "宁德时代": "300750.SZ"},
+    )
+
+
+def test_without_planner_behaviour_is_unchanged(monkeypatch):
+    """不注入规划器 = 今天的行为：解析不出标的一律返回 None（路由转 400）。"""
+    from api.services import chat_service
+
+    _patch_map(monkeypatch)
+    assert chat_service.build_turn_request(_body("最近哪个板块最强"), user_id="u1") is None
+
+
+def test_planner_is_only_called_when_rules_fail(monkeypatch):
+    """规则已解析出标的时**不得**调用规划器（高频问句不付规划成本）。"""
+    from api.services import chat_service
+    from tradingagents.agent.routing import Plan
+
+    _patch_map(monkeypatch)
+    calls: list[str] = []
+
+    def _planner(text):
+        calls.append(text)
+        return Plan(intent="market_view", tier="light", market_level=True, confidence=0.8)
+
+    request = chat_service.build_turn_request(
+        _body("贵州茅台是不是在洗盘"), user_id="u1", planner=_planner
+    )
+    assert calls == [], f"规则已能解析标的却调用了规划器：{calls}"
+    assert request is not None and request.plan_source == "rules"
+
+
+def test_planner_opens_the_natural_language_path(monkeypatch):
+    """规则失败时才用规划器——这正是"任意自然语言"的入口。"""
+    from api.services import chat_service
+    from tradingagents.agent.routing import Plan
+
+    _patch_map(monkeypatch)
+
+    def _planner(text):
+        return Plan(intent="market_view", tier="light", market_level=True, confidence=0.8)
+
+    request = chat_service.build_turn_request(
+        _body("最近哪个板块最强"), user_id="u1", planner=_planner
+    )
+    assert request is not None, "规划层给出的落点应当被采纳"
+    assert request.plan_source == "llm"
+    assert request.market_level is True
+    assert request.tier == "light"
+
+
+def test_plan_supplies_symbols_for_comparison(monkeypatch):
+    from api.services import chat_service
+    from tradingagents.agent.routing import Plan
+
+    _patch_map(monkeypatch)
+    request = chat_service.build_turn_request(
+        _body("这两个哪个好"), user_id="u1",
+        planner=lambda text: Plan(
+            intent="multi_symbol_compare", tier="medium",
+            symbols=("600519.SH", "300750.SZ"), confidence=0.7,
+        ),
+    )
+    assert request is not None
+    assert request.symbols == ("600519.SH", "300750.SZ")
+
+
+def test_planner_failure_degrades_instead_of_breaking_the_turn(monkeypatch):
+    """规划器抛错不能中断回合：退回规则路径（此处即 400 追问）。"""
+    from api.services import chat_service
+
+    _patch_map(monkeypatch)
+
+    def _boom(text):
+        raise TimeoutError("planner slow")
+
+    assert chat_service.build_turn_request(
+        _body("最近哪个板块最强"), user_id="u1", planner=_boom
+    ) is None
+
+
+def test_planner_returning_none_falls_back(monkeypatch):
+    from api.services import chat_service
+
+    _patch_map(monkeypatch)
+    assert chat_service.build_turn_request(
+        _body("最近哪个板块最强"), user_id="u1", planner=lambda text: None
+    ) is None
