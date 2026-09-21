@@ -152,6 +152,8 @@ def _verdict_payload(result: ProbeResult) -> dict[str, Any]:
     """判定主体：只放结构化事实，不放散文。"""
     return {
         "probe": result.probe,
+        # 供回答层渲染"模型估计"口径：这是**代码**要写的事实，不该让模型转述
+        "estimated_dimensions": list(getattr(result, "estimated_dimensions", ()) or ()),
         "symbol": result.symbol,
         "as_of": result.as_of,
         "state": result.state,

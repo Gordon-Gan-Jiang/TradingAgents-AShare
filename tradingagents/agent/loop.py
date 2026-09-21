@@ -30,7 +30,7 @@ LLM、时钟、端口、事件出口全部由参数注入，于是循环可以�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Protocol, Sequence
 
 from tradingagents.grounding.renderer import render, render_insufficient
@@ -416,6 +416,40 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
         return planned
     return []
 
+
+
+def _declare_computed_coverage(
+    answer: StructuredAnswer, coverage_unavailable: Sequence[str]
+) -> StructuredAnswer:
+    """把**代码已算出**的未覆盖维度并入回答的声明。
+
+    为什么不让模型复述：未覆盖维度是编排层取数后**确定知道**的事实——它正是
+    这么算出来的。要求模型逐字复述，等于把"陈述已知事实"变成一次随机通过的语言
+    考试。实测 deepseek-v4-flash 连续两次没照抄，整轮被判
+    `coverage_unavailable_not_disclosed` 并降级成"什么都没有"——用户拿到的是
+    最差的结果（既没有答案，也不知道缺什么）。
+
+    并入之后，校验器的这条检查由**构造**满足，而渲染器本来就会把
+    `declared_unavailable` 写成「数据未覆盖」一行——所以用户该看到的声明一条不少。
+    """
+    declared = tuple(getattr(answer, "declared_unavailable", ()) or ())
+    if not coverage_unavailable:
+        return answer
+    merged = tuple(dict.fromkeys(declared + tuple(coverage_unavailable)))
+    if merged == declared:
+        return answer
+    return replace(answer, declared_unavailable=merged)
+
+
+def _estimated_disclosure(data: Mapping[str, Any]) -> str:
+    """把"模型估计"口径渲染成一行——由**代码**写，不靠模型自觉。"""
+    estimated = [str(item) for item in (data.get("estimated_dimensions") or [])]
+    if not estimated:
+        return ""
+    return (
+        f"**数据口径**：{'、'.join(estimated)} 为**模型估计**"
+        "（由日线与换手率推算），不是交易所原始数据。"
+    )
 
 
 def _with_screen_block(text: str, request: TurnRequest, merged: ToolResult) -> str:
@@ -850,6 +884,8 @@ def run_turn(
             request, evidence, ctx, coverage_unavailable, history=request.history
         )
         answer = model.propose(prompt=prompt, evidence=evidence, verdict=ctx.verdict)
+        # 声明由代码补齐（见 `_declare_computed_coverage`）：这是事实，不是模型的观点
+        answer = _declare_computed_coverage(answer, coverage_unavailable)
         ctx.model_calls += 1
         ctx.tokens += _tokens_of(model)
 
@@ -869,10 +905,14 @@ def run_turn(
                     reference_date=reference_date,
                     previous_trading_day=previous_trading_day,
                 )
+            # 本轮标的一并传入：断言里出现的**其他**代码必须能在被引证据里找到，
+            # 否则就是编造（实测漏洞：代码被排除在数值检查之外，编造的候选反而通过）
+            allowed = tuple(request.symbols) or ((request.symbol,) if request.symbol else ())
             return verify(
                 candidate,
                 evidence,
                 verdict_ids=verdict_ids,
+                allowed_symbols=allowed,
                 coverage_unavailable=coverage_unavailable,
                 reference_date=reference_date,
                 previous_trading_day=previous_trading_day,
@@ -910,6 +950,7 @@ def run_turn(
             repaired = model.repair(
                 previous=answer, failure=check, evidence=evidence, verdict=ctx.verdict
             )
+            repaired = _declare_computed_coverage(repaired, coverage_unavailable)
             ctx.model_calls += 1
             ctx.tokens += _tokens_of(model)
             recheck = _check(repaired)
@@ -942,6 +983,10 @@ def run_turn(
 
         text = render(answer, evidence)
         text = _with_screen_block(text, request, merged)
+        disclosure = _estimated_disclosure(merged.data)
+        if disclosure:
+            # 代码渲染，不由模型复述：估计口径必须**必然**出现在回答里
+            text = f"{text}\n\n{disclosure}"
         text = _apply_before_answer(chain, ctx, text)
 
         # 行动提议：Agent 只提议，用户确认后才执行。

@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+import re
+
 from .numbers import (
     date_assertion_ok,
     extract_dates,
@@ -37,6 +39,19 @@ REASON_UNSOURCED_DATE = "unsourced_date"
 REASON_DIRECTION_CONFLICT = "flow_direction_conflict"
 REASON_VERDICT_REF = "verdict_ref_not_from_turn"
 REASON_COVERAGE = "coverage_unavailable_not_disclosed"
+# 断言里的**股票代码**必须能溯源：要么是本轮标的，要么出现在被引证据里。
+# 实测漏洞：代码在数字提取时被 `_mask` 排除（那是为了不把 600519 当成数值），
+# 于是「999999.SZ 得分最高」这种**凭空编造的候选**反而一路通过校验——
+# 被排除在数值检查之外，就没有任何检查管它。而"候选不得编造"正是筛选回答的底线。
+REASON_UNSOURCED_INSTRUMENT = "unsourced_instrument"
+
+# 6 位代码（可带交易所后缀）。刻意不匹配更长数字串里的片段。
+_INSTRUMENT_RE = re.compile(r"(?<!\d)(\d{6})(?:\.(?:SH|SZ|SS))?(?!\d)", re.IGNORECASE)
+
+
+def _instruments(text: str) -> set[str]:
+    """抽取断言中提到的股票代码（归一为 6 位裸代码）。"""
+    return {match.group(1) for match in _INSTRUMENT_RE.finditer(text or "")}
 
 
 def _check_claim(
@@ -160,6 +175,7 @@ def verify(
     *,
     verdict_ids: frozenset[str] = frozenset(),
     coverage_unavailable: tuple[str, ...] = (),
+    allowed_symbols: Sequence[str] = (),
     reference_date: str | None = None,
     previous_trading_day: str | None = None,
 ) -> CheckResult:
@@ -184,6 +200,28 @@ def verify(
             detail=f"verdict_ref={answer.verdict_ref!r} 不指向本轮探针结果 {sorted(verdict_ids)}",
             refs_available=refs_available,
         )
+
+    # ── 股票代码必须可溯源 ───────────────────────────────────────────────
+    allowed_codes = {str(item).split(".")[0] for item in (allowed_symbols or ())}
+    for claim in answer.claims:
+        claim_text = str(getattr(claim, "text", "") or "")
+        cited_text = " ".join(
+            f"{item.field} {item.value}" for item in evidence.cited(claim.refs)
+        )
+        for code in _instruments(claim_text):
+            if code in allowed_codes:
+                continue
+            if code in _instruments(cited_text):
+                continue
+            return CheckResult.rejected(
+                REASON_UNSOURCED_INSTRUMENT,
+                failing_claim=claim_text,
+                detail=(
+                    f"代码 {code} 既不是本轮标的，也未出现在被引证据中"
+                    f"（本轮标的: {sorted(allowed_codes) or '无'}）"
+                ),
+                refs_available=evidence.ids(),
+            )
 
     missing_coverage = [d for d in coverage_unavailable if d not in answer.declared_unavailable]
     if missing_coverage:
