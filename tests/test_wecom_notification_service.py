@@ -29,12 +29,16 @@ async def _noop_sleep(*args):
 
 
 class TestBuildReportMessage:
-    def test_contains_core_fields(self):
+    @patch(
+        "api.services.wecom_notification_service._lookup_cn_stock_display_name",
+        return_value="600519.SH",
+    )
+    def test_contains_core_fields(self, _mock_lookup):
         from api.services.wecom_notification_service import build_report_message
 
         message = build_report_message(_make_report())
 
-        assert "TradingAgents 定时分析完成" in message
+        assert "AlphaPilot A-Share 定时分析完成" in message
         assert "标的：600519.SH" in message
         assert "交易日：2025-06-01" in message
         assert "决策：BUY" in message
@@ -55,12 +59,18 @@ class TestBuildReportMessage:
 
         assert "控制仓位" in message
 
+    def test_includes_chinese_name_when_distinct_from_symbol(self):
+        from api.services.wecom_notification_service import build_report_message
+
+        message = build_report_message(_make_report(), stock_name="贵州茅台")
+        assert "标的：贵州茅台（600519.SH）" in message
+
     def test_build_test_message_uses_default_copy(self):
         from api.services.wecom_notification_service import build_test_message
 
         message = build_test_message()
 
-        assert "TradingAgents Webhook Warmup" in message
+        assert "AlphaPilot A-Share Webhook Warmup" in message
         assert "测试消息" in message
 
 

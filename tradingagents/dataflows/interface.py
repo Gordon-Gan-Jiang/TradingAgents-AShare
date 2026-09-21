@@ -45,6 +45,15 @@ TOOLS_CATEGORIES = {
             "get_hot_stocks_xq",
         ],
     },
+    "cn_board_data": {
+        "description": "China A-share sector/board data: spot rankings, fund flow, history, constituents (mainline analysis)",
+        "tools": [
+            "get_board_spot",
+            "get_board_rank",
+            "get_board_hist",
+            "get_board_cons",
+        ],
+    },
 }
 
 _registry = build_default_registry()

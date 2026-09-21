@@ -1,9 +1,17 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from tradingagents.dataflows.config import get_config
+from tradingagents.methodology import get_stock_team_analysis_framework_block
 from tradingagents.prompts import get_prompt
 from tradingagents.graph.intent_parser import build_horizon_context
-from tradingagents.agents.utils.agent_states import current_tracker_var, extract_verdict
+from tradingagents.agents.utils.agent_states import (
+    current_tracker_var,
+    extract_verdict_with_flag,
+)
+from tradingagents.agents.utils.analyst_structured import (
+    extract_analyst_structured_json,
+    get_analyst_json_instruction,
+)
 
 
 def create_volume_price_analyst(llm, data_collector=None):
@@ -18,6 +26,9 @@ def create_volume_price_analyst(llm, data_collector=None):
         config = get_config()
         horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="volume_price")
         system_message = get_prompt("volume_price_system_message", config=config)
+        stock_team_framework = get_stock_team_analysis_framework_block(config)
+        if stock_team_framework:
+            system_message = system_message + "\n\n" + stock_team_framework
 
         if data_collector is not None:
             pool = data_collector.get(ticker, current_date)
@@ -37,6 +48,7 @@ def create_volume_price_analyst(llm, data_collector=None):
                 f"以下是 {ticker} 在 {current_date} 的量价分析预计算数据（数据窗口：{data_window}）。\n\n"
                 f"{vpa_data}\n\n"
                 f"【原始 K 线数据参考】\n{stock_data}"
+                + get_analyst_json_instruction(agent_role="volume_price", config=config)
             )),
         ]
 
@@ -48,18 +60,23 @@ def create_volume_price_analyst(llm, data_collector=None):
             if tracker:
                 tracker._emit_token("Volume Price Analyst", "volume_price_report", content)
 
-        verdict, confidence = extract_verdict(full_content)
+        verdict, confidence, verdict_parsed = extract_verdict_with_flag(full_content)
 
+        trace = {
+            "agent": "volume_price_analyst",
+            "horizon": horizon,
+            "data_window": data_window,
+            "key_finding": f"量价分析结论：{verdict}",
+            "verdict": verdict,
+            "confidence": confidence,
+            "verdict_parsed": verdict_parsed,
+        }
+        parsed = extract_analyst_structured_json(full_content)
+        if parsed:
+            trace["structured"] = parsed
         return {
             "volume_price_report": full_content,
-            "analyst_traces": [{
-                "agent": "volume_price_analyst",
-                "horizon": horizon,
-                "data_window": data_window,
-                "key_finding": f"量价分析结论：{verdict}",
-                "verdict": verdict,
-                "confidence": confidence,
-            }],
+            "analyst_traces": [trace],
         }
 
     return volume_price_analyst_node

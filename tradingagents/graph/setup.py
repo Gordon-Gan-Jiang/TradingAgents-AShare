@@ -28,6 +28,7 @@ def _load_agent_factories() -> dict[str, Any]:
     from tradingagents.agents.analysts.volume_price_analyst import create_volume_price_analyst
     from tradingagents.agents.managers.research_manager import create_research_manager
     from tradingagents.agents.managers.risk_manager import create_risk_manager
+    from tradingagents.agents.managers.decision_critic import create_decision_critic
     from tradingagents.agents.researchers.bear_researcher import create_bear_researcher
     from tradingagents.agents.researchers.bull_researcher import create_bull_researcher
     from tradingagents.agents.risk_mgmt.aggressive_debator import create_aggressive_debator
@@ -47,6 +48,7 @@ def _load_agent_factories() -> dict[str, Any]:
         "create_news_analyst": create_news_analyst,
         "create_research_manager": create_research_manager,
         "create_risk_manager": create_risk_manager,
+        "create_decision_critic": create_decision_critic,
         "create_smart_money_analyst": create_smart_money_analyst,
         "create_social_media_analyst": create_social_media_analyst,
         "create_volume_price_analyst": create_volume_price_analyst,
@@ -62,11 +64,6 @@ class GraphSetup:
         quick_thinking_llm: ChatOpenAI,
         deep_thinking_llm: ChatOpenAI,
         tool_nodes: Dict[str, ToolNode],
-        bull_memory,
-        bear_memory,
-        trader_memory,
-        invest_judge_memory,
-        risk_manager_memory,
         conditional_logic: ConditionalLogic,
         data_collector=None,
     ):
@@ -74,11 +71,6 @@ class GraphSetup:
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
         self.tool_nodes = tool_nodes
-        self.bull_memory = bull_memory
-        self.bear_memory = bear_memory
-        self.trader_memory = trader_memory
-        self.invest_judge_memory = invest_judge_memory
-        self.risk_manager_memory = risk_manager_memory
         self.conditional_logic = conditional_logic
         self.data_collector = data_collector
 
@@ -155,24 +147,17 @@ class GraphSetup:
             done_nodes["volume_price"] = analyst_done_node
 
         # Create researcher and manager nodes
-        bull_researcher_node = factories["create_bull_researcher"](
-            self.quick_thinking_llm, self.bull_memory
-        )
-        bear_researcher_node = factories["create_bear_researcher"](
-            self.quick_thinking_llm, self.bear_memory
-        )
-        research_manager_node = factories["create_research_manager"](
-            self.deep_thinking_llm, self.invest_judge_memory
-        )
-        trader_node = factories["create_trader"](self.quick_thinking_llm, self.trader_memory)
+        bull_researcher_node = factories["create_bull_researcher"](self.quick_thinking_llm)
+        bear_researcher_node = factories["create_bear_researcher"](self.quick_thinking_llm)
+        research_manager_node = factories["create_research_manager"](self.deep_thinking_llm)
+        trader_node = factories["create_trader"](self.quick_thinking_llm)
 
         # Create risk analysis nodes
         aggressive_analyst = factories["create_aggressive_debator"](self.quick_thinking_llm)
         neutral_analyst = factories["create_neutral_debator"](self.quick_thinking_llm)
         conservative_analyst = factories["create_conservative_debator"](self.quick_thinking_llm)
-        risk_manager_node = factories["create_risk_manager"](
-            self.deep_thinking_llm, self.risk_manager_memory
-        )
+        risk_manager_node = factories["create_risk_manager"](self.deep_thinking_llm)
+        decision_critic_node = factories["create_decision_critic"](self.deep_thinking_llm)
 
         # Create workflow
         workflow = StateGraph(AgentState)
@@ -196,6 +181,7 @@ class GraphSetup:
         workflow.add_node("Neutral Analyst", neutral_analyst)
         workflow.add_node("Conservative Analyst", conservative_analyst)
         workflow.add_node("Risk Judge", risk_manager_node)
+        workflow.add_node("Decision Critic", decision_critic_node)
 
         # Define edges
         # Fan out all selected analysts in parallel from START
@@ -273,9 +259,11 @@ class GraphSetup:
             self.conditional_logic.should_revise_after_risk_judge,
             {
                 "Trader": "Trader",
+                "Decision Critic": "Decision Critic",
                 "END": END,
             },
         )
+        workflow.add_edge("Decision Critic", END)
 
         # Compile and return
         return workflow.compile(checkpointer=checkpointer)

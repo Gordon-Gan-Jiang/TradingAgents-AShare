@@ -4,7 +4,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
 from tradingagents.graph.intent_parser import build_horizon_context
-from tradingagents.agents.utils.agent_states import current_tracker_var, extract_verdict
+from tradingagents.agents.utils.agent_states import (
+    current_tracker_var,
+    extract_verdict_with_flag,
+)
+from tradingagents.agents.utils.analyst_structured import (
+    extract_analyst_structured_json,
+    get_analyst_json_instruction,
+)
+from tradingagents.dataflows.trade_calendar import is_cn_symbol
+from tradingagents.methodology import get_news_events_ashare_methodology_block
 
 
 def create_news_analyst(llm, data_collector=None):
@@ -24,6 +33,15 @@ def create_news_analyst(llm, data_collector=None):
 
         config = get_config()
         system_message = get_prompt("news_system_message", config=config)
+        _sym = str(ticker or "").strip().upper().replace(".SS", ".SH")
+        if is_cn_symbol(_sym):
+            _addon = get_news_events_ashare_methodology_block(config)
+            if _addon:
+                system_message = (
+                    system_message
+                    + "\n\n## A 股事件与舆情专项方法论（须对照执行）\n\n"
+                    + _addon
+                )
         horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="news")
 
         pool = data_collector.get(ticker, current_date) if data_collector else None
@@ -61,6 +79,7 @@ def create_news_analyst(llm, data_collector=None):
                 f"以下是 {ticker} 在 {current_date} 的新闻资料（{data_window}）。\n\n"
                 f"【get_news】\n{stock_news}\n\n"
                 f"【get_global_news】\n{global_news}\n"
+                + get_analyst_json_instruction(agent_role="news", config=config)
             )),
         ]
 
@@ -73,17 +92,22 @@ def create_news_analyst(llm, data_collector=None):
             if tracker:
                 tracker._emit_token("News Analyst", "news_report", content)
 
-        verdict, confidence = extract_verdict(full_content)
+        verdict, confidence, verdict_parsed = extract_verdict_with_flag(full_content)
+        trace = {
+            "agent": "news_analyst",
+            "horizon": horizon,
+            "data_window": data_window,
+            "key_finding": f"新闻分析结论：{verdict}",
+            "verdict": verdict,
+            "confidence": confidence,
+            "verdict_parsed": verdict_parsed,
+        }
+        parsed = extract_analyst_structured_json(full_content)
+        if parsed:
+            trace["structured"] = parsed
         return {
             "news_report": full_content,
-            "analyst_traces": [{
-                "agent": "news_analyst",
-                "horizon": horizon,
-                "data_window": data_window,
-                "key_finding": f"新闻分析结论：{verdict}",
-                "verdict": verdict,
-                "confidence": confidence,
-            }],
+            "analyst_traces": [trace],
         }
 
     return news_analyst_node

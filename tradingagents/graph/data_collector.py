@@ -25,6 +25,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_lhb_detail,
     get_zt_pool,
     get_hot_stocks_xq,
+    get_realtime_quotes,
 )
 
 INDICATORS = [
@@ -287,6 +288,11 @@ def _fetch_all(ticker: str, trade_date: str) -> Dict[str, Any]:
         "income_statement": (get_income_statement, {"ticker": ticker, "freq": "quarterly", "curr_date": trade_date}),
     })
 
+    from tradingagents.dataflows.trade_calendar import cn_today_str
+
+    if trade_date == cn_today_str():
+        tasks["realtime_quotes"] = (get_realtime_quotes, {"symbols": [ticker]})
+
     results: Dict[str, Any] = {}
     fetch_start = time.time()
     # 减少并发池大小，避免被反爬
@@ -344,7 +350,30 @@ def _fetch_all(ticker: str, trade_date: str) -> Dict[str, Any]:
     except Exception as e:
         results["vpa_indicators"] = f"VPA 计算失败：{e}"
 
+    # ── A 股宏观摘要（方法论数据增强，供 Macro Analyst 交叉验证）──
+    try:
+        from tradingagents.dataflows.config import get_config
+        from tradingagents.methodology.macro_fetch import fetch_ashare_macro_pool_brief
+
+        _cfg = get_config()
+        results["macro_ashare_brief"] = fetch_ashare_macro_pool_brief(trade_date, _cfg)
+    except Exception:
+        results["macro_ashare_brief"] = ""
+
     print(f"[Timer] Total Data Collection for {ticker} took {time.time() - fetch_start:.2f}s")
+
+    try:
+        from tradingagents.dataflows.freshness import build_freshness_pool
+
+        results["freshness_pool"] = build_freshness_pool(results, trade_date, symbol=ticker)
+    except Exception as exc:
+        print(f"  [Warning] freshness_pool build failed: {exc}")
+        from tradingagents.dataflows.freshness import build_degraded_freshness_pool
+
+        results["freshness_pool"] = build_degraded_freshness_pool(
+            trade_date, symbol=ticker, reason=str(exc)
+        )
+
     return results
 
 

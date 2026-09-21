@@ -16,6 +16,7 @@ import type {
     AnalysisReport,
     ReportChunkEvent,
     Report,
+    ModelProfile,
 } from '@/types'
 
 interface ChatCopilotPanelProps {
@@ -138,6 +139,15 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
     // Only used to trigger re-render when pending status changes
     const [, forceUpdate] = useState(0)
     const [expandedAgentMsgId, setExpandedAgentMsgId] = useState<string | null>(null)
+    const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([])
+    const [modelProfilesLoading, setModelProfilesLoading] = useState(false)
+    const [selectedModelProfileId, setSelectedModelProfileId] = useState<string>(() => {
+        try {
+            return localStorage.getItem('ta-selected-model-profile-id') || ''
+        } catch {
+            return ''
+        }
+    })
     // Use global default analysts from Settings (read-only here)
     const selectedAnalysts = (() => {
         try {
@@ -250,6 +260,45 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
         })
     }, [chatMessages])
 
+    useEffect(() => {
+        let cancelled = false
+        setModelProfilesLoading(true)
+        api.listModelProfiles(false)
+            .then((resp) => {
+                if (cancelled) return
+                const rows = resp.profiles || []
+                setModelProfiles(rows)
+                if (!selectedModelProfileId) {
+                    const def = rows.find((item) => item.is_default)
+                    if (def) setSelectedModelProfileId(def.id)
+                } else if (!rows.some((item) => item.id === selectedModelProfileId)) {
+                    const def = rows.find((item) => item.is_default)
+                    setSelectedModelProfileId(def?.id || '')
+                }
+            })
+            .catch(() => {
+                if (!cancelled) setModelProfiles([])
+            })
+            .finally(() => {
+                if (!cancelled) setModelProfilesLoading(false)
+            })
+        return () => {
+            cancelled = true
+        }
+    }, [])
+
+    useEffect(() => {
+        try {
+            if (selectedModelProfileId) {
+                localStorage.setItem('ta-selected-model-profile-id', selectedModelProfileId)
+            } else {
+                localStorage.removeItem('ta-selected-model-profile-id')
+            }
+        } catch {
+            // ignore
+        }
+    }, [selectedModelProfileId])
+
     const pushAssistant = (content: string) => {
         addChatMessage({
             id: `${Date.now()}-${Math.random()}`,
@@ -340,7 +389,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                     `**分析完成**\n\n方向倾向：**${String(data.direction || '未知')}**\n\n执行动作：**${String(data.decision || 'HOLD')}**\n\n> 免责声明：以上内容由模型基于公开数据与规则生成，仅供研究参考，不构成任何投资建议或收益承诺。`
                 )
                 if ('Notification' in window && Notification.permission === 'granted') {
-                    new Notification('TradingAgents 分析完成', {
+                    new Notification('AlphaPilot A-Share 分析完成', {
                         body: data.direction ? `方向：${String(data.direction)} · 动作：${String(data.decision || 'HOLD')}` : '点击查看完整报告',
                         icon: '/favicon.ico',
                     })
@@ -552,6 +601,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
             [{ role: 'user', content: prompt }],
             true,
             selectedAnalysts,
+            selectedModelProfileId || undefined,
         )
 
         if (!response.body) throw new Error('SSE stream unavailable')
@@ -694,7 +744,7 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
                             }
                         }}
                         disabled={streaming || isAnalyzing}
-                        className="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-400 hover:bg-red-100 dark:hover:bg-red-500/20 hover:text-red-600 dark:hover:text-red-400 transition-colors flex items-center gap-1 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-slate-100 dark:disabled:hover:bg-slate-700 disabled:hover:text-slate-500"
+                        className="text-xs px-2 py-1 rounded bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300 hover:bg-red-100 dark:hover:bg-red-500/20 hover:text-red-600 dark:hover:text-red-400 transition-colors flex items-center gap-1 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-slate-100 dark:disabled:hover:bg-slate-700 disabled:hover:text-slate-500"
                         title="清空对话"
                     >
                         <Trash2 className="w-3 h-3" />
@@ -711,6 +761,28 @@ export default function ChatCopilotPanel({ onSymbolDetected, onShowReport, initi
             <div className="text-xs text-slate-500 dark:text-slate-400 mb-3 flex items-center gap-1">
                 <Sparkles className="w-3 h-3" />
                 示例：分析贵州茅台 600519.SH 今天走势
+            </div>
+
+            <div className="mb-3">
+                <label className="mb-1 block text-[11px] text-slate-500 dark:text-slate-400">
+                    分析模型
+                </label>
+                <div className="flex items-center gap-2">
+                    <select
+                        value={selectedModelProfileId}
+                        onChange={(e) => setSelectedModelProfileId(e.target.value)}
+                        className="input w-full text-sm"
+                        disabled={streaming || modelProfilesLoading}
+                    >
+                        <option value="">默认模型（系统设置）</option>
+                        {modelProfiles.map((row) => (
+                            <option key={row.id} value={row.id}>
+                                {row.name}
+                                {row.is_default ? '（默认）' : ''}
+                            </option>
+                        ))}
+                    </select>
+                </div>
             </div>
 
             {/* 快速提示 */}

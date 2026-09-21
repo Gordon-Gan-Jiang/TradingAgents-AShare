@@ -216,7 +216,7 @@ function AgentNodeComponent({ data }: NodeProps<AgentFlowNode>) {
                     'shrink-0 text-[11px] px-2 py-0.5 rounded-full font-bold',
                     active ? 'bg-blue-600 text-white animate-pulse'
                         : done ? 'bg-emerald-500 text-white'
-                        : 'bg-slate-100 text-slate-400 dark:bg-slate-700 dark:text-slate-500',
+                        : 'bg-slate-100 text-slate-400 dark:bg-slate-700 dark:text-slate-300',
                 ].join(' ')}>
                     {STATUS_LABEL[status]}
                 </span>
@@ -236,13 +236,18 @@ function AgentNodeComponent({ data }: NodeProps<AgentFlowNode>) {
 
             {/* 第二行：完成后的判定结果 */}
             {done && verdict && (
-                <div className="flex items-start gap-2 mt-2 min-w-0">
-                    <span className={`shrink-0 mt-0.5 text-[11px] font-black px-2 py-0.5 rounded-full leading-none ${VERDICT_COLORS[verdict.direction] ?? VERDICT_COLORS._default}`}>
-                        {verdict.direction}
-                    </span>
-                    <span className="text-[12px] text-slate-500 dark:text-slate-400 leading-snug line-clamp-2">
-                        {verdict.reason}
-                    </span>
+                <div className="mt-2 min-w-0 space-y-1">
+                    <div className="flex items-start gap-2">
+                        <span className={`shrink-0 mt-0.5 text-[11px] font-black px-2 py-0.5 rounded-full leading-none ${VERDICT_COLORS[verdict.direction] ?? VERDICT_COLORS._default}`}>
+                            {verdict.direction}
+                        </span>
+                        <span className="text-[12px] text-slate-500 dark:text-slate-400 leading-snug line-clamp-2">
+                            {verdict.reason}
+                        </span>
+                    </div>
+                    <p className="text-[11px] font-semibold tabular-nums text-slate-400 dark:text-slate-500 pl-0.5">
+                        置信度 {verdict.confidence}%
+                    </p>
                 </div>
             )}
 
@@ -403,7 +408,7 @@ export default function AgentCollaboration({ onSelectSection, onOpenDebate, sele
                 <div className="flex items-center gap-3">
                     <div className={`w-3 h-3 rounded-full ${isAnalyzing ? 'bg-blue-500 animate-pulse shadow-[0_0_12px_#3b82f6]' : 'bg-slate-300'}`} />
                     <h3 className="text-lg font-black text-slate-900 dark:text-white tracking-tighter uppercase">
-                        TradingAgents 协同工作流
+                        AlphaPilot A-Share 协同工作流
                     </h3>
                 </div>
                 {isAnalyzing && (

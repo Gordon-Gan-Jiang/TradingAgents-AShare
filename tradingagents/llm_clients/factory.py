@@ -4,6 +4,7 @@ from .base_client import BaseLLMClient
 from .openai_client import OpenAIClient
 from .anthropic_client import AnthropicClient
 from .google_client import GoogleClient
+from .validators import validate_llm_provider
 
 
 def create_llm_client(
@@ -26,7 +27,7 @@ def create_llm_client(
     Raises:
         ValueError: If provider is not supported
     """
-    provider_lower = provider.lower()
+    provider_lower = validate_llm_provider(provider)
 
     if provider_lower in ("openai", "ollama", "openrouter"):
         return OpenAIClient(model, base_url, provider=provider_lower, **kwargs)
@@ -40,4 +41,4 @@ def create_llm_client(
     if provider_lower == "google":
         return GoogleClient(model, base_url, **kwargs)
 
-    raise ValueError(f"Unsupported LLM provider: {provider}")
+    raise ValueError(f"Unsupported LLM provider: {provider}")  # pragma: no cover

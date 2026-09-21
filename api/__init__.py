@@ -1,2 +1,2 @@
-"""TradingAgents API package."""
+"""AlphaPilot A-Share API package."""
 

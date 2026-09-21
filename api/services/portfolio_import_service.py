@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from api.database import ImportedPortfolioPositionDB
+from api.database import ImportedPortfolioPositionDB, ScheduledAnalysisDB
 from api.services import scheduled_service
 from tradingagents.agents.utils.context_utils import normalize_user_context
 
@@ -27,6 +27,110 @@ _CODE_RE = re.compile(r"^(\d{6})\.(SH|SZ|BJ)$")
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def _row_to_merge_base(row: ImportedPortfolioPositionDB) -> dict[str, Any]:
+    return {
+        "symbol": row.symbol,
+        "name": row.security_name,
+        "current_position": row.current_position,
+        "available_position": row.available_position,
+        "average_cost": row.average_cost,
+        "market_value": row.market_value,
+        "current_position_pct": row.current_position_pct,
+    }
+
+
+def _empty_merge_base(symbol: str) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "name": None,
+        "current_position": None,
+        "available_position": None,
+        "average_cost": None,
+        "market_value": None,
+        "current_position_pct": None,
+    }
+
+
+def _normalize_merge_patch(raw: dict[str, Any]) -> dict[str, Any] | None:
+    symbol = _normalize_code(raw.get("symbol"))
+    if not symbol:
+        return None
+    patch: dict[str, Any] = {"symbol": symbol}
+    if "name" in raw:
+        patch["name"] = (raw.get("name") or "").strip() or None
+    for key in (
+        "current_position",
+        "available_position",
+        "average_cost",
+        "market_value",
+        "current_position_pct",
+    ):
+        if key in raw:
+            patch[key] = _to_float(raw.get(key))
+    return patch
+
+
+def _apply_position_patch(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    out = dict(base)
+    for k, v in patch.items():
+        if k == "symbol":
+            continue
+        out[k] = v
+    return out
+
+
+def merge_imported_positions(
+    db: Session,
+    user_id: str,
+    positions: list[dict[str, Any]],
+    source: str = "manual",
+    auto_apply_scheduled: bool = True,
+) -> dict[str, Any]:
+    """在指定 source 上与现有持仓合并：新代码追加，已有代码按请求字段覆盖（未传的字段保留）。"""
+    if not isinstance(positions, list) or not positions:
+        raise ValueError("positions 至少包含一条记录")
+
+    source = (source or "manual").strip()
+    patches: list[dict[str, Any]] = []
+    for raw in positions:
+        p = _normalize_merge_patch(raw)
+        if p:
+            patches.append(p)
+    if not patches:
+        raise ValueError("没有有效的股票代码")
+
+    rows = (
+        db.query(ImportedPortfolioPositionDB)
+        .filter(
+            ImportedPortfolioPositionDB.user_id == user_id,
+            ImportedPortfolioPositionDB.source == source,
+        )
+        .order_by(
+            ImportedPortfolioPositionDB.market_value.desc(),
+            ImportedPortfolioPositionDB.current_position.desc(),
+            ImportedPortfolioPositionDB.symbol,
+        )
+        .all()
+    )
+
+    merged_by_symbol: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        merged_by_symbol[row.symbol] = _row_to_merge_base(row)
+        order.append(row.symbol)
+
+    for patch in patches:
+        sym = patch["symbol"]
+        if sym in merged_by_symbol:
+            merged_by_symbol[sym] = _apply_position_patch(merged_by_symbol[sym], patch)
+        else:
+            merged_by_symbol[sym] = _apply_position_patch(_empty_merge_base(sym), patch)
+            order.append(sym)
+
+    merged_list = [merged_by_symbol[s] for s in order]
+    return sync_positions(db, user_id, merged_list, source=source, auto_apply_scheduled=auto_apply_scheduled)
+
 
 def sync_positions(
     db: Session,
@@ -190,6 +294,42 @@ def clear_imported_portfolio(db: Session, user_id: str) -> None:
         ImportedPortfolioPositionDB.user_id == user_id,
     ).delete()
     db.commit()
+
+
+def delete_imported_positions_for_symbol(db: Session, user_id: str, symbol: str) -> dict[str, Any]:
+    """Remove all imported rows for this user+标的（跨 source），并删除同标的的定时分析任务。"""
+    norm = _normalize_code(symbol)
+    if not norm:
+        raise ValueError("无效的股票代码，请使用如 600519.SH / 000001.SZ")
+
+    deleted = (
+        db.query(ImportedPortfolioPositionDB)
+        .filter(
+            ImportedPortfolioPositionDB.user_id == user_id,
+            ImportedPortfolioPositionDB.symbol == norm,
+        )
+        .delete(synchronize_session=False)
+    )
+
+    scheduled = (
+        db.query(ScheduledAnalysisDB)
+        .filter(
+            ScheduledAnalysisDB.user_id == user_id,
+            ScheduledAnalysisDB.symbol == norm,
+        )
+        .first()
+    )
+    scheduled_removed = False
+    if scheduled:
+        db.delete(scheduled)
+        scheduled_removed = True
+
+    db.commit()
+    return {
+        "symbol": norm,
+        "deleted_positions": int(deleted or 0),
+        "scheduled_removed": scheduled_removed,
+    }
 
 
 # ---------------------------------------------------------------------------

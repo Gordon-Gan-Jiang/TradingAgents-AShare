@@ -13,6 +13,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from api.database import BacktestJobDB, get_db_ctx
+
 # ──────────────────────────────────────────────────────────────────────────────
 # In-memory store (no additional DB table — results stored as JSON in the job)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -24,28 +26,89 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+def _persist_job(job_id: str) -> None:
+    payload = dict(_backtest_jobs.get(job_id, {}))
+    if not payload:
+        return
+    with get_db_ctx() as db:
+        row = db.query(BacktestJobDB).filter(BacktestJobDB.job_id == job_id).first()
+        if row is None:
+            row = BacktestJobDB(job_id=job_id, symbol=str(payload.get("symbol") or ""), start_date=str(payload.get("start_date") or ""), end_date=str(payload.get("end_date") or ""), status=str(payload.get("status") or "pending"))
+            db.add(row)
+        row.user_id = payload.get("user_id")
+        row.symbol = str(payload.get("symbol") or row.symbol or "")
+        row.start_date = str(payload.get("start_date") or row.start_date or "")
+        row.end_date = str(payload.get("end_date") or row.end_date or "")
+        row.selected_analysts_json = list(payload.get("selected_analysts") or [])
+        row.hold_days = int(payload.get("hold_days") or 5)
+        row.sample_interval = int(payload.get("sample_interval") or 7)
+        row.status = str(payload.get("status") or "pending")
+        row.total_dates = int(payload.get("total_dates") or 0)
+        row.completed_dates = int(payload.get("completed_dates") or 0)
+        row.records_json = list(payload.get("records") or [])
+        row.stats_json = payload.get("stats")
+        row.config_snapshot_json = payload.get("config")
+        row.error = payload.get("error")
+        row.created_at = _parse_iso(payload.get("created_at")) or row.created_at
+        row.started_at = _parse_iso(payload.get("started_at"))
+        row.finished_at = _parse_iso(payload.get("finished_at"))
+        db.commit()
+
+
 def _set(job_id: str, **kwargs: Any) -> None:
     with _lock:
         if job_id not in _backtest_jobs:
             _backtest_jobs[job_id] = {}
         _backtest_jobs[job_id].update(kwargs)
+    _persist_job(job_id)
 
 
 def get_job(job_id: str) -> Optional[Dict[str, Any]]:
-    return _backtest_jobs.get(job_id)
+    with _lock:
+        cached = dict(_backtest_jobs.get(job_id, {}))
+    if cached:
+        return cached
+    with get_db_ctx() as db:
+        row = db.query(BacktestJobDB).filter(BacktestJobDB.job_id == job_id).first()
+        if row is None:
+            return None
+        return _row_to_dict(row)
 
 
 def list_jobs() -> List[Dict[str, Any]]:
+    with get_db_ctx() as db:
+        rows = db.query(BacktestJobDB).order_by(BacktestJobDB.created_at.desc()).all()
+        persisted = [_row_to_dict(row) for row in rows]
     with _lock:
-        return sorted(_backtest_jobs.values(), key=lambda j: j.get("created_at", ""), reverse=True)
+        for item in persisted:
+            _backtest_jobs[item["job_id"]] = dict(item)
+    return persisted
 
 
 def delete_job(job_id: str) -> bool:
+    deleted = False
     with _lock:
         if job_id in _backtest_jobs:
             del _backtest_jobs[job_id]
-            return True
-        return False
+            deleted = True
+    with get_db_ctx() as db:
+        row = db.query(BacktestJobDB).filter(BacktestJobDB.job_id == job_id).first()
+        if row is not None:
+            db.delete(row)
+            db.commit()
+            deleted = True
+    return deleted
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -231,11 +294,13 @@ def submit(
     hold_days: int,
     sample_interval: int,
     config: Dict[str, Any],
+    user_id: Optional[str] = None,
 ) -> str:
     """Submit a backtest job. Returns job_id."""
     job_id = uuid4().hex
     _set(job_id,
          job_id=job_id,
+         user_id=user_id,
          symbol=symbol,
          start_date=start_date,
          end_date=end_date,
@@ -248,7 +313,8 @@ def submit(
          completed_dates=0,
          records=[],
          stats=None,
-         error=None)
+         error=None,
+         config=config)
 
     thread = threading.Thread(
         target=_run_backtest,
@@ -257,3 +323,26 @@ def submit(
     )
     thread.start()
     return job_id
+
+
+def _row_to_dict(row: BacktestJobDB) -> Dict[str, Any]:
+    return {
+        "job_id": row.job_id,
+        "user_id": row.user_id,
+        "symbol": row.symbol,
+        "start_date": row.start_date,
+        "end_date": row.end_date,
+        "selected_analysts": list(row.selected_analysts_json or []),
+        "hold_days": row.hold_days,
+        "sample_interval": row.sample_interval,
+        "status": row.status,
+        "total_dates": row.total_dates,
+        "completed_dates": row.completed_dates,
+        "records": list(row.records_json or []),
+        "stats": row.stats_json,
+        "config": row.config_snapshot_json,
+        "error": row.error,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+    }

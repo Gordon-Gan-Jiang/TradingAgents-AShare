@@ -1,13 +1,14 @@
 from tradingagents.dataflows.config import get_config
 from tradingagents.prompts import get_prompt
 from tradingagents.agents.utils.agent_states import current_tracker_var
+from tradingagents.agents.utils.analyst_structured import build_structured_brief_for_research_manager
 from tradingagents.agents.utils.debate_utils import (
     format_claim_subset_for_prompt,
     format_claims_for_prompt,
 )
 
 
-def create_research_manager(llm, memory):
+def create_research_manager(llm):
     async def research_manager_node(state) -> dict:
         history = state["investment_debate_state"].get("history", "")
         market_research_report = state["market_report"]
@@ -22,15 +23,10 @@ def create_research_manager(llm, memory):
         unresolved_claim_ids = investment_debate_state.get("unresolved_claim_ids", [])
         round_summary = investment_debate_state.get("round_summary", "")
 
-        curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
-        past_memories = memory.get_memories(curr_situation, n_matches=2)
-
-        past_memory_str = ""
-        for i, rec in enumerate(past_memories, 1):
-            past_memory_str += rec["recommendation"] + "\n\n"
+        brief = build_structured_brief_for_research_manager(list(state.get("analyst_traces") or []))
 
         prompt = get_prompt("research_manager_prompt", config=get_config()).format(
-            past_memory_str=past_memory_str,
+            analyst_structured_brief=brief,
             history=history,
             smart_money_report=smart_money_report,
             volume_price_report=volume_price_report,

@@ -5,8 +5,6 @@ from datetime import date, datetime, time
 from functools import lru_cache
 from zoneinfo import ZoneInfo
 
-import pandas as pd
-
 CN_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -30,11 +28,22 @@ def _load_cn_trade_dates() -> tuple[list[date], set[date]]:
         df = ak.tool_trade_date_hist_sina()
         if df is None or df.empty or "trade_date" not in df.columns:
             raise ValueError("empty trade date table")
-        dates = sorted(
-            pd_dt.date()
-            for pd_dt in pd.to_datetime(df["trade_date"], errors="coerce")
-            if str(pd_dt) != "NaT"
-        )
+        try:
+            import pandas as pd  # type: ignore
+
+            parsed = pd.to_datetime(df["trade_date"], errors="coerce")
+            dates = sorted(
+                pd_dt.date() for pd_dt in parsed if str(pd_dt) != "NaT"
+            )
+        except Exception:
+            # Minimal runtime fallback: best-effort parse via stdlib
+            dates = []
+            for v in df["trade_date"]:
+                try:
+                    dates.append(datetime.fromisoformat(str(v)).date())
+                except Exception:
+                    continue
+            dates = sorted(set(dates))
         return dates, set(dates)
     except Exception:
         # Fallback: no holiday calendar, only weekend rule.
@@ -43,7 +52,7 @@ def _load_cn_trade_dates() -> tuple[list[date], set[date]]:
 
 def is_cn_symbol(symbol: str) -> bool:
     s = symbol.strip().upper()
-    return bool(re.match(r"^\d{6}(\.(SH|SZ|SS))?$", s))
+    return bool(re.match(r"^\d{6}(\.(SH|SZ|SS|BJ))?$", s))
 
 
 def is_cn_trading_day(date_str: str) -> bool:
@@ -52,6 +61,30 @@ def is_cn_trading_day(date_str: str) -> bool:
     if dates:
         return d in dates_set
     return d.weekday() < 5
+
+
+def next_cn_trading_day(date_str: str) -> str | None:
+    """Return the next trading day strictly after *date_str* (YYYY-MM-DD), or None if unknown."""
+    d = _parse_date(date_str)
+    dates, _ = _load_cn_trade_dates()
+    if dates:
+        lo, hi = 0, len(dates)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if dates[mid] <= d:
+                lo = mid + 1
+            else:
+                hi = mid
+        if lo < len(dates):
+            return dates[lo].strftime("%Y-%m-%d")
+        return None
+    # Fallback: skip weekends only
+    cur = d
+    for _ in range(10):
+        cur = cur.fromordinal(cur.toordinal() + 1)
+        if cur.weekday() < 5:
+            return cur.strftime("%Y-%m-%d")
+    return None
 
 
 def previous_cn_trading_day(date_str: str) -> str:

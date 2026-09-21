@@ -2,7 +2,8 @@ from langchain_core.messages import HumanMessage, RemoveMessage
 
 # Import tools from separate utility files
 from tradingagents.agents.utils.core_stock_tools import (
-    get_stock_data
+    get_stock_data,
+    get_realtime_quotes,
 )
 from tradingagents.agents.utils.technical_indicators_tools import (
     get_indicators
@@ -24,6 +25,12 @@ from tradingagents.agents.utils.game_theory_tools import (
     get_lhb_detail,
     get_zt_pool,
     get_hot_stocks_xq,
+)
+from tradingagents.agents.utils.board_data_tools import (
+    get_board_spot,
+    get_board_rank,
+    get_board_hist,
+    get_board_cons,
 )
 
 def create_msg_delete():

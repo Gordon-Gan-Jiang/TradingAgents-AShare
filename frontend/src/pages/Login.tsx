@@ -1,8 +1,26 @@
-import { FormEvent, useMemo, useState } from 'react'
-import { ArrowRight, CheckCircle2, Loader2, LockKeyhole, Mail, Radar, ShieldCheck, Sparkles, TrendingUp } from 'lucide-react'
+import type { MouseEvent as ReactMouseEvent } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
+import {
+    AlertCircle,
+    ArrowLeft,
+    ArrowRight,
+    CheckCircle2,
+    Fingerprint,
+    Loader2,
+    LockKeyhole,
+    Mail,
+    Moon,
+    Radar,
+    RefreshCw,
+    ShieldCheck,
+    Sun,
+    TrendingUp,
+    Waypoints,
+} from 'lucide-react'
 import { api } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
 import { useNavigate } from 'react-router-dom'
+import '@/styles/login.css'
 
 const SIGNALS = [
     { label: '研究框架', value: '14-Agent' },
@@ -37,6 +55,43 @@ const AGENT_GROUPS = [
     },
 ]
 
+type ThemeMode = 'system' | 'light' | 'dark'
+
+function isDarkFor(mode: ThemeMode) {
+    if (mode === 'system') return window.matchMedia('(prefers-color-scheme: dark)').matches
+    return mode === 'dark'
+}
+
+function readStoredTheme(): ThemeMode {
+    const saved = localStorage.getItem('ta-theme') || 'system'
+    return saved === 'light' || saved === 'dark' ? saved : 'system'
+}
+
+function BrandMark() {
+    return (
+        <svg width="42" height="42" viewBox="0 0 42 42" fill="none" aria-hidden="true" focusable="false">
+            <defs>
+                <linearGradient id="ap-mark-gradient" x1="3" y1="1" x2="39" y2="41" gradientUnits="userSpaceOnUse">
+                    <stop stopColor="#22D3EE" />
+                    <stop offset="0.52" stopColor="#3B82F6" />
+                    <stop offset="1" stopColor="#8B5CF6" />
+                </linearGradient>
+            </defs>
+            <rect width="42" height="42" rx="13" fill="url(#ap-mark-gradient)" />
+            <rect x="0.75" y="0.75" width="40.5" height="40.5" rx="12.25" stroke="rgba(255,255,255,0.4)" strokeWidth="1.5" />
+            <path
+                d="M10.5 29 L18.5 19.5 L24 24.5 L31.5 13.5"
+                stroke="white"
+                strokeWidth="2.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+            />
+            <circle cx="31.5" cy="13.5" r="2.6" fill="white" />
+            <circle cx="10.5" cy="29" r="1.7" fill="rgba(255,255,255,0.72)" />
+        </svg>
+    )
+}
+
 export default function Login() {
     const navigate = useNavigate()
     const { setAuth } = useAuthStore()
@@ -44,10 +99,51 @@ export default function Login() {
     const [code, setCode] = useState('')
     const [step, setStep] = useState<'email' | 'code'>('email')
     const [loading, setLoading] = useState(false)
+    const [resending, setResending] = useState(false)
     const [message, setMessage] = useState<string | null>(null)
     const [error, setError] = useState<string | null>(null)
 
+    const codeInputRef = useRef<HTMLInputElement | null>(null)
+    const spotlightFrame = useRef<number | null>(null)
+
+    const themeMode = useMemo<ThemeMode>(readStoredTheme, [])
+    const [currentTheme, setCurrentTheme] = useState<ThemeMode>(themeMode)
+    const [isDark, setIsDark] = useState(() => isDarkFor(themeMode))
+
     const submitLabel = useMemo(() => step === 'email' ? '发送验证码' : '进入研究终端', [step])
+    const pendingLabel = step === 'email' ? '正在发送' : '正在验证'
+
+    // 进入验证码步骤后自动聚焦，减少一次点击
+    useEffect(() => {
+        if (step === 'code') codeInputRef.current?.focus()
+    }, [step])
+
+    useEffect(() => () => {
+        if (spotlightFrame.current !== null) cancelAnimationFrame(spotlightFrame.current)
+    }, [])
+
+    const cycleTheme = () => {
+        const next: ThemeMode = currentTheme === 'system' ? 'light' : currentTheme === 'light' ? 'dark' : 'system'
+        const dark = isDarkFor(next)
+        document.documentElement.classList.toggle('dark', dark)
+        localStorage.setItem('ta-theme', next)
+        setCurrentTheme(next)
+        setIsDark(dark)
+    }
+
+    // 卡片跟随指针的柔光：仅在精细指针设备上启用，并合并到每一帧
+    const handleSpotlight = (event: ReactMouseEvent<HTMLDivElement>) => {
+        const card = event.currentTarget
+        const x = event.clientX
+        const y = event.clientY
+        if (spotlightFrame.current !== null) return
+        spotlightFrame.current = requestAnimationFrame(() => {
+            spotlightFrame.current = null
+            const rect = card.getBoundingClientRect()
+            card.style.setProperty('--ap-mx', `${x - rect.left}px`)
+            card.style.setProperty('--ap-my', `${y - rect.top}px`)
+        })
+    }
 
     const handleRequestCode = async (e: FormEvent) => {
         e.preventDefault()
@@ -80,192 +176,301 @@ export default function Login() {
         }
     }
 
+    const handleResend = async () => {
+        setResending(true)
+        setError(null)
+        setMessage(null)
+        try {
+            const res = await api.requestLoginCode(email)
+            setMessage(res.dev_code ? `开发环境验证码：${res.dev_code}` : '验证码已重新发送，请查收邮箱。')
+        } catch (err) {
+            setError(err instanceof Error ? err.message : '重新发送验证码失败')
+        } finally {
+            setResending(false)
+        }
+    }
+
+    const backToEmail = () => {
+        setCode('')
+        setStep('email')
+        setMessage(null)
+        setError(null)
+    }
+
+    const emailInvalid = Boolean(error) && step === 'email'
+    const codeInvalid = Boolean(error) && step === 'code'
+
     return (
-        <div className="flex min-h-screen flex-col overflow-hidden bg-[radial-gradient(circle_at_0%_0%,rgba(34,211,238,0.16),transparent_28%),radial-gradient(circle_at_100%_0%,rgba(37,99,235,0.16),transparent_24%),linear-gradient(180deg,#f6f8fb_0%,#edf2f7_100%)] px-5 py-8 dark:bg-[radial-gradient(circle_at_0%_0%,rgba(34,211,238,0.18),transparent_22%),radial-gradient(circle_at_100%_0%,rgba(59,130,246,0.18),transparent_24%),linear-gradient(180deg,#020617_0%,#0b1120_100%)] md:px-10">
-            <div className="mx-auto grid flex-1 max-w-7xl grid-cols-1 gap-10 lg:grid-cols-[1.12fr_0.88fr] lg:gap-0">
-                <section className="relative flex flex-col justify-between px-2 py-4 lg:px-8 lg:py-10">
-                    <div className="absolute left-0 top-0 h-72 w-72 rounded-full bg-cyan-400/10 blur-3xl dark:bg-cyan-400/10" />
-                    <div className="absolute bottom-10 right-16 h-64 w-64 rounded-full bg-blue-500/10 blur-3xl dark:bg-blue-500/10" />
+        <div className="ap-login">
+            <div className="ap-bg" aria-hidden="true">
+                <div className="ap-bg-grid" />
+                <div className="ap-blob ap-blob-1" />
+                <div className="ap-blob ap-blob-2" />
+                <div className="ap-blob ap-blob-3" />
+                <div className="ap-bg-noise" />
+            </div>
 
-                    <div className="relative">
-                        <div className="inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/85 px-3 py-1.5 text-xs tracking-[0.22em] text-slate-500 shadow-sm dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-400">
-                            <Radar className="h-3.5 w-3.5 text-cyan-500" />
+            <div className="ap-shell">
+                <header className="ap-topbar">
+                    <div className="ap-brand">
+                        <span className="ap-mark">
+                            <BrandMark />
+                        </span>
+                        <span className="ap-wordmark">
+                            <strong>AlphaPilot</strong>
+                            <span>A-Share Research OS</span>
+                        </span>
+                    </div>
+
+                    <div className="ap-topbar-actions">
+                        <span className="ap-pill ap-pill-topbar">
+                            <Radar className="h-3.5 w-3.5" aria-hidden="true" />
                             A 股多智能体研究系统
-                        </div>
+                        </span>
+                        <button
+                            type="button"
+                            className="ap-icon-btn"
+                            onClick={cycleTheme}
+                            aria-label={`切换主题，当前为${currentTheme === 'system' ? '跟随系统' : currentTheme === 'dark' ? '深色' : '浅色'}模式`}
+                            title="切换主题（跟随系统 / 浅色 / 深色）"
+                        >
+                            {isDark
+                                ? <Moon className="h-[18px] w-[18px]" aria-hidden="true" />
+                                : <Sun className="h-[18px] w-[18px]" aria-hidden="true" />}
+                        </button>
+                    </div>
+                </header>
 
-                        <div className="mt-10 max-w-3xl">
-                            <h1 className="text-5xl font-semibold tracking-[-0.04em] text-slate-950 dark:text-white md:text-7xl">
-                                为投研决策
-                                <span className="mt-2 block bg-gradient-to-r from-cyan-500 via-blue-600 to-indigo-600 bg-clip-text text-transparent">
-                                    设计的智能工作台
+                <div className="ap-cols">
+                    <section className="ap-story" aria-labelledby="ap-headline">
+                        <span className="ap-pill ap-rise" style={{ alignSelf: 'flex-start', animationDelay: '40ms' }}>
+                            <span className="ap-dot" aria-hidden="true" />
+                            14-Agent 协同研究框架
+                        </span>
+
+                        <h1 id="ap-headline" className="ap-display ap-rise" style={{ animationDelay: '100ms' }}>
+                            为投研决策
+                            <span className="ap-grad block">设计的智能工作台</span>
+                        </h1>
+
+                        <p className="ap-lede ap-rise" style={{ animationDelay: '160ms' }}>
+                            从市场、舆情、新闻、基本面、宏观、主力资金到风控与组合决策，将 14 个 Agent 的协作过程沉淀为可追踪、可复盘、可持续更新的研究链路。
+                        </p>
+
+                        <dl className="ap-stats ap-rise" style={{ animationDelay: '220ms' }}>
+                            {SIGNALS.map((item) => (
+                                <div key={item.label} className="ap-stat">
+                                    <dt>{item.label}</dt>
+                                    <dd>{item.value}</dd>
+                                </div>
+                            ))}
+                        </dl>
+
+                        <div className="ap-panel ap-rise" style={{ animationDelay: '280ms' }}>
+                            <div className="ap-panel-head">
+                                <div>
+                                    <div className="ap-eyebrow">14-Agent Architecture</div>
+                                    <h2>协同分工概览</h2>
+                                </div>
+                                <span className="ap-panel-badge">
+                                    <Waypoints className="h-[18px] w-[18px]" aria-hidden="true" />
                                 </span>
-                            </h1>
-                            <p className="mt-6 max-w-2xl text-base leading-8 text-slate-600 dark:text-slate-300 md:text-lg">
-                                从市场、舆情、新闻、基本面、宏观、主力资金到风控与组合决策，将 14 个 Agent 的协作过程沉淀为可追踪、可复盘、可持续更新的研究链路。
+                            </div>
+
+                            <ol className="ap-stages">
+                                {AGENT_GROUPS.map((group, index) => (
+                                    <li key={group.title} className="ap-stage">
+                                        <div className="ap-stage-top">
+                                            <span className="ap-stage-idx">{String(index + 1).padStart(2, '0')}</span>
+                                            <span className="ap-stage-count">{group.count} 名</span>
+                                        </div>
+                                        <h3>{group.title}</h3>
+                                        <p>{group.description}</p>
+                                        <ul className="ap-tags">
+                                            {group.items.map((item) => (
+                                                <li key={item}>{item}</li>
+                                            ))}
+                                        </ul>
+                                    </li>
+                                ))}
+                            </ol>
+
+                            <p className="ap-note">
+                                <TrendingUp className="h-4 w-4" aria-hidden="true" />
+                                <span>登录后可持续保存研究历史、模型配置与分析上下文，用于跟踪同一标的在不同日期下的判断演进。</span>
                             </p>
                         </div>
+                    </section>
 
-                        <div className="mt-10 grid gap-3 sm:grid-cols-3">
-                            {SIGNALS.map((item) => (
-                                <div key={item.label} className="rounded-[28px] border border-slate-200/80 bg-white/88 p-5 shadow-[0_14px_40px_rgba(15,23,42,0.06)] backdrop-blur-sm dark:border-slate-800/90 dark:bg-slate-950 dark:shadow-[0_18px_44px_rgba(2,6,23,0.32)]">
-                                    <div className="text-[11px] tracking-[0.18em] text-slate-400 dark:text-slate-500">{item.label}</div>
-                                    <div className="mt-3 text-2xl font-semibold text-slate-900 dark:text-slate-50">{item.value}</div>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
+                    <section className="ap-auth">
+                        <div
+                            className="ap-card ap-rise"
+                            style={{ animationDelay: '200ms' }}
+                            onMouseMove={handleSpotlight}
+                        >
+                            <span className="ap-card-spot" aria-hidden="true" />
 
-                    <div className="relative mt-10 rounded-[36px] border border-slate-200/80 bg-white/90 p-6 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800/90 dark:bg-slate-950 dark:shadow-[0_28px_88px_rgba(2,6,23,0.5)] lg:mt-0">
-                        <div className="flex items-center justify-between">
-                            <div>
-                                <div className="text-[11px] tracking-[0.22em] text-slate-400 dark:text-slate-500">14-AGENT 架构</div>
-                                <div className="mt-2 text-xl font-semibold text-slate-950 dark:text-white">协同分工概览</div>
-                            </div>
-                            <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-950 text-white dark:bg-white dark:text-slate-950">
-                                <Sparkles className="h-5 w-5" />
-                            </div>
-                        </div>
-
-                        <div className="mt-6 grid gap-3 md:grid-cols-2">
-                            {AGENT_GROUPS.map((group) => (
-                                <div key={group.title} className="rounded-[24px] border border-slate-200/80 bg-slate-50/90 p-4 dark:border-slate-800/90 dark:bg-slate-900">
-                                    <div className="flex items-center justify-between">
-                                        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{group.title}</div>
-                                        <div className="rounded-full bg-cyan-500/10 px-2.5 py-0.5 text-xs font-medium text-cyan-600 dark:text-cyan-300">
-                                            {group.count} 名
-                                        </div>
-                                    </div>
-                                    <div className="mt-3 flex flex-wrap gap-2">
-                                        {group.items.map((item) => (
-                                            <span key={item} className="rounded-full bg-white px-2.5 py-1 text-xs text-slate-600 shadow-sm dark:bg-slate-800 dark:text-slate-200 dark:ring-1 dark:ring-slate-700/70">
-                                                {item}
-                                            </span>
-                                        ))}
-                                    </div>
-                                    <div className="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">{group.description}</div>
-                                </div>
-                            ))}
-                        </div>
-
-                        <div className="mt-5 flex items-start gap-3 rounded-[24px] bg-slate-950 px-4 py-4 text-slate-100 dark:border dark:border-slate-800/80 dark:bg-slate-900">
-                            <TrendingUp className="mt-0.5 h-4 w-4 shrink-0 text-cyan-400" />
-                            <div className="text-sm leading-6 text-slate-300">
-                                登录后可持续保存研究历史、模型配置与分析上下文，用于跟踪同一标的在不同日期下的判断演进。
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
-                <section className="flex items-center px-2 py-4 lg:justify-end lg:px-8 lg:py-10">
-                    <div className="w-full max-w-md">
-                        <div className="rounded-[36px] border border-slate-200/80 bg-white/92 p-7 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800/90 dark:bg-slate-950 dark:shadow-[0_28px_88px_rgba(2,6,23,0.56)]">
-                            <div className="flex items-center justify-between">
+                            <div className="ap-card-head">
                                 <div>
-                                    <div className="text-[11px] tracking-[0.22em] text-slate-400 dark:text-slate-500">身份验证</div>
-                                    <h2 className="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">进入个人研究空间</h2>
+                                    <div className="ap-eyebrow">Identity Verification</div>
+                                    <h2>进入个人研究空间</h2>
+                                    <p>使用邮箱验证码登录，无需记忆密码。</p>
                                 </div>
-                                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-500 via-blue-500 to-indigo-600 text-white shadow-[0_12px_30px_rgba(37,99,235,0.28)]">
-                                    <ShieldCheck className="h-6 w-6" />
-                                </div>
+                                <span className="ap-shield">
+                                    <ShieldCheck className="h-[22px] w-[22px]" aria-hidden="true" />
+                                </span>
                             </div>
 
-                            <div className="mt-6 flex items-center gap-2 rounded-2xl bg-slate-100 p-1 dark:bg-slate-900 dark:ring-1 dark:ring-slate-800">
-                                <div className={`flex-1 rounded-xl px-3 py-2 text-center text-sm transition-colors ${step === 'email' ? 'bg-white text-slate-950 shadow-sm dark:bg-slate-800 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
-                                    邮箱验证
-                                </div>
-                                <div className={`flex-1 rounded-xl px-3 py-2 text-center text-sm transition-colors ${step === 'code' ? 'bg-white text-slate-950 shadow-sm dark:bg-slate-800 dark:text-white' : 'text-slate-500 dark:text-slate-400'}`}>
-                                    输入验证码
-                                </div>
-                            </div>
+                            <ol className="ap-steps" aria-label="登录步骤">
+                                <li className="ap-steps-rail" aria-hidden="true">
+                                    <i style={{ transform: `scaleX(${step === 'code' ? 1 : 0})` }} />
+                                </li>
+                                <li
+                                    className={`ap-step${step === 'code' ? ' is-done' : ''}`}
+                                    aria-current={step === 'email' ? 'step' : undefined}
+                                >
+                                    <span className="ap-step-dot">1</span>
+                                    <span className="ap-step-label">邮箱验证</span>
+                                </li>
+                                <li
+                                    className="ap-step"
+                                    aria-current={step === 'code' ? 'step' : undefined}
+                                >
+                                    <span className="ap-step-dot">2</span>
+                                    <span className="ap-step-label">输入验证码</span>
+                                </li>
+                            </ol>
 
-                            <form onSubmit={step === 'email' ? handleRequestCode : handleVerify} className="mt-6 space-y-4">
-                                <div>
-                                    <label className="mb-2 block text-sm font-medium text-slate-600 dark:text-slate-400">邮箱地址</label>
-                                    <div className="relative">
-                                        <Mail className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                            <form
+                                className="ap-form"
+                                onSubmit={step === 'email' ? handleRequestCode : handleVerify}
+                                aria-busy={loading}
+                            >
+                                {step === 'code' && (
+                                    <p className="ap-recipient">
+                                        <span>验证码已发送至 <strong>{email}</strong></span>
+                                        <button type="button" className="ap-linkbtn" onClick={backToEmail} disabled={loading}>
+                                            修改
+                                        </button>
+                                    </p>
+                                )}
+
+                                <div className="ap-field">
+                                    <label className="ap-label" htmlFor="ap-email">邮箱地址</label>
+                                    <div className="ap-control">
+                                        <Mail aria-hidden="true" />
                                         <input
+                                            id="ap-email"
+                                            name="email"
                                             type="email"
+                                            className={`ap-input${emailInvalid ? ' is-invalid' : ''}`}
                                             value={email}
                                             onChange={(e) => setEmail(e.target.value)}
-                                            className="input h-12 w-full rounded-2xl pl-11"
                                             placeholder="you@example.com"
+                                            autoComplete="email"
+                                            inputMode="email"
                                             disabled={loading || step === 'code'}
+                                            aria-invalid={emailInvalid || undefined}
                                             required
                                         />
                                     </div>
+                                    {step === 'email' && (
+                                        <p className="ap-hint">验证码将发送至该邮箱，用于创建或进入你的私有研究空间。</p>
+                                    )}
                                 </div>
 
                                 {step === 'code' && (
-                                    <div>
-                                        <label className="mb-2 block text-sm font-medium text-slate-600 dark:text-slate-400">验证码</label>
-                                        <div className="relative">
-                                            <LockKeyhole className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                                    <div className="ap-field">
+                                        <label className="ap-label" htmlFor="ap-code">邮箱验证码</label>
+                                        <div className="ap-control">
+                                            <LockKeyhole aria-hidden="true" />
                                             <input
+                                                id="ap-code"
+                                                name="code"
+                                                ref={codeInputRef}
                                                 type="text"
+                                                className={`ap-input ap-otp${codeInvalid ? ' is-invalid' : ''}`}
                                                 value={code}
                                                 onChange={(e) => setCode(e.target.value)}
-                                                className="input h-12 w-full rounded-2xl pl-11 tracking-[0.35em]"
                                                 placeholder="输入 6 位验证码"
+                                                autoComplete="one-time-code"
+                                                inputMode="numeric"
                                                 maxLength={6}
+                                                aria-invalid={codeInvalid || undefined}
+                                                aria-describedby="ap-code-hint"
                                                 required
                                             />
                                         </div>
+                                        <p className="ap-hint" id="ap-code-hint">验证码为 6 位数字，支持直接粘贴填写。</p>
                                     </div>
                                 )}
 
                                 {message && (
-                                    <div className="flex items-start gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">
-                                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
+                                    <p className="ap-alert ap-alert-ok" role="status">
+                                        <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
                                         <span>{message}</span>
-                                    </div>
-                                )}
-                                {error && (
-                                    <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/30 dark:bg-rose-500/12 dark:text-rose-200">
-                                        {error}
-                                    </div>
+                                    </p>
                                 )}
 
-                                <button type="submit" disabled={loading} className="btn-primary flex h-12 w-full items-center justify-center gap-2 rounded-2xl">
-                                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowRight className="h-4 w-4" />}
-                                    {submitLabel}
+                                {error && (
+                                    <p className="ap-alert ap-alert-err" role="alert">
+                                        <AlertCircle className="h-4 w-4" aria-hidden="true" />
+                                        <span>{error}</span>
+                                    </p>
+                                )}
+
+                                <button type="submit" className="ap-cta" disabled={loading}>
+                                    {loading
+                                        ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                                        : <ArrowRight className="h-4 w-4" aria-hidden="true" />}
+                                    {loading ? pendingLabel : submitLabel}
                                 </button>
 
                                 {step === 'code' && (
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setCode('')
-                                            setStep('email')
-                                            setMessage(null)
-                                            setError(null)
-                                        }}
-                                        className="btn-secondary flex h-12 w-full items-center justify-center rounded-2xl"
-                                    >
-                                        重新获取验证码
-                                    </button>
+                                    <div className="grid gap-2.5">
+                                        <button
+                                            type="button"
+                                            className="ap-ghost"
+                                            onClick={handleResend}
+                                            disabled={loading || resending}
+                                        >
+                                            {resending
+                                                ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                                                : <RefreshCw className="h-4 w-4" aria-hidden="true" />}
+                                            {resending ? '正在重新发送' : '重新发送验证码'}
+                                        </button>
+                                        <button type="button" className="ap-ghost" onClick={backToEmail} disabled={loading}>
+                                            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
+                                            更换邮箱地址
+                                        </button>
+                                    </div>
                                 )}
                             </form>
 
-                            <div className="mt-6 rounded-2xl bg-slate-100/90 px-4 py-3 text-xs leading-6 text-slate-500 dark:border dark:border-slate-800/80 dark:bg-slate-900 dark:text-slate-400">
-                                当前账户将独占保存报告历史、模型密钥与分析上下文，适合持续跟踪个人研究对象。
-                            </div>
+                            <p className="ap-secure">
+                                <Fingerprint className="h-4 w-4" aria-hidden="true" />
+                                <span>当前账户将独占保存报告历史、模型密钥与分析上下文，适合持续跟踪个人研究对象。</span>
+                            </p>
                         </div>
-                    </div>
-                </section>
-            </div>
+                    </section>
+                </div>
 
-            <footer className="mx-auto max-w-7xl pb-4 pt-2 text-center text-xs text-slate-400 dark:text-slate-500">
-                <p>
-                    &copy; {new Date().getFullYear()} KylinMountain &middot; 仅限非商业用途（PolyForm NC 1.0） &middot;{' '}
-                    <a href="https://github.com/KylinMountain/TradingAgents-AShare" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-slate-600 dark:hover:text-slate-300">
-                        GitHub
-                    </a>
-                    {' '}&middot;{' '}
-                    <a href="https://app.510168.xyz" target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 hover:text-slate-600 dark:hover:text-slate-300">
-                        官网
-                    </a>
-                </p>
-            </footer>
+                <footer className="ap-foot">
+                    <p>
+                        &copy; {new Date().getFullYear()} KylinMountain
+                        <span className="ap-sep">&middot;</span>
+                        仅限非商业用途（PolyForm NC 1.0）
+                        <span className="ap-sep">&middot;</span>
+                        <a href="https://github.com/KylinMountain/TradingAgents-AShare" target="_blank" rel="noopener noreferrer">
+                            GitHub
+                        </a>
+                        <span className="ap-sep">&middot;</span>
+                        <a href="https://app.510168.xyz" target="_blank" rel="noopener noreferrer">
+                            官网
+                        </a>
+                    </p>
+                </footer>
+            </div>
         </div>
     )
 }

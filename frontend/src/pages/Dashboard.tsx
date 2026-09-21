@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 import { api } from '@/services/api'
+import { FreshnessBadge } from '@/components/FreshnessBadge'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import { useAuthStore } from '@/stores/authStore'
 import type { Report, TrackingBoardResponse } from '@/types'
@@ -56,15 +57,15 @@ export default function Dashboard() {
     return (
         <div className="space-y-6">
             {dashboardError && (
-                <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
+                <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
                     {dashboardError}
                 </div>
             )}
             <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">控制台</h1>
+                    <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">控制台</h1>
                     <p className="mt-1 text-slate-500 dark:text-slate-400">
-                        {user?.email ? `当前账户：${user.email}` : '欢迎使用 TradingAgents 智能分析系统'}
+                        {user?.email ? `当前账户：${user.email}` : '欢迎使用 AlphaPilot A-Share 智能分析系统'}
                     </p>
                 </div>
             </div>
@@ -107,7 +108,7 @@ export default function Dashboard() {
 
             <div className="card">
                 <h2 className="mb-4 text-lg font-semibold text-slate-900 dark:text-slate-100">快速开始</h2>
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
                     <QuickActionCard
                         title="开始新分析"
                         description="输入股票代码，启动多 Agent 智能分析"
@@ -126,6 +127,12 @@ export default function Dashboard() {
                         action="打开设置"
                         onClick={() => navigate('/settings')}
                     />
+                    <QuickActionCard
+                        title="模型管理"
+                        description="维护可切换的大模型配置列表"
+                        action="进入管理"
+                        onClick={() => navigate('/model-profiles')}
+                    />
                 </div>
             </div>
 
@@ -143,14 +150,14 @@ export default function Dashboard() {
                 </div>
 
                 {recentReports.length === 0 ? (
-                    <p className="py-8 text-center text-slate-400 dark:text-slate-500">
+                    <p className="py-8 text-center text-slate-500 dark:text-slate-400">
                         暂无分析记录，
                         <button onClick={() => navigate('/analysis')} className="text-blue-500 hover:underline">
                             开始新分析
                         </button>
                     </p>
                 ) : (
-                    <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                    <div className="divide-y divide-slate-200/70 dark:divide-slate-700/60">
                         {recentReports.map(report => {
                             const decisionColor = report.decision?.toUpperCase().includes('BUY') || report.decision?.includes('增持')
                                 ? 'text-red-600 dark:text-red-400'
@@ -173,13 +180,14 @@ export default function Dashboard() {
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-4">
+                                        <FreshnessBadge status={report.freshness_status} />
                                         <span className={`text-sm font-medium ${decisionColor}`}>
                                             {report.decision || '-'}
                                         </span>
                                         {report.confidence != null && (
-                                            <span className="text-xs text-slate-400">{report.confidence}%</span>
+                                            <span className="text-xs tabular-nums text-slate-500 dark:text-slate-400">{report.confidence}%</span>
                                         )}
-                                        <p className="hidden text-xs text-slate-400 dark:text-slate-500 sm:block">
+                                        <p className="hidden text-xs tabular-nums text-slate-500 dark:text-slate-400 sm:block">
                                             {report.created_at ? new Date(report.created_at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''}
                                         </p>
                                     </div>
@@ -260,9 +268,9 @@ function MetaCard({
     subValue: string
 }) {
     return (
-        <div className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 dark:border-slate-700 dark:bg-slate-800/40">
-            <p className="text-xs uppercase tracking-[0.14em] text-slate-400">{label}</p>
-            <p className="mt-2 text-xl font-semibold text-slate-900 dark:text-slate-100">{value}</p>
+        <div className="rounded-xl border border-slate-200/80 bg-slate-50 px-4 py-3 dark:border-slate-700/60 dark:bg-slate-900/40">
+            <p className="text-xs font-medium uppercase tracking-[0.1em] text-slate-500 dark:text-slate-400">{label}</p>
+            <p className="mt-2 text-xl font-semibold tabular-nums text-slate-900 dark:text-slate-100">{value}</p>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{subValue}</p>
         </div>
     )
@@ -299,13 +307,13 @@ function StatCard({ icon: Icon, label, value, subValue, color }: StatCardProps) 
 
     return (
         <div className="card card-hover">
-            <div className="flex items-start justify-between">
-                <div>
-                    <p className="text-sm text-slate-500 dark:text-slate-400">{label}</p>
-                    <p className="mt-1 text-2xl font-bold text-slate-900 dark:text-slate-100">{value}</p>
-                    <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">{subValue}</p>
+            <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                    <p className="text-xs font-medium uppercase tracking-[0.1em] text-slate-500 dark:text-slate-400">{label}</p>
+                    <p className="mt-1.5 text-2xl font-bold tabular-nums tracking-tight text-slate-900 dark:text-slate-100">{value}</p>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">{subValue}</p>
                 </div>
-                <div className={`rounded-lg p-3 ${colorClasses[color]}`}>
+                <div className={`flex-shrink-0 rounded-xl p-3 ring-1 ring-inset ring-black/5 dark:ring-white/10 ${colorClasses[color]}`}>
                     <Icon className="h-5 w-5" />
                 </div>
             </div>
@@ -324,12 +332,13 @@ function QuickActionCard({ title, description, action, onClick }: QuickActionCar
     return (
         <button
             onClick={onClick}
-            className="block w-full rounded-lg border border-slate-200 bg-white p-4 text-left transition-all duration-200 hover:border-blue-400 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800/30 dark:hover:border-blue-500 dark:hover:bg-slate-800/50"
+            className="group block w-full rounded-xl border border-slate-200/90 bg-slate-50/60 p-4 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-400/80 hover:bg-white hover:shadow-card dark:border-slate-700/60 dark:bg-slate-900/40 dark:hover:border-blue-500/50 dark:hover:bg-slate-800/50"
         >
             <h3 className="font-medium text-slate-900 dark:text-slate-100">{title}</h3>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{description}</p>
-            <span className="mt-3 inline-block text-sm text-blue-600 dark:text-blue-400">
-                {action} →
+            <span className="mt-3 inline-flex items-center gap-1 text-sm font-medium text-blue-600 dark:text-blue-400">
+                {action}
+                <ArrowRight className="h-3.5 w-3.5 transition-transform duration-200 group-hover:translate-x-0.5" />
             </span>
         </button>
     )

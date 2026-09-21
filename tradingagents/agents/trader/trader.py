@@ -3,6 +3,7 @@ import functools
 import time
 import json
 from tradingagents.dataflows.config import get_config
+from tradingagents.methodology import get_stock_team_market_strategy_block
 from tradingagents.prompts import get_prompt
 from tradingagents.agents.utils.agent_states import current_tracker_var
 from tradingagents.agents.utils.context_utils import build_agent_context_view
@@ -12,7 +13,7 @@ from tradingagents.agents.utils.debate_utils import (
 )
 
 
-def create_trader(llm, memory):
+def create_trader(llm):
     async def trader_node(state, name):
         company_name = state["company_of_interest"]
         investment_plan = state["investment_plan"]
@@ -23,24 +24,18 @@ def create_trader(llm, memory):
         fundamentals_report = state["fundamentals_report"]
         risk_feedback_state = state.get("risk_feedback_state", {})
 
-        curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
-        past_memories = memory.get_memories(curr_situation, n_matches=2)
-
-        past_memory_str = ""
-        if past_memories:
-            for i, rec in enumerate(past_memories, 1):
-                past_memory_str += rec["recommendation"] + "\n\n"
-        else:
-            past_memory_str = "No past memories found."
-
         config = get_config()
         context_view = build_agent_context_view(state, "trader")
         risk_feedback_summary = summarize_risk_feedback(risk_feedback_state)
+        strategy_block = get_stock_team_market_strategy_block(config)
+        system_prompt = get_prompt("trader_system_prompt", config=config)
+        if strategy_block:
+            system_prompt = system_prompt + "\n\n" + strategy_block
 
         messages = [
             {
                 "role": "system",
-                "content": get_prompt("trader_system_prompt", config=config),
+                "content": system_prompt,
             },
             {
                 "role": "user",
@@ -52,7 +47,6 @@ def create_trader(llm, memory):
                     market_context_summary=context_view["market_context_summary"],
                     user_context_summary=context_view["user_context_summary"],
                     risk_feedback_summary=risk_feedback_summary,
-                    past_memory_str=past_memory_str,
                 ),
             },
         ]

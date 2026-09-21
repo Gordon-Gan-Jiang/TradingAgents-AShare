@@ -12,7 +12,7 @@ from tradingagents.agents.utils.debate_utils import (
 )
 
 
-def create_bear_researcher(llm, memory):
+def create_bear_researcher(llm):
     async def bear_node(state) -> dict:
         investment_debate_state = state["investment_debate_state"]
         history = investment_debate_state.get("history", "")
@@ -34,13 +34,6 @@ def create_bear_researcher(llm, memory):
         specific_questions = user_intent.get("specific_questions", [])
         horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="bear")
 
-        curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}\n\n{volume_price_report}"
-        past_memories = memory.get_memories(curr_situation, n_matches=2)
-
-        past_memory_str = ""
-        for i, rec in enumerate(past_memories, 1):
-            past_memory_str += rec["recommendation"] + "\n\n"
-
         prompt = horizon_ctx + get_prompt("bear_prompt", config=get_config()).format(
             market_research_report=market_research_report,
             sentiment_report=sentiment_report,
@@ -49,7 +42,6 @@ def create_bear_researcher(llm, memory):
             volume_price_report=volume_price_report,
             history=history,
             current_response=current_response,
-            past_memory_str=past_memory_str,
             focus_claims_text=format_claim_subset_for_prompt(claims, focus_claim_ids),
             unresolved_claims_text=format_claim_subset_for_prompt(claims, unresolved_claim_ids),
             claims_text=format_claims_for_prompt(claims),

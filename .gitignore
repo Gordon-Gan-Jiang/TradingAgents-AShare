@@ -252,3 +252,64 @@ frontend/node_modules/
 .vite/
 uv.lock.cp313
 .worktrees/
+
+# Added by specpower init (regeneratable assets)
+.claude/specpower/prompts/
+.claude/specpower/schemas/
+.claude/specpower/templates/
+.cursor/specpower/prompts/
+.cursor/specpower/schemas/
+.cursor/specpower/templates/
+# End specpower init
+
+# dev.sh 运行时目录（PID/日志）
+.dev/
+
+# ============================================================
+# Local-only files that must never reach the public repository
+# ============================================================
+
+# --- Secrets / local env files (only *.example templates are tracked) ---
+.env
+.env*
+*.env.local
+!.env.example
+!**/.env.example
+
+# --- Local AI-agent & editor tooling (per-developer, not project source) ---
+.agents/
+.claude/
+.cursor/
+.dsh-vision-toolkit/
+.idea/
+.vscode/
+
+# --- Editor / OS noise ---
+.DS_Store
+**/.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# --- Local SQLite runtime state (tradingagents.db is multi-hundred-MB) ---
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# --- Stray browser/Chrome user-data dirs accidentally created in frontend/ ---
+frontend/3000/
+frontend/9000/
+
+# --- Local scratch / tool reports ---
+gap_analysis.html
+frontend/.vade-report
+.vade-report
+.pytest-*.log
+*.tmp
+
+# --- Dependency trees (belt-and-braces; root-level too) ---
+node_modules/
+

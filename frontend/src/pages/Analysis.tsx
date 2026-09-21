@@ -6,6 +6,7 @@ import ReportViewer from '@/components/ReportViewer'
 import ChatCopilotPanel from '@/components/ChatCopilotPanel'
 import KlinePanel from '@/components/KlinePanel'
 import DecisionCard from '@/components/DecisionCard'
+import ConsensusCard from '@/components/ConsensusCard'
 import RiskRadar from '@/components/RiskRadar'
 import KeyMetrics from '@/components/KeyMetrics'
 import { useAnalysisStore } from '@/stores/analysisStore'
@@ -86,9 +87,11 @@ export default function Analysis() {
 
     return (
         <div className="space-y-4">
-            <div className="grid grid-cols-[340px_minmax(0,1fr)] gap-4 min-h-[calc(100vh-5rem)]">
-                <aside className="h-[calc(100vh-5rem)] sticky top-0 flex flex-col gap-4">
-                    <div className="min-h-0 flex-1">
+            {/* 窄屏必须堆叠：固定 340px 左栏在 480px 视口下会把右栏压到 2px，
+                内容（K 线标题等）会溢出页面 41px。1024px 以下改为单列。 */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[340px_minmax(0,1fr)] lg:min-h-[calc(100vh-5rem)]">
+                <aside className="flex flex-col gap-4 lg:sticky lg:top-0 lg:h-[calc(100vh-5rem)]">
+                    <div className="h-[480px] min-h-0 lg:h-auto lg:flex-1">
                         <ChatCopilotPanel
                             onSymbolDetected={(symbol) => {
                                 setActiveSymbol(symbol)
@@ -126,6 +129,8 @@ export default function Analysis() {
                         <RiskRadar items={riskItems} />
                         <KeyMetrics items={keyMetrics} />
                     </div>
+
+                    <ConsensusCard summary={report?.consensus_summary} />
 
                     <div ref={reportRef}>
                         <ReportViewer activeSection={activeSection} />

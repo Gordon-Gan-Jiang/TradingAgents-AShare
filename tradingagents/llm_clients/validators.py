@@ -4,6 +4,24 @@ Only validates model names - does NOT enforce limits.
 Let LLM providers use their own defaults for unspecified params.
 """
 
+from __future__ import annotations
+
+import re
+
+SUPPORTED_LLM_PROVIDERS = frozenset({
+    "openai",
+    "anthropic",
+    "google",
+    "xai",
+    "ollama",
+    "openrouter",
+})
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
 VALID_MODELS = {
     "openai": [
         # GPT-5 series (2025)
@@ -64,6 +82,31 @@ VALID_MODELS = {
         "grok-4-fast-non-reasoning",
     ],
 }
+
+
+def looks_like_uuid(value: str) -> bool:
+    """Return True when value matches a UUID (e.g. Volcengine Ark endpoint ID)."""
+    return bool(_UUID_RE.match(str(value or "").strip()))
+
+
+def validate_llm_provider(provider: str) -> str:
+    """Normalize and validate llm_provider; reject misplaced endpoint IDs."""
+    text = str(provider or "").strip().lower()
+    if not text:
+        raise ValueError("llm_provider 不能为空")
+    if text in SUPPORTED_LLM_PROVIDERS:
+        return text
+    raw = str(provider or "").strip()
+    if looks_like_uuid(raw):
+        raise ValueError(
+            f"llm_provider 配置错误：'{raw}' 看起来是火山方舟接入点 ID，不是 provider。"
+            "请将接入点 ID 填在模型名（quick_think_llm / deep_think_llm 或 TA_LLM_QUICK / TA_LLM_DEEP），"
+            "llm_provider 请设为 openai。"
+        )
+    raise ValueError(
+        f"不支持的 llm_provider: {provider}。"
+        f"支持的值: {', '.join(sorted(SUPPORTED_LLM_PROVIDERS))}"
+    )
 
 
 def validate_model(provider: str, model: str) -> bool:

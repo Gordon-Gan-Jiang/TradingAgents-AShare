@@ -1,6 +1,5 @@
 """Report service for database operations."""
 
-import json
 import json_repair
 import logging
 import re
@@ -11,10 +10,17 @@ from typing import List, Optional, Dict, Any, Iterable, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, load_only
 
 from api.database import ReportDB
+from tradingagents.agents.utils.direction import (
+    parse_stated_confidence,
+    coerce_persistable_decision,
+    extract_direction_result,
+    extract_tagged_json,
+    normalize_direction,
+)
 
 
 REPORT_SUMMARY_COLUMNS = (
@@ -32,12 +38,45 @@ REPORT_SUMMARY_COLUMNS = (
     ReportDB.risk_items,
     ReportDB.key_metrics,
     ReportDB.analyst_traces,
+    ReportDB.result_data,
+    ReportDB.freshness_status,
     ReportDB.created_at,
     ReportDB.updated_at,
 )
 
 ACTIVE_REPORT_STATUSES = ("pending", "running")
 STALE_REPORT_ERROR_MESSAGE = "分析任务已中断，请重新发起分析"
+
+_REPORT_SEARCH_MAX_LEN = 64
+
+
+def _escape_sql_like(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _reports_text_search_clause(search: str):
+    """Match reports by symbol substring (case-insensitive) or Chinese name substring."""
+    raw = (search or "").strip()
+    if not raw:
+        return None
+    if len(raw) > _REPORT_SEARCH_MAX_LEN:
+        raw = raw[:_REPORT_SEARCH_MAX_LEN]
+    q_lower = raw.lower()
+    symbol_pattern = f"%{_escape_sql_like(q_lower)}%"
+    branches = [func.lower(ReportDB.symbol).like(symbol_pattern, escape="\\")]
+
+    # Lazy import: api.main loads report_service at startup; import runs only when searching.
+    from api.main import _get_reverse_stock_map
+
+    sym_from_name: list[str] = []
+    for sym, name in _get_reverse_stock_map().items():
+        if not name:
+            continue
+        if raw in name or raw.lower() in name.lower():
+            sym_from_name.append(sym)
+    if sym_from_name:
+        branches.append(ReportDB.symbol.in_(sym_from_name))
+    return or_(*branches) if len(branches) > 1 else branches[0]
 
 
 # ─── Structured extraction schemas ───────────────────────────────────────────
@@ -124,10 +163,14 @@ def extract_structured_data(
             f"【基本面报告摘要】\n{fundamentals_report[:1000]}\n\n"
             "提取要求（请确保输出为有效的 JSON 对象，不要包裹在 markdown 代码块中）：\n"
             "1. decision：决策方向关键词（BUY/SELL/HOLD 或 增持/减持/持有）\n"
-            "2. confidence：整体置信度（0-100整数），若文中未明确给出则根据语气判断\n"
-            "3. target_price / stop_loss_price：纯数字，若未提及则为 null\n"
+            "2. confidence：整体置信度（0-100整数）。**仅当正文明确写出置信度时才填写，"
+            "未明确写出时必须为 null。禁止根据语气、措辞强弱或你的主观判断推测该数字。**\n"
+            "3. target_price / stop_loss_price：**只能填写正文中明确出现的价格数字**，"
+            "未提及则为 null；不得自行估算或补全\n"
             "4. risks：最多5条主要风险，每条包含名称（15字内）、等级（high/medium/low）、一句话说明\n"
             "5. key_metrics：最多6条关键财务/估值指标，每条包含名称、值（含单位）、优劣（good/neutral/bad）"
+            "\n\n注意：confidence、target_price、stop_loss_price 为提取字段而非判断题，"
+            "宁可返回 null 也不要猜测。"
         )
 
         response = llm.invoke([HumanMessage(content=prompt)])
@@ -157,6 +200,51 @@ def _extract_confidence_regex(text: Optional[str]) -> Optional[int]:
     return None
 
 
+def _resolve_confidence(
+    final_trade_decision: Optional[str],
+    trader_plan: Optional[str] = None,
+) -> Optional[int]:
+    """Resolve ``reports.confidence`` deterministically from the report text.
+
+    Confidence used to be taken from a second LLM pass whose prompt explicitly said
+    "若文中未明确给出则根据语气判断" — i.e. the model was asked to *invent* a number
+    from the tone of the prose. That value was then persisted as if it were a
+    measurement, and it fed every confidence-bucketed statistic. It also disagreed
+    with the ``VERDICT`` block the analysts actually emitted for roughly a third of
+    the stored reports, so the stored number did not even represent the pipeline's
+    own stated confidence.
+
+    Resolution order, highest provenance first:
+
+    1. an explicitly stated ``confidence`` inside the ``VERDICT`` machine-readable
+       block — the number the pipeline itself emitted, normalized by the shared
+       coercion policy;
+    2. an explicitly written ``置信度: NN%`` in the decision or the trader plan;
+    3. ``None`` — an unknown confidence is reported as unknown rather than guessed.
+
+    Note the distinction between *stated* and *synthesized* confidence: the
+    direction parser fills in a direction-dependent default (68/58/48...) when a
+    verdict omits ``confidence``. That default is a UI convenience for the analyst
+    verdict and must **not** be persisted here, or every report without a stated
+    confidence would be indistinguishable from one that stated 68.
+
+    Returns ``None`` when no explicit statement exists. Callers must not substitute
+    a default: an absent confidence has to stay visibly absent.
+    """
+    payload = extract_tagged_json(final_trade_decision or "", "VERDICT")
+    if isinstance(payload, dict) and payload.get("confidence") is not None:
+        direction = normalize_direction(payload.get("direction")) or normalize_direction(
+            payload.get("verdict")
+        )
+        return parse_stated_confidence(payload.get("confidence"))
+
+    for text in (final_trade_decision, trader_plan):
+        value = _extract_confidence_regex(text)
+        if value is not None:
+            return value
+    return None
+
+
 def _extract_price_regex(text: Optional[str], price_type: str = "target") -> Optional[float]:
     if not text:
         return None
@@ -180,27 +268,36 @@ def _extract_price_regex(text: Optional[str], price_type: str = "target") -> Opt
 
 
 def _extract_verdict(text: Optional[str]) -> Optional[Dict[str, str]]:
+    """Extract the VERDICT block as ``{"direction", "reason"}``.
+
+    The direction is **normalized** to a canonical value
+    (看多/偏多/中性/偏空/看空). Previously the raw model string was returned and
+    written straight into ``reports.direction``, so that column held a mixture of
+    canonical labels, English aliases and free text — which is precisely why
+    direction-level aggregation could not be trusted.
+
+    Parsing delegates to :mod:`tradingagents.agents.utils.direction`, which also
+    fixes the nested-brace truncation of the old non-greedy ``\\{.*?\\}`` regex.
+    """
     if not text:
         return None
-    match = re.search(r"<!--\s*VERDICT:\s*(\{.*?\})\s*-->", text, re.IGNORECASE | re.DOTALL)
-    if not match:
+
+    payload = extract_tagged_json(text, "VERDICT")
+    if payload is None:
         return None
-    try:
-        # Clean potential newlines or invisible characters common in LLM outputs
-        raw_json = match.group(1).strip().replace('\n', ' ').replace('\r', ' ')
-        payload = json.loads(raw_json)
-    except Exception:
+
+    result = extract_direction_result(text)
+    if result.direction is None:
         return None
-    direction = str(payload.get("direction") or "").strip()
-    reason = str(payload.get("reason") or "").strip()
-    if not direction:
-        return None
-    return {"direction": direction, "reason": reason}
+
+    return {
+        "direction": result.direction,
+        "reason": str(payload.get("reason") or "").strip(),
+    }
 
 
 def resolve_report_fields(
     result_data: Optional[Dict[str, Any]] = None,
-    confidence_override: Optional[int] = None,
     target_price_override: Optional[float] = None,
     stop_loss_override: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -226,7 +323,7 @@ def resolve_report_fields(
     verdict = _extract_verdict(final_trade_decision)
     direction = verdict["direction"] if verdict else None
 
-    confidence = confidence_override if confidence_override is not None else _extract_confidence_regex(final_trade_decision)
+    confidence = _resolve_confidence(final_trade_decision, trader_investment_plan)
 
     target_price = target_price_override if target_price_override is not None else _extract_price_regex(final_trade_decision, "target")
     if target_price is None:
@@ -369,6 +466,61 @@ def mark_report_failed(
     return update_report_partial(db, report_id, status="failed", error=error_message)
 
 
+def _apply_freshness_from_result(
+    result_data: Optional[Dict[str, Any]],
+    confidence: Optional[int],
+) -> tuple[Optional[Dict[str, Any]], Optional[int], Optional[str]]:
+    """Extract freshness_summary, clamp confidence, return freshness_status."""
+    if not result_data:
+        return result_data, confidence, None
+    summary = result_data.get("freshness_summary")
+    if not isinstance(summary, dict):
+        return result_data, confidence, result_data.get("freshness_status")
+    overall = str(summary.get("overall_status") or "fresh")
+    try:
+        from tradingagents.dataflows.freshness import clamp_confidence
+
+        if confidence is not None:
+            confidence = clamp_confidence(int(confidence), overall)
+    except Exception:
+        pass
+    return result_data, confidence, overall
+
+
+def resolve_report_horizon(result_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Which horizon this report's persisted conclusion belongs to.
+
+    A5's purpose was to let T+1 scoring know *which* conclusion it is grading. The
+    column existed but nothing ever wrote it (0/7504 rows), so the ambiguity A5 set
+    out to remove survived untouched. This is that writer.
+
+    Vocabulary matches ``trade_plans.horizon``: ``short`` / ``medium`` / ``dual``.
+    ``dual`` means the payload carried two separate conclusions and the persisted
+    fields are the *primary* (short) one — it previously looked exactly like a pure
+    short-horizon report, which is precisely the confusion A5 names.
+
+    Returns ``None`` when the payload does not say. No guessing: an unknown horizon
+    stays unknown, because inventing ``short`` would mislabel a medium-horizon call
+    as a next-day one.
+    """
+    if not isinstance(result_data, dict):
+        return None
+    mode = str(result_data.get("mode") or "").strip().lower()
+    if mode in {"dual_horizon", "dual"}:
+        return "dual"
+    raw = result_data.get("horizon")
+    if raw is None:
+        raw = result_data.get("user_intent", {}).get("horizon") if isinstance(result_data.get("user_intent"), dict) else None
+    word = str(raw or "").strip().lower()
+    if word in {"short", "short_term", "t1", "1", "次日"}:
+        return "short"
+    if word in {"medium", "medium_term", "20", "中期"}:
+        return "medium"
+    if word in {"dual", "both"}:
+        return "dual"
+    return None
+
+
 def create_report(
     db: Session,
     symbol: str,
@@ -379,18 +531,26 @@ def create_report(
     risk_items: Optional[List[dict]] = None,
     key_metrics: Optional[List[dict]] = None,
     analyst_traces: Optional[List[dict]] = None,
-    confidence_override: Optional[int] = None,
     target_price_override: Optional[float] = None,
     stop_loss_override: Optional[float] = None,
     report_id: Optional[str] = None,  # If provided, update existing
 ) -> ReportDB:
     """Create or finalize a report."""
+    # Single chokepoint for the persisted decision vocabulary. Enforcing it here
+    # rather than at each call site means a future caller cannot write a
+    # placeholder ("UNKNOWN", "DRY_RUN", "") or free text into reports.decision,
+    # where it would be indistinguishable from a real call in every average.
+    decision = coerce_persistable_decision(decision)
     resolved = resolve_report_fields(
         result_data=result_data,
-        confidence_override=confidence_override,
         target_price_override=target_price_override,
         stop_loss_override=stop_loss_override,
     )
+    result_data, resolved_confidence, freshness_status = _apply_freshness_from_result(
+        result_data, resolved["confidence"]
+    )
+    if resolved_confidence is not None:
+        resolved["confidence"] = resolved_confidence
 
     now = datetime.now(timezone.utc)
     
@@ -404,10 +564,12 @@ def create_report(
         db_report.status = "completed"
         db_report.decision = decision
         db_report.direction = resolved["direction"]
+        db_report.horizon = resolve_report_horizon(result_data)
         db_report.confidence = resolved["confidence"]
         db_report.target_price = resolved["target_price"]
         db_report.stop_loss_price = resolved["stop_loss_price"]
         db_report.result_data = result_data
+        db_report.freshness_status = freshness_status
         db_report.risk_items = risk_items
         db_report.key_metrics = key_metrics
         db_report.analyst_traces = analyst_traces
@@ -433,10 +595,12 @@ def create_report(
             status="completed",
             decision=decision,
             direction=resolved["direction"],
+            horizon=resolve_report_horizon(result_data),
             confidence=resolved["confidence"],
             target_price=resolved["target_price"],
             stop_loss_price=resolved["stop_loss_price"],
             result_data=result_data,
+            freshness_status=freshness_status,
             risk_items=risk_items,
             key_metrics=key_metrics,
             analyst_traces=analyst_traces,
@@ -465,13 +629,120 @@ def get_report(db: Session, report_id: str, user_id: Optional[str] = None) -> Op
     query = db.query(ReportDB).filter(ReportDB.id == report_id)
     if user_id:
         query = query.filter(ReportDB.user_id == user_id)
-    return query.first()
+    report = query.first()
+    if report:
+        enrich_report_freshness_display(report)
+    return report
+
+
+def enrich_report_freshness_display(report: ReportDB) -> None:
+    """Add report_age_note at read time without changing stored overall_status."""
+    payload = report.result_data if isinstance(report.result_data, dict) else None
+    if not payload:
+        return
+    summary = payload.get("freshness_summary")
+    if not isinstance(summary, dict):
+        return
+    try:
+        from tradingagents.dataflows.freshness.access import enrich_freshness_summary_for_display
+
+        created = report.created_at.isoformat() if report.created_at else None
+        enriched = enrich_freshness_summary_for_display(summary, created)
+        if enriched is not summary:
+            payload = dict(payload)
+            payload["freshness_summary"] = enriched
+            report.result_data = payload
+        setattr(report, "freshness_summary", enriched)
+    except Exception:
+        setattr(report, "freshness_summary", summary)
+
+
+def _reports_model_filter_clause(
+    *,
+    model_profile_id: str | None = None,
+    deep_think_llm: str | None = None,
+    quick_think_llm: str | None = None,
+):
+    """Match reports whose result_data records the given model profile or LLM names."""
+    pid = str(model_profile_id or "").strip()
+    deep = str(deep_think_llm or "").strip()
+    quick = str(quick_think_llm or "").strip()
+    branches = []
+    if pid:
+        branches.append(ReportDB.result_data["model_info"]["model_profile_id"].as_string() == pid)
+        branches.append(ReportDB.result_data["model_profile_id"].as_string() == pid)
+    llm_names = {name for name in (deep, quick) if name}
+    for name in llm_names:
+        branches.append(ReportDB.result_data["model_info"]["deep_think_llm"].as_string() == name)
+        branches.append(ReportDB.result_data["model_info"]["quick_think_llm"].as_string() == name)
+        branches.append(ReportDB.result_data["deep_think_llm"].as_string() == name)
+        branches.append(ReportDB.result_data["quick_think_llm"].as_string() == name)
+    if not branches:
+        return None
+    return or_(*branches) if len(branches) > 1 else branches[0]
+
+
+def _report_range_has_time_component(value: Optional[str]) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    return "T" in raw or " " in raw or len(raw) > 10
+
+
+def _parse_report_datetime_bound(value: str, *, is_end: bool) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        raise ValueError("empty datetime bound")
+    if len(raw) == 10 and raw[4] == "-" and raw[7] == "-":
+        day = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if is_end:
+            return day.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return day.replace(hour=0, minute=0, second=0, microsecond=0)
+    normalized = raw.replace("Z", "+00:00")
+    if "T" not in normalized and " " in normalized:
+        normalized = normalized.replace(" ", "T", 1)
+    dt = datetime.fromisoformat(normalized)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    if is_end and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", raw):
+        dt = dt.replace(second=59, microsecond=999999)
+    return dt
+
+
+def _apply_report_time_range(
+    query,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
+    start = str(start_date or "").strip()
+    end = str(end_date or "").strip()
+    use_created_at = _report_range_has_time_component(start) or _report_range_has_time_component(end)
+    if use_created_at:
+        if start:
+            query = query.filter(ReportDB.created_at >= _parse_report_datetime_bound(start, is_end=False))
+        if end:
+            query = query.filter(ReportDB.created_at <= _parse_report_datetime_bound(end, is_end=True))
+        return query
+    if start:
+        query = query.filter(ReportDB.trade_date >= start)
+    if end:
+        query = query.filter(ReportDB.trade_date <= end)
+    return query
 
 
 def get_reports_by_user(
     db: Session,
     user_id: Optional[str] = None,
     symbol: Optional[str] = None,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    model_profile_id: Optional[str] = None,
+    deep_think_llm: Optional[str] = None,
+    quick_think_llm: Optional[str] = None,
+    freshness_issue: Optional[bool] = None,
     skip: int = 0,
     limit: int = 100,
 ) -> List[ReportDB]:
@@ -480,6 +751,19 @@ def get_reports_by_user(
         query = query.filter(ReportDB.user_id == user_id)
     if symbol:
         query = query.filter(ReportDB.symbol == symbol)
+    clause = _reports_text_search_clause(search) if search else None
+    if clause is not None:
+        query = query.filter(clause)
+    query = _apply_report_time_range(query, start_date=start_date, end_date=end_date)
+    model_clause = _reports_model_filter_clause(
+        model_profile_id=model_profile_id,
+        deep_think_llm=deep_think_llm,
+        quick_think_llm=quick_think_llm,
+    )
+    if model_clause is not None:
+        query = query.filter(model_clause)
+    if freshness_issue:
+        query = query.filter(ReportDB.freshness_status.in_(("error", "warning", "stale")))
     return query.order_by(ReportDB.created_at.desc()).offset(skip).limit(limit).all()
 
 
@@ -515,12 +799,32 @@ def count_reports(
     db: Session,
     user_id: Optional[str] = None,
     symbol: Optional[str] = None,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    model_profile_id: Optional[str] = None,
+    deep_think_llm: Optional[str] = None,
+    quick_think_llm: Optional[str] = None,
+    freshness_issue: Optional[bool] = None,
 ) -> int:
     query = db.query(func.count(ReportDB.id))
     if user_id:
         query = query.filter(ReportDB.user_id == user_id)
     if symbol:
         query = query.filter(ReportDB.symbol == symbol)
+    clause = _reports_text_search_clause(search) if search else None
+    if clause is not None:
+        query = query.filter(clause)
+    query = _apply_report_time_range(query, start_date=start_date, end_date=end_date)
+    model_clause = _reports_model_filter_clause(
+        model_profile_id=model_profile_id,
+        deep_think_llm=deep_think_llm,
+        quick_think_llm=quick_think_llm,
+    )
+    if model_clause is not None:
+        query = query.filter(model_clause)
+    if freshness_issue:
+        query = query.filter(ReportDB.freshness_status.in_(("error", "warning", "stale")))
     return query.scalar() or 0
 
 

@@ -4,9 +4,17 @@ from datetime import datetime, timedelta
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from tradingagents.dataflows.config import get_config
+from tradingagents.methodology import get_stock_team_analysis_framework_block
 from tradingagents.prompts import get_prompt
 from tradingagents.graph.intent_parser import build_horizon_context
-from tradingagents.agents.utils.agent_states import current_tracker_var, extract_verdict
+from tradingagents.agents.utils.agent_states import (
+    current_tracker_var,
+    extract_verdict_with_flag,
+)
+from tradingagents.agents.utils.analyst_structured import (
+    extract_analyst_structured_json,
+    get_analyst_json_instruction,
+)
 
 # List of technical indicators to retrieve
 MARKET_INDICATORS = [
@@ -35,6 +43,12 @@ def create_market_analyst(llm, data_collector=None):
         config = get_config()
         horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="market")
         system_message = get_prompt("market_system_message", config=config)
+        stock_team_framework = get_stock_team_analysis_framework_block(config)
+        if stock_team_framework:
+            system_message = system_message + "\n\n" + stock_team_framework
+
+        freshness_ctx = ""
+        fallback_results = None
 
         if data_collector is not None:
             pool = data_collector.get(ticker, current_date)
@@ -43,10 +57,24 @@ def create_market_analyst(llm, data_collector=None):
                 stock_data = windowed.get("stock_data", "无数据")
                 indicators = windowed.get("indicators", {})
                 data_window = windowed.get("_data_window", "14天")
+                fallback_results = pool
             else:
                 stock_data, indicators, data_window = await _fetch_direct(ticker, current_date, horizon)
         else:
             stock_data, indicators, data_window = await _fetch_direct(ticker, current_date, horizon)
+
+        if fallback_results is None and stock_data:
+            fallback_results = {"stock_data": stock_data}
+
+        from tradingagents.dataflows.freshness import resolve_freshness_pool
+        from tradingagents.dataflows.freshness.prompt import format_freshness_context_for_sources
+
+        freshness_pool = resolve_freshness_pool(
+            state, data_collector, ticker, current_date, fallback_results=fallback_results
+        )
+        freshness_ctx = format_freshness_context_for_sources(
+            freshness_pool, ["stock_data", "indicators"]
+        )
 
         indicator_blocks = [
             f"【{ind}】\n{indicators.get(ind, '无数据')}"
@@ -57,9 +85,11 @@ def create_market_analyst(llm, data_collector=None):
             SystemMessage(content=system_message + "\n\n请全程使用中文。"),
             HumanMessage(content=(
                 horizon_ctx + "\n"
-                f"以下是 {ticker} 在 {current_date} 的 K 线数据与指标（数据窗口：{data_window}）。\n\n"
+                + (freshness_ctx + "\n" if freshness_ctx else "")
+                + f"以下是 {ticker} 在 {current_date} 的 K 线数据与指标（数据窗口：{data_window}）。\n\n"
                 f"【get_stock_data】\n{stock_data}\n\n"
                 + "\n\n".join(indicator_blocks)
+                + get_analyst_json_instruction(agent_role="market", config=config)
             )),
         ]
 
@@ -72,18 +102,23 @@ def create_market_analyst(llm, data_collector=None):
             if tracker:
                 tracker._emit_token("Market Analyst", "market_report", content)
         
-        verdict, confidence = extract_verdict(full_content)
+        verdict, confidence, verdict_parsed = extract_verdict_with_flag(full_content)
 
+        trace = {
+            "agent": "market_analyst",
+            "horizon": horizon,
+            "data_window": data_window,
+            "key_finding": f"市场技术面结论：{verdict}",
+            "verdict": verdict,
+            "confidence": confidence,
+            "verdict_parsed": verdict_parsed,
+        }
+        parsed = extract_analyst_structured_json(full_content)
+        if parsed:
+            trace["structured"] = parsed
         return {
             "market_report": full_content,
-            "analyst_traces": [{
-                "agent": "market_analyst",
-                "horizon": horizon,
-                "data_window": data_window,
-                "key_finding": f"市场技术面结论：{verdict}",
-                "verdict": verdict,
-                "confidence": confidence,
-            }],
+            "analyst_traces": [trace],
         }
 
     return market_analyst_node

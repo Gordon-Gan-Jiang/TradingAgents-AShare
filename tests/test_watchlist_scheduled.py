@@ -31,7 +31,7 @@ class TestWatchlist:
             watchlist_service.add_watchlist_item(db, "user1", "300750.SZ")
 
     def test_max_limit(self, db):
-        for i in range(50):
+        for i in range(200):
             watchlist_service.add_watchlist_item(db, "user1", f"{600000 + i}.SH")
         with pytest.raises(ValueError, match="上限"):
             watchlist_service.add_watchlist_item(db, "user1", "000001.SZ")
@@ -75,7 +75,10 @@ class TestWatchlist:
         assert [item["status"] for item in results] == ["duplicate", "added", "duplicate"]
 
     def test_batch_add_marks_limit_failures(self, db):
-        for i in range(49):
+        # 上限来自服务常量，避免测试硬编码一个会漂移的数字。
+        from api.services.watchlist_service import MAX_WATCHLIST_ITEMS
+
+        for i in range(MAX_WATCHLIST_ITEMS - 1):
             watchlist_service.add_watchlist_item(db, "user1", f"{600000 + i}.SH")
         results = watchlist_service.add_watchlist_items(
             db,
@@ -101,16 +104,30 @@ class TestScheduled:
         assert items[0]["trigger_time"] == "07:30"
         assert items[0]["horizon"] == "medium"
 
-    def test_reject_daytime_hours(self, db):
-        with pytest.raises(ValueError, match="20:00"):
-            scheduled_service.create_scheduled(db, "user1", "300750.SZ", "short", "10:30")
-        with pytest.raises(ValueError, match="20:00"):
-            scheduled_service.create_scheduled(db, "user1", "300750.SZ", "short", "15:00")
+    def test_create_with_prompt_template_fields(self, db):
+        scheduled_service.create_scheduled(
+            db,
+            "user1",
+            "300750.SZ",
+            "short",
+            "20:00",
+            prompt_template_id="builtin-trade-decision",
+            prompt_vars={"style": "risk-first"},
+        )
+        items = scheduled_service.list_scheduled(db, "user1")
+        assert items[0]["prompt_template_id"] == "builtin-trade-decision"
+        assert items[0]["prompt_vars"]["style"] == "risk-first"
+
+    def test_allow_daytime_hours(self, db):
+        first = scheduled_service.create_scheduled(db, "user1", "300750.SZ", "short", "10:30")
+        second = scheduled_service.create_scheduled(db, "user1", "600519.SH", "short", "15:00")
+        assert first["trigger_time"] == "10:30"
+        assert second["trigger_time"] == "15:00"
 
     def test_allow_boundary_times(self, db):
-        # 08:00 is the boundary, should be OK
+        # 08:00 should be OK
         scheduled_service.create_scheduled(db, "user1", "300750.SZ", "short", "08:00")
-        # 20:00 is the start, should be OK
+        # 20:00 should be OK
         scheduled_service.create_scheduled(db, "user1", "600519.SH", "short", "20:00")
         # Midnight should be OK
         scheduled_service.create_scheduled(db, "user1", "000001.SZ", "short", "00:30")
@@ -179,10 +196,10 @@ class TestScheduled:
                 horizon="medium",
             )
 
-    def test_update_reject_daytime(self, db):
+    def test_update_allow_daytime(self, db):
         item = scheduled_service.create_scheduled(db, "user1", "300750.SZ")
-        with pytest.raises(ValueError, match="20:00"):
-            scheduled_service.update_scheduled(db, "user1", item["id"], trigger_time="11:00")
+        updated = scheduled_service.update_scheduled(db, "user1", item["id"], trigger_time="11:00")
+        assert updated["trigger_time"] == "11:00"
 
     def test_mark_success(self, db):
         item = scheduled_service.create_scheduled(db, "user1", "300750.SZ")
