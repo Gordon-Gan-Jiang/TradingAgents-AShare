@@ -69,6 +69,17 @@ class ToolRegistry:
             raise KeyError(f"unknown tool: {name!r}")
         return spec
 
+    def names_by_layer(self, layer: str) -> tuple[str, ...]:
+        """按工具面分层取清单。
+
+        规划层据此决定注入哪些工具：L1 常驻（数量少、语义强），L2 按意图检索
+        （数量多，全量注入会撑爆上下文并降低选择准确率）。
+        """
+        return tuple(
+            spec.name for spec in self._specs.values()
+            if getattr(spec, "plan_layer", "L2") == layer
+        )
+
     def names(self) -> tuple[str, ...]:
         return tuple(sorted(self._specs))
 

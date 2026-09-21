@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 from tradingagents.grounding.types import Coverage, EvidenceItem
 
-from .spec import RESEARCH_DISCLAIMER, ToolResult, ToolSpec
+from .spec import PLAN_LAYER_DECISION, RESEARCH_DISCLAIMER, ToolResult, ToolSpec
 
 SCREEN_CONTRACT = "MARKET_SCREEN"
 
@@ -268,6 +268,7 @@ def make_screen_tools(screener: MarketScreener) -> tuple[ToolSpec, ...]:
             "required": [],
         },
         output_contract=SCREEN_CONTRACT,
+        plan_layer=PLAN_LAYER_DECISION,
         handler=market_screen,
         cost="medium",
         # 实测：全市场 5020 只冷启动 61.5s、热启动 10.0s。预算必须覆盖冷启动，

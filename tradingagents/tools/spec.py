@@ -79,6 +79,12 @@ class ToolResult:
         )
 
 
+PLAN_LAYER_DECISION = "L1"
+PLAN_LAYER_EVIDENCE = "L2"
+PLAN_LAYER_TASK = "L3"
+PLAN_LAYERS: tuple[str, ...] = (PLAN_LAYER_DECISION, PLAN_LAYER_EVIDENCE, PLAN_LAYER_TASK)
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """一个能力的唯一权威定义。
@@ -97,6 +103,26 @@ class ToolSpec:
     latency_budget_ms: int = 3000
     freshness_sources: tuple[str, ...] = ()
     requires: tuple[str, ...] = ()
+    # 工具面分层（见 docs/agent-tool-inventory.md）：
+    #   L1 决策——一个工具回答一个**判断问题**（含结论/依据/弃权），提示词常驻
+    #   L2 证据——只给事实、不做判断，按意图检索注入
+    #   L3 任务——分钟级能力，**必须异步**（同步工具面里放分钟级管道会让客户端
+    #      超时重试、循环卡住、预算记账失真）
+    # 默认 L2：绝大多数工具是取数原语，分层信息不是可选的元数据——规划层要靠它
+    # 决定注入哪些工具，错了会导致"该调的不在册"。
+    plan_layer: str = PLAN_LAYER_EVIDENCE
+    # 异步工具：调用立即返回任务号，由 poll 取终态。分钟级能力必须是 True。
+    asynchronous: bool = False
+
+    def __post_init__(self) -> None:
+        if self.plan_layer not in PLAN_LAYERS:
+            raise ValueError(
+                f"工具 {self.name} 的 plan_layer={self.plan_layer!r} 非法，"
+                f"只能是 {PLAN_LAYERS}"
+            )
+        if self.plan_layer == PLAN_LAYER_TASK and not self.asynchronous:
+            # 任务层工具同步执行 = 客户端必然超时。这条不是风格问题，是协议问题。
+            raise ValueError(f"L3 工具 {self.name} 必须 asynchronous=True")
 
     @property
     def is_synchronous(self) -> bool:
@@ -113,4 +139,6 @@ class ToolSpec:
             "output_contract": self.output_contract,
             "cost": self.cost,
             "latency_budget_ms": self.latency_budget_ms,
+            "plan_layer": self.plan_layer,
+            "asynchronous": self.asynchronous,
         }

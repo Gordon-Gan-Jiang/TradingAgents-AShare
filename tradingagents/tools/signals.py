@@ -39,7 +39,7 @@ from tradingagents.signals import (
 )
 from tradingagents.signals.types import ProbeResult
 
-from .spec import RESEARCH_DISCLAIMER, ToolResult, ToolSpec
+from .spec import PLAN_LAYER_DECISION, RESEARCH_DISCLAIMER, ToolResult, ToolSpec
 
 # 一次批量评估的标的上限。超过则截断并显式告知——静默只算一部分会让
 # 「哪只最危险」的结论在缺少标的的情况下给出错误的全貌。
@@ -330,6 +330,7 @@ def make_signal_tools(
         output_contract="WASHOUT_PROBE",
         handler=washout_probe,
         cost="medium",
+        plan_layer=PLAN_LAYER_DECISION,
         # 预算必须反映真实工作量。这个值曾是 15s，而探针要拉日线 + 自算筹码
         # （再取一次日线）+ 分时 + 板块（含首次的行业映射扫描）+ 资金流多通道回退。
         # 实测因此被注册表整体判超时、返回 0 证据，判定只能答"无可用证据"——
@@ -364,6 +365,7 @@ def make_signal_tools(
         output_contract="WASHOUT_PROBE_BATCH",
         handler=washout_probe_batch,
         cost="medium",
+        plan_layer=PLAN_LAYER_DECISION,
         latency_budget_ms=60000,
         freshness_sources=("stock_data", "intraday_bars", "chip_distribution", "individual_fund_flow", "board_spot"),
         requires=("position",),

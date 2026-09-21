@@ -107,6 +107,21 @@ def build_registry(user_id: str | None = None) -> Any:
     def lazy_news(symbol: str, start: str, end: str) -> Any:
         return build_news_fetcher()(symbol, start, end)
 
+    def _history_port() -> Any:
+        """判定历史端口：**user_id 在闭包里绑定**，不经过模型参数。"""
+        from api.services import signal_service
+
+        class _Port:
+            def recent_verdicts(self, *, limit: int, symbol: str | None = None):
+                if not user_id:
+                    return []
+                payload = signal_service.list_verdicts(
+                    user_id=user_id, symbol=symbol, limit=limit
+                )
+                return payload.get("verdicts") or []
+
+        return _Port()
+
     def lazy_screener() -> Any:
         from api.services.market_screen_ports import build_market_screener
 
@@ -116,7 +131,10 @@ def build_registry(user_id: str | None = None) -> Any:
     # 依赖应用层配置与网络。缺实现时不注册该工具（`build_registry` 既有语义），
     # 于是这里必须传一个真实对象而不是 None。
     return _build(
-        ports_factory=lazy_ports, news_fetcher=lazy_news, market_screener=lazy_screener()
+        ports_factory=lazy_ports,
+        news_fetcher=lazy_news,
+        market_screener=lazy_screener(),
+        history_port=_history_port(),
     )
 
 
