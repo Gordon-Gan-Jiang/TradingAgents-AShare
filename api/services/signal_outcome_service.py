@@ -278,6 +278,70 @@ def run_backfill(
     return reports
 
 
+def list_recorded_outcomes(
+    *,
+    user_id: str,
+    symbol: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """读出**已落库**的判定兑现结果（只读：不回填、不写库）。
+
+    ## 为什么必须按「兑现行」分页，而不是「取最近 N 条判定再看有没有兑现」
+
+    判定落库后要等 T+3/T+5 成熟才会有兑现行。若先取最近 N 条判定、再从中筛出
+    兑现行，那么「最近的 N 条判定都还没成熟」会得到空结果 —— 而更早的判定
+    **其实有兑现记录**。于是工具会把「有记录」说成「没有兑现记录」，这正是本平台
+    最不能接受的失败形态（`verdict_history_read` 的 `verdicts`/`items` 键名事故
+    是同一类：读不到被说成没有，且完全静默）。
+
+    因此这里以**兑现行**为主体分页：未成熟的判定自然不进结果集，不会挤占配额。
+    一次 join 查询取全（不逐条判定再查兑现，避免 N+1）。
+
+    排序：判定时间倒序；同一判定内 T+3 在 T+5 之前（证据顺序即阅读顺序）。
+    """
+    from api.database import SignalVerdictDB, SignalVerdictOutcomeDB, get_db_ctx
+    # 状态中文标签只留一份（`signal_service` 里那份）。signal_service 不 import
+    # 本模块，故此处惰性导入不构成循环。
+    from api.services.signal_service import _STATE_LABELS
+
+    cap = max(1, min(int(limit), 200))
+    with get_db_ctx() as db:
+        query = (
+            db.query(SignalVerdictOutcomeDB, SignalVerdictDB)
+            .join(SignalVerdictDB, SignalVerdictDB.id == SignalVerdictOutcomeDB.verdict_id)
+            .filter(SignalVerdictDB.user_id == user_id)
+        )
+        if symbol:
+            query = query.filter(SignalVerdictDB.symbol == symbol)
+        rows = (
+            query.order_by(
+                SignalVerdictDB.created_at.desc(),
+                SignalVerdictDB.as_of.desc(),
+                SignalVerdictOutcomeDB.horizon_days.asc(),
+            )
+            .limit(cap)
+            .all()
+        )
+
+    out: list[dict[str, Any]] = []
+    for outcome, verdict in rows:
+        out.append(
+            {
+                "symbol": verdict.symbol,
+                "as_of": verdict.as_of,
+                "state": verdict.state,
+                "state_label": _STATE_LABELS.get(verdict.state, verdict.state),
+                "horizon_days": outcome.horizon_days,
+                "ref_date": outcome.ref_date,
+                "ret_pct": outcome.ret_pct,
+                "threshold_hit": bool(outcome.threshold_hit),
+                "evaluable": bool(outcome.evaluable),
+                "reason": outcome.reason,
+            }
+        )
+    return out
+
+
 def _record_outcome(payload: Mapping[str, Any]) -> None:
     """写入一行结果。已存在则**不改写**（历史不可变）。"""
     from api.database import SignalVerdictOutcomeDB, get_db_ctx

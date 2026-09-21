@@ -289,49 +289,23 @@ def build_registry(user_id: str | None = None) -> Any:
     def _outcome_port() -> Any:
         """判定兑现端口（L1）：读已落库的 T+3/T+5 兑现。
 
-        兑现行的读取入口是 `signal_service.list_verdicts`——它 join 了
-        `signal_verdict_outcomes`，并把每个持有期展平进 `outcomes`。
-        `signal_outcome_service` 只有**回填写入**入口（`run_backfill` 等），
-        没有「读出已落库兑现」的公开函数，所以这里只取它的 `DEFAULT_HORIZONS`
-        作为持有期口径，避免两边各写一份 3/5。
+        取数落在 `signal_outcome_service.list_recorded_outcomes`——**按兑现行分页**。
+        曾经的写法是「取最近 N 条判定，再从中筛兑现」：最近的判定还没成熟时会得到
+        空结果，而更早的判定**其实有兑现记录**，于是工具把"有记录"说成"没有"
+        （实测 limit=10 空、limit=30 有 2 条）。分页主体改成兑现行后该假否定消失：
+        未成熟的判定不进结果集，也不占配额。
+
+        与 `_history_port` 的分工：本端口给**兑现**，`_history_port` 给**判定**；
+        持有期口径共用 `signal_outcome_service.DEFAULT_HORIZONS` 一份。
         """
-        from api.services import signal_outcome_service, signal_service
+        from api.services import signal_outcome_service
 
         class _Port:
             def recent_outcomes(self, *, limit: int, symbol: str | None = None):
                 uid = _require_user("verdict_outcome")
-                capped = max(1, int(limit))
-                payload = signal_service.list_verdicts(
-                    user_id=uid, symbol=symbol, limit=capped
+                return signal_outcome_service.list_recorded_outcomes(
+                    user_id=uid, symbol=symbol, limit=limit
                 )
-                horizons = tuple(signal_outcome_service.DEFAULT_HORIZONS)
-                rows: list[dict[str, Any]] = []
-                for verdict in payload.get("items") or []:
-                    outcomes = list(verdict.get("outcomes") or [])
-                    # 按 3 → 5 排序，证据顺序即阅读顺序
-                    outcomes.sort(
-                        key=lambda item: horizons.index(item.get("horizon_days"))
-                        if item.get("horizon_days") in horizons
-                        else len(horizons)
-                    )
-                    for outcome in outcomes:
-                        rows.append(
-                            {
-                                "symbol": verdict.get("symbol"),
-                                "as_of": verdict.get("as_of"),
-                                "state": verdict.get("state"),
-                                "state_label": verdict.get("state_label"),
-                                "horizon_days": outcome.get("horizon_days"),
-                                "ref_date": outcome.get("ref_date"),
-                                "ret_pct": outcome.get("ret_pct"),
-                                "threshold_hit": outcome.get("threshold_hit"),
-                                "evaluable": outcome.get("evaluable"),
-                                "reason": outcome.get("reason"),
-                            }
-                        )
-                        if len(rows) >= capped:
-                            return rows
-                return rows
 
         return _Port()
 

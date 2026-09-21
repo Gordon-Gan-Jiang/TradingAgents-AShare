@@ -19,6 +19,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 # ══ 1. verdict_outcome_lookup：判定后 T+3/T+5 的兑现 ═══════════════════════
@@ -146,45 +148,80 @@ def test_outcome_is_l1_and_only_registered_with_a_port():
     assert "verdict_outcome_lookup" in with_port.names_by_layer(PLAN_LAYER_DECISION)
 
 
-def test_real_outcome_port_flattens_recorded_outcomes(monkeypatch):
-    """装配层的端口把「判定 × 持有期」展平成一维兑现行，并按 T+3 → T+5 排序。
+def _seed_verdict(user_id, symbol, *, hours_ago, state="distribution"):
+    """往测试库塞一条判定（测试库由 conftest 指向一次性临时目录）。"""
+    from api.database import SignalVerdictDB, get_db_ctx
+    from tradingagents.agent.repository import new_id
 
-    这条守的是**接口对不上**这类静默失败：`signal_service.list_verdicts` 返回的键
-    是 `items`，读成 `verdicts` 会永远拿到空列表——而空列表会被工具读成
-    「没有兑现记录」，恰好是本平台最不能接受的失败形态。
+    vid = new_id()
+    with get_db_ctx() as db:
+        db.add(
+            SignalVerdictDB(
+                id=vid, user_id=user_id, symbol=symbol, as_of="2026-09-15", probe="washout",
+                state=state, confidence=66, margin=0.8, signal_version="washout-v1.0.0",
+                created_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+            )
+        )
+        db.commit()
+    return vid
+
+
+def _seed_outcome(verdict_id, horizon_days, *, ret_pct, evaluable=True, hit=True):
+    from api.database import SignalVerdictOutcomeDB, get_db_ctx
+    from tradingagents.agent.repository import new_id
+
+    with get_db_ctx() as db:
+        db.add(
+            SignalVerdictOutcomeDB(
+                id=new_id(), verdict_id=verdict_id, horizon_days=horizon_days,
+                ref_date="2026-09-20", ret_pct=ret_pct, threshold_hit=hit,
+                evaluable=evaluable, reason=None,
+            )
+        )
+        db.commit()
+
+
+def test_outcome_lookup_not_shadowed_by_immature_recent_verdicts():
+    """**回归**：更早的判定有兑现记录时，不得因"最近的判定还没成熟"而报无记录。
+
+    旧实现先取最近 N 条判定、再从中筛兑现行——最近的判定都还没成熟时会得到空结果，
+    于是工具把"有记录"说成"没有兑现记录"（实测 limit=10 返回空、limit=30 找到 2 条）。
+    这与 `verdict_history_read` 的 `verdicts`/`items` 键名事故同类：
+    **读不到被说成没有**，而且完全静默。现在分页主体是兑现行，未成熟的判定不占配额。
     """
-    from api.services import chat_service, signal_service
+    from api.services import chat_service
 
-    captured: dict = {}
+    uid = "outcome-shadow-user"
+    for index in range(12):
+        verdict_id = _seed_verdict(uid, f"60000{index}.SH", hours_ago=index + 1)
+        if index >= 10:  # 最新的 10 条没有兑现行，最早的 2 条有
+            _seed_outcome(verdict_id, 5, ret_pct=-5.1)
+            _seed_outcome(verdict_id, 3, ret_pct=-3.2)
 
-    def fake_list_verdicts(*, user_id, symbol=None, limit=50):
-        captured.update({"user_id": user_id, "symbol": symbol, "limit": limit})
-        return {
-            "items": [
-                {
-                    "symbol": "600519.SH", "as_of": "2026-09-15",
-                    "state": "distribution", "state_label": "派发",
-                    "outcomes": [
-                        # 故意把 T+5 排在前面：证据顺序应由此处归一，而不是靠上游顺序
-                        {"horizon_days": 5, "ref_date": "2026-09-24", "ret_pct": -5.1,
-                         "threshold_hit": True, "evaluable": True, "reason": None},
-                        {"horizon_days": 3, "ref_date": "2026-09-20", "ret_pct": -3.2,
-                         "threshold_hit": True, "evaluable": True, "reason": None},
-                    ],
-                }
-            ],
-            "count": 1,
-        }
+    registry = chat_service.build_registry(user_id=uid)
+    result = registry.invoke("verdict_outcome_lookup", limit=10)
 
-    monkeypatch.setattr(signal_service, "list_verdicts", fake_list_verdicts)
-    registry = chat_service.build_registry(user_id="u-1")
-    result = registry.invoke("verdict_outcome_lookup", limit=5)
-
-    assert captured["user_id"] == "u-1", "user_id 必须在闭包里绑定，不经过模型参数"
-    horizons = [row["horizon_days"] for row in result.data["outcomes"]]
-    assert horizons == [3, 5], "证据顺序即阅读顺序：T+3 在 T+5 之前"
-    assert len(result.evidence) == 2
+    assert result.data["count"] == 4, "更早的兑现记录必须被发现（2 条判定 × T+3/T+5）"
+    assert result.coverage.unavailable == (), "有兑现记录时不得声明「尚无已回填的兑现记录」"
+    horizons = [row["horizon_days"] for row in result.data["outcomes"][:2]]
+    assert horizons == [3, 5], "同一判定内 T+3 在 T+5 之前（证据顺序即阅读顺序）"
     assert "T+3" in str(result.evidence[0].value)
+
+
+def test_outcome_lookup_stays_user_scoped():
+    """兑现行同样按用户隔离：别人的兑现不得出现在我的证据里。"""
+    from api.services import chat_service
+
+    mine = _seed_verdict("outcome-owner", "600519.SH", hours_ago=1)
+    _seed_outcome(mine, 3, ret_pct=-3.2)
+    theirs = _seed_verdict("outcome-other", "300750.SZ", hours_ago=1)
+    _seed_outcome(theirs, 3, ret_pct=9.9)
+
+    registry = chat_service.build_registry(user_id="outcome-owner")
+    result = registry.invoke("verdict_outcome_lookup", limit=10)
+
+    symbols = {row["symbol"] for row in result.data["outcomes"]}
+    assert symbols == {"600519.SH"}, "user_id 在闭包里绑定，跨用户兑现行必须被过滤掉"
 
 
 # ══ 2. report_conclusion_lookup：历史报告的结论 ═══════════════════════════
