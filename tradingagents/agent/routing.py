@@ -795,9 +795,19 @@ class LlmPlanner:
         except Exception as exc:  # noqa: BLE001 — 规划失败必须降级而非中断
             raise PlanError(f"规划器调用失败：{type(exc).__name__}") from exc
 
-        return parse_plan(
-            _loads_json(raw), known_tools=self._known_tools, max_steps=self._max_steps
-        )
+        payload = _loads_json(raw)
+        plan = parse_plan(payload, known_tools=self._known_tools, max_steps=self._max_steps)
+        if plan is None:
+            # 计划被拒时必须留下**原始输出**：否则只能靠猜"为什么没走规划"。
+            # 实测踩到：同一台服务里一个问句走通了规划、另一个静默退回规则层，
+            # 而日志里什么都没有——这类静默降级是最难排查的形态。
+            import logging as _logging
+
+            _logging.getLogger(__name__).warning(
+                "plan rejected by schema; raw=%s known_tools=%d",
+                str(raw)[:500], len(self._known_tools),
+            )
+        return plan
 
     def classify(self, text: str) -> RouteDecision:
         """`TierClassifier` 兼容入口：计划 → 路由决策（供既有编排使用）。"""

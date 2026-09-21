@@ -171,3 +171,23 @@ def test_code_fences_are_tolerated():
     planner = _planner(resolver=_Resolver(), complete=_Counter(reply=f"```json\n{PLAN_JSON}\n```"))
     decision = planner.classify("最近哪个板块最强")
     assert decision.classifier == "llm"
+
+
+def test_rejected_plan_leaves_the_raw_output_in_the_log(caplog):
+    """计划被拒必须留下原始输出——静默降级是最难排查的形态。
+
+    实测踩到：同一台服务里一个问句走通了规划、另一个静默退回规则层，日志空白，
+    只能靠猜。
+    """
+    import logging
+
+    from tradingagents.agent.routing import _loads_json  # noqa: F401  (确认模块可导入)
+
+    bad = '{"intent": "market_view", "steps": [{"tool": "ghost", "arguments": {}}]}'
+    planner = _planner(resolver=_Resolver(), complete=_Counter(reply=bad))
+
+    with caplog.at_level(logging.WARNING):
+        assert planner.plan("最近哪个板块最强") is None
+
+    assert "plan rejected by schema" in caplog.text, f"未记录计划被拒：{caplog.text}"
+    assert "ghost" in caplog.text, "原始输出必须进日志，否则无从判断为何被拒"
