@@ -330,7 +330,13 @@ def make_signal_tools(
         output_contract="WASHOUT_PROBE",
         handler=washout_probe,
         cost="medium",
-        latency_budget_ms=15000,
+        # 预算必须反映真实工作量。这个值曾是 15s，而探针要拉日线 + 自算筹码
+        # （再取一次日线）+ 分时 + 板块（含首次的行业映射扫描）+ 资金流多通道回退。
+        # 实测因此被注册表整体判超时、返回 0 证据，判定只能答"无可用证据"——
+        # **声明一个做不到的预算，等于让工具永远失败**。
+        # 60s 与 `signal_service.VERDICT_DEADLINE_SECONDS` 对齐：工具预算是内层，
+        # 端到端预算是外层，内层不能大于外层。
+        latency_budget_ms=60000,
         freshness_sources=("stock_data", "intraday_bars", "chip_distribution", "individual_fund_flow", "board_spot"),
         requires=("position",),
     )
