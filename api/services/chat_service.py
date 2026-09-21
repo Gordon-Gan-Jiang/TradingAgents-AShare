@@ -100,6 +100,7 @@ def build_registry(user_id: str | None = None) -> Any:
       （否则注册表会在替换之前就把真实实现捕获进闭包）
     """
     from tradingagents.tools import build_registry as _build
+    from tradingagents.tools.evidence import default_market_fetchers
 
     def lazy_ports(symbol: str, as_of: str) -> Any:
         return build_ports_factory(user_id)(symbol, as_of)
@@ -220,6 +221,234 @@ def build_registry(user_id: str | None = None) -> Any:
 
         return build_market_screener()
 
+    def _watchlist_port() -> Any:
+        """自选清单端口（L2 证据工具）：**user_id 在闭包里绑定**。
+
+        缺 user_id 时**抛错而不是返回空列表**：空列表会被读成「你的自选是空的」，
+        而事实是「这次装配没有用户维度」。把「读不到」说成「没有」正是本平台
+        最不能接受的失败形态；工具会把它降级为「自选清单未覆盖」。
+        """
+        from api.database import get_db_ctx
+        from api.services import watchlist_service
+
+        class _Port:
+            def list_items(self, *, limit: int):
+                if not user_id:
+                    raise LookupError("watchlist port requires a bound user")
+                with get_db_ctx() as db:
+                    rows = watchlist_service.list_watchlist(db, user_id)
+                return list(rows)[:limit]
+
+        return _Port()
+
+    def _freshness_port() -> Any:
+        """数据时效探针：只报**本地能确证**的截止日，不触网。
+
+        「这数据什么时候的」必须由可确证的事实回答，所以这里只报本地日线库的
+        最新日期（离线唯一能确证的源）。其余源**不返回该键** = 截止日未知，由工具
+        声明为「时效未知」——刻意不用今天日期兜底，那会把「未验证」伪装成
+        「已确认最新」，比不填更糟。
+        """
+        from api.services import daily_bar_store
+
+        class _Probe:
+            def source_facts(self, *, source_keys, symbol=None):
+                facts: dict[str, dict[str, Any]] = {}
+                if symbol and "stock_data" in tuple(source_keys):
+                    latest = daily_bar_store.latest_date(symbol)
+                    if latest:
+                        facts["stock_data"] = {
+                            "cutoff": str(latest)[:10],
+                            "origin": "本地日线库",
+                        }
+                return facts
+
+        return _Probe()
+
+    # ── 第二批 L1 决策工具的端口 ─────────────────────────────────────────
+    #
+    # 五个工具都读**平台已有的结论**（判定兑现 / 报告结论 / 平台推荐 / 跟踪看板 /
+    # 模型评测榜）。它们共三条纪律：
+    #   1. user_id 在闭包里绑定，不经过模型参数（给模型一个 user_id 参数就等于
+    #      给它越权的可能）；
+    #   2. 缺 user_id 时抛错而不是返回空——空会被读成「你没有持仓/没有推荐」，
+    #      而事实是「这次装配没有用户维度」，把"读不到"说成"没有"正是本平台最
+    #      不能接受的失败形态（工具会把它降级为「未覆盖」）；
+    #   3. 只读：不发起扫描、不触发回填、不写库。
+
+    def _require_user(port_name: str) -> str:
+        if not user_id:
+            raise LookupError(f"{port_name} port requires a bound user")
+        return user_id
+
+    def _outcome_port() -> Any:
+        """判定兑现端口（L1）：读已落库的 T+3/T+5 兑现。
+
+        兑现行的读取入口是 `signal_service.list_verdicts`——它 join 了
+        `signal_verdict_outcomes`，并把每个持有期展平进 `outcomes`。
+        `signal_outcome_service` 只有**回填写入**入口（`run_backfill` 等），
+        没有「读出已落库兑现」的公开函数，所以这里只取它的 `DEFAULT_HORIZONS`
+        作为持有期口径，避免两边各写一份 3/5。
+        """
+        from api.services import signal_outcome_service, signal_service
+
+        class _Port:
+            def recent_outcomes(self, *, limit: int, symbol: str | None = None):
+                uid = _require_user("verdict_outcome")
+                capped = max(1, int(limit))
+                payload = signal_service.list_verdicts(
+                    user_id=uid, symbol=symbol, limit=capped
+                )
+                horizons = tuple(signal_outcome_service.DEFAULT_HORIZONS)
+                rows: list[dict[str, Any]] = []
+                for verdict in payload.get("items") or []:
+                    outcomes = list(verdict.get("outcomes") or [])
+                    # 按 3 → 5 排序，证据顺序即阅读顺序
+                    outcomes.sort(
+                        key=lambda item: horizons.index(item.get("horizon_days"))
+                        if item.get("horizon_days") in horizons
+                        else len(horizons)
+                    )
+                    for outcome in outcomes:
+                        rows.append(
+                            {
+                                "symbol": verdict.get("symbol"),
+                                "as_of": verdict.get("as_of"),
+                                "state": verdict.get("state"),
+                                "state_label": verdict.get("state_label"),
+                                "horizon_days": outcome.get("horizon_days"),
+                                "ref_date": outcome.get("ref_date"),
+                                "ret_pct": outcome.get("ret_pct"),
+                                "threshold_hit": outcome.get("threshold_hit"),
+                                "evaluable": outcome.get("evaluable"),
+                                "reason": outcome.get("reason"),
+                            }
+                        )
+                        if len(rows) >= capped:
+                            return rows
+                return rows
+
+        return _Port()
+
+    def _report_port() -> Any:
+        """报告结论端口（L1）：读该用户的历史报告结论。
+
+        只取 `REPORT_SUMMARY_COLUMNS` 里的结论字段（方向/置信度/目标/止损/状态），
+        不搬报告正文——正文是 L2 证据，按需检索；结论字段是平台的确定性产出。
+        """
+        from api.database import get_db_ctx
+        from api.services import report_service
+
+        class _Port:
+            def recent_reports(self, *, limit: int, symbol: str | None = None):
+                uid = _require_user("report_conclusion")
+                with get_db_ctx() as db:
+                    rows = report_service.get_reports_by_user(
+                        db, user_id=uid, symbol=symbol, limit=max(1, int(limit))
+                    )
+                    return [
+                        {
+                            "report_id": row.id,
+                            "symbol": row.symbol,
+                            "trade_date": row.trade_date,
+                            "status": row.status,
+                            "decision": row.decision,
+                            "direction": row.direction,
+                            "confidence": row.confidence,
+                            "target_price": row.target_price,
+                            "stop_loss_price": row.stop_loss_price,
+                            "horizon": row.horizon,
+                            "freshness_status": row.freshness_status,
+                            "created_at": row.created_at.isoformat() if row.created_at else None,
+                        }
+                        for row in rows
+                    ]
+
+        return _Port()
+
+    def _recommendation_port() -> Any:
+        """推荐端口（L1）：读平台**已生成**的推荐结果。
+
+        首选 `recommendation_feedback_service.list_scan_results`：那是推荐端点算完
+        就落库的那批结果，自带 T+N 兑现回填（`feedback_status` /
+        `realized_return_pct`），是真正意义上的「平台已生成的推荐」。
+
+        该用户还没有落库结果时才退回复用 `recommendation_service.recommend_for_user`
+        （`source_mode="user_pool"`：只用跟踪池与自选池，不触发全市场扫描）。
+        它是平台**确定性**的选股管道，不是让模型临场生成推荐。
+        """
+        from api.database import get_db_ctx
+        from api.services import recommendation_feedback_service, recommendation_service
+
+        class _Port:
+            def list_recommendations(self, *, limit: int):
+                uid = _require_user("recommendation")
+                capped = max(1, int(limit))
+                with get_db_ctx() as db:
+                    rows = recommendation_feedback_service.list_scan_results(
+                        db, user_id=uid, limit=capped
+                    )
+                    if rows:
+                        return {
+                            "items": rows,
+                            "source": "persisted_scan_results",
+                            "score_profile": rows[0].get("score_profile"),
+                            "generated_at": rows[0].get("created_at"),
+                        }
+                    payload = recommendation_service.recommend_for_user(
+                        db,
+                        user_id=uid,
+                        top_k=min(capped, 20),
+                        source_mode="user_pool",
+                        include_tracking=True,
+                        include_watchlist=True,
+                    )
+                scoring = payload.get("scoring_model")
+                scoring = scoring if isinstance(scoring, dict) else {}
+                return {
+                    "items": list(payload.get("items") or []),
+                    "source": "live_user_pool",
+                    "score_profile": scoring.get("profile"),
+                    "generated_at": None,
+                }
+
+        return _Port()
+
+    def _tracking_board_port() -> Any:
+        """跟踪看板端口（L1）：持仓 + 实时行情 + 最新分析结论，同一份快照。"""
+        from api.database import get_db_ctx
+        from api.services import tracking_board_service
+
+        class _Port:
+            def tracking_board(self):
+                uid = _require_user("tracking_board")
+                with get_db_ctx() as db:
+                    return tracking_board_service.get_tracking_board(db, uid)
+
+        return _Port()
+
+    def _arena_port() -> Any:
+        """模型评测榜端口（L1）：读平台落库的评测产出（已剔除日期漂移样本）。
+
+        口径由工具传入（`all` 默认 / `portfolio`），不再这里写死：实测真实用户
+        在 `portfolio` 口径下只有 16 个样本、榜上 0 行，而 `all` 有 2238 个样本 ——
+        把口径固定成 `portfolio` 会让「哪个模型更准」几乎总是"没有样本"。
+        """
+        from api.database import get_db_ctx
+        from api.services import model_arena_service
+
+        class _Port:
+            def leaderboard(self, *, limit: int, days: int, scope: str):
+                uid = _require_user("model_arena")
+                with get_db_ctx() as db:
+                    payload = model_arena_service.build_model_leaderboard(
+                        db, user_id=uid, days=int(days), scope=scope
+                    )
+                rows = list(payload.get("leaderboard") or [])[: max(1, int(limit))]
+                return {**payload, "leaderboard": rows}
+
+        return _Port()
+
     # 扫描器也惰性构造：注册表可能在 import 期（MCP 挂载）构建，而真实扫描
     # 依赖应用层配置与网络。缺实现时不注册该工具（`build_registry` 既有语义），
     # 于是这里必须传一个真实对象而不是 None。
@@ -232,6 +461,22 @@ def build_registry(user_id: str | None = None) -> Any:
         holdings_port=_holdings_port(),
         mainline_port=_mainline_port(),
         task_port=_task_port(),
+        # 第二批 L1 决策工具：五个都只读平台已有结论，user_id 在闭包里绑定。
+        outcome_port=_outcome_port(),
+        report_port=_report_port(),
+        recommendation_port=_recommendation_port(),
+        tracking_port=_tracking_board_port(),
+        arena_port=_arena_port(),
+        # L2 证据工具的依赖：组合根显式装配，「未注入就不注册」由 build_registry 保证。
+        #
+        # `default_market_fetchers()` 指向**既有**取数实现（cn_research_data），
+        # 不在这里另写一套；换实现（例如先库后网）只需改这一处。
+        evidence_fetchers=default_market_fetchers(),
+        watchlist_port=_watchlist_port(),
+        freshness_port=_freshness_port(),
+        # announcements_port 刻意不传：仓库当前**没有**个股公告的取数实现
+        # （news_service 只有 akshare 新闻；main.py 的 announcements.json 是应用
+        # 发布说明，不是标的公告）。缺实现就不注册——不拿新闻冒充公告。
     )
 
 

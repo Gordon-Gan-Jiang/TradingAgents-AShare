@@ -35,6 +35,15 @@ def build_registry(
     holdings_port: object | None = None,
     mainline_port: object | None = None,
     task_port: object | None = None,
+    evidence_fetchers: object | None = None,
+    watchlist_port: object | None = None,
+    announcements_port: object | None = None,
+    freshness_port: object | None = None,
+    outcome_port: object | None = None,
+    report_port: object | None = None,
+    recommendation_port: object | None = None,
+    tracking_port: object | None = None,
+    arena_port: object | None = None,
 ) -> ToolRegistry:
     """组装工具注册表。
 
@@ -43,11 +52,25 @@ def build_registry(
 
     刻意**不**装配半成品：没有取数器就不注册对应工具，避免出现「在册但一调
     就炸」的条目——那类条目会让 Agent 把预算浪费在必然失败的调用上。
+
+    L2 证据工具的四个注入点同理（见 `tools/evidence.py`）：
+    `evidence_fetchers`（市场类取数集合，组合根通常传
+    `default_market_fetchers()`）、`watchlist_port`、`announcements_port`、
+    `freshness_port`。未注入的那个工具不会出现在注册表里。
+
+    `outcome_port` / `report_port` / `recommendation_port` / `tracking_port` /
+    `arena_port` 是第二批 L1 决策工具（判定兑现、历史报告结论、平台推荐、
+    跟踪看板、模型对比榜）的注入点，同样遵循「未注入就不注册」。
     """
+    from .arena import make_arena_tools
     from .data import make_data_tools
     from .history import make_history_tools, make_weight_tools
+    from .outcomes import make_outcome_tools
     from .portfolio import make_mainline_tools, make_portfolio_tools
+    from .recommendations import make_recommendation_tools
+    from .reports import make_report_tools
     from .tasks import make_task_tools
+    from .tracking import make_tracking_tools
     from .news import make_news_tools
     from .screen import make_screen_tools
     from .signals import make_signal_tools
@@ -80,5 +103,33 @@ def build_registry(
             registry.register(spec)
     if task_port is not None:
         for spec in make_task_tools(task_port):
+            registry.register(spec)
+    # 第二批 L1 决策工具：每个端口一个分支，未注入即不注册（不留「在册但一调
+    # 就炸」的条目）。用户维度在端口的闭包里绑定，工具参数里没有 user_id。
+    if outcome_port is not None:
+        for spec in make_outcome_tools(outcome_port):
+            registry.register(spec)
+    if report_port is not None:
+        for spec in make_report_tools(report_port):
+            registry.register(spec)
+    if recommendation_port is not None:
+        for spec in make_recommendation_tools(recommendation_port):
+            registry.register(spec)
+    if tracking_port is not None:
+        for spec in make_tracking_tools(tracking_port):
+            registry.register(spec)
+    if arena_port is not None:
+        for spec in make_arena_tools(arena_port):
+            registry.register(spec)
+    # L2 证据工具：按注入的依赖逐个装配，缺一个就少一个条目（不注册半成品）。
+    if any((evidence_fetchers, watchlist_port, announcements_port, freshness_port)):
+        from .evidence import make_evidence_tools
+
+        for spec in make_evidence_tools(
+            fetchers=evidence_fetchers,
+            watchlist_port=watchlist_port,
+            announcements_port=announcements_port,
+            freshness_port=freshness_port,
+        ):
             registry.register(spec)
     return registry

@@ -390,13 +390,23 @@ def build_mcp_server(
     from mcp.server.mcpserver import MCPServer
 
     from tradingagents.tools import build_registry
+    from tradingagents.tools.evidence import default_market_fetchers
 
     # 注册表在**调用时**才构造：主应用在 import 期挂载，而端口工厂需要应用层
     # 配置；惰性解析让注入（以及测试替换）都能生效，也让 import 期不必触网。
+    #
+    # L2 市场证据工具（筹码/分时/资金流）在这里显式注入**引擎既有取数实现**：
+    # 它们不依赖用户维度，MCP 面可以直接用。自选清单与时效探针需要 user_id 闭包
+    # 绑定（MCP 的用户要到调用时才解析），这里刻意不注入——「未注入就不注册」
+    # 由 build_registry 保证，不留一调就失败的条目。
     if registry_provider is not None:
         registry = registry_provider()
     else:
-        registry = build_registry(ports_factory=ports_factory, news_fetcher=news_fetcher)
+        registry = build_registry(
+            ports_factory=ports_factory,
+            news_fetcher=news_fetcher,
+            evidence_fetchers=default_market_fetchers(),
+        )
     core = McpServerCore(registry, audit=audit)
 
     server = MCPServer(

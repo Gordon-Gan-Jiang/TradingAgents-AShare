@@ -195,6 +195,12 @@ def _prequel(
         and not request.symbols
         and not request.screen
         and not request.market_level
+        # **规划层已经决定了要做什么**时不再追问：它的工具步骤可能本来就不需要
+        # 标的（例如 portfolio_holdings_read 读持仓、market_mainline_view 读主线）。
+        # 实测踩到：「我持仓里哪只最危险」被规划器正确解析成带步骤的计划，
+        # 却在执行前被这里拦下追问"请告诉我股票代码"——追问分支只看 symbol，
+        # 把规划层的决定当成了"用户没说清楚"。
+        and not request.planned_steps
     ):
         if request.candidates:
             listed = "、".join(request.candidates)

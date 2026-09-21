@@ -234,3 +234,38 @@ def test_plan_intent_is_recorded_for_measurement(monkeypatch):
     assert request is not None
     assert request.intent == "market_view"
     assert request.plan_source == "llm"
+
+
+def test_planned_steps_suppress_the_clarification_prompt():
+    """规划层已决定要做什么时不得追问——它的步骤可能本来就不需要标的。
+
+    实测踩到：「我持仓里哪只最危险」被规划器正确解析出计划（含
+    portfolio_holdings_read 这类无需标的的工具），却在执行前被追问分支拦下，
+    回了"请告诉我具体的股票代码"。追问分支只看 symbol，把规划层的决定
+    当成了"用户没说清楚"。
+    """
+    from tradingagents.agent.events import ListSink
+    from tradingagents.agent.loop import TurnRequest, run_turn
+    from tradingagents.tools import build_registry
+
+    class _Clock:
+        def now(self):
+            return 0.0
+
+    request = TurnRequest(
+        text="我持仓里哪只最危险", user_id="u1", tier="medium", as_of="2026-09-21",
+        plan_source="llm", intent="portfolio_review",
+        planned_steps=({"tool": "portfolio_holdings_read", "arguments": {}, "reason": "planned"},),
+    )
+    sink = ListSink()
+    result = run_turn(
+        request=request,
+        registry=build_registry(
+            ports_factory=lambda *a: object(), news_fetcher=lambda *a: [],
+            holdings_port=type("P", (), {"list_holdings": lambda self, *, limit: []})(),
+        ),
+        model=None, sink=sink, clock=_Clock(),
+    )
+    assert "请告诉我具体的股票代码" not in result.answer, (
+        "规划层已给出步骤，不该被追问分支当成「用户没说清楚」"
+    )
