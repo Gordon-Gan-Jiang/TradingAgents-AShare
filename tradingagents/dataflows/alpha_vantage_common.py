@@ -1,6 +1,5 @@
 import os
 import requests
-import pandas as pd
 import json
 from datetime import datetime
 from io import StringIO
@@ -100,6 +99,8 @@ def _filter_csv_by_date_range(csv_data: str, start_date: str, end_date: str) -> 
         return csv_data
 
     try:
+        import pandas as pd
+
         # Parse CSV data
         df = pd.read_csv(StringIO(csv_data))
 

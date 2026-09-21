@@ -7,15 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import html
-import json
 import logging
 import os
-import re
 import smtplib
 from email.message import EmailMessage
 from typing import TYPE_CHECKING, List, Optional
 
 import markdown as _md
+
+from tradingagents.agents.utils.direction import (
+    extract_direction_result,
+    extract_tagged_json,
+)
 
 if TYPE_CHECKING:
     from api.database import ReportDB, UserDB
@@ -93,35 +96,35 @@ def _infer_frontend_url() -> str:
     return origins[0] if origins else ""
 
 
-_VERDICT_RE = re.compile(r"<!--\s*VERDICT:\s*(\{[^>]+\})\s*-->")
-_DIRECTION_ALIAS = {
-    "BULLISH": "看多",
-    "LEAN_BULLISH": "偏多",
-    "BEARISH": "看空",
-    "LEAN_BEARISH": "偏空",
-    "NEUTRAL": "中性",
-    "CAUTIOUS": "谨慎",
-}
-
-
 def _extract_verdict(text: str) -> Optional[dict]:
     """Extract structured verdict from agent report HTML comment.
 
-    Returns {"direction": "看多", "reason": "..."} or None.
+    Returns ``{"direction": <canonical>, "reason": "..."}`` or ``None``.
+
+    Delegates to :mod:`tradingagents.agents.utils.direction`, which fixes two
+    defects in the previous local implementation:
+
+    * the pattern ``\\{[^>]+\\}`` failed whenever the JSON payload contained a
+      ``>`` character, which is common inside a ``reason`` string;
+    * the direction was only partly normalized — ``CAUTIOUS`` became ``谨慎``,
+      which is not one of the canonical directions, so downstream colour lookup
+      and consensus scoring treated it as unknown.
+
+    ``reason`` is still required, because this service renders it; a block without
+    a reason returns ``None`` rather than half a row.
     """
-    m = _VERDICT_RE.search(text)
-    if not m:
+    if not text:
         return None
-    try:
-        parsed = json.loads(m.group(1))
-        direction = parsed.get("direction", "")
-        reason = parsed.get("reason", "")
-        if not direction or not reason:
-            return None
-        direction = _DIRECTION_ALIAS.get(direction.upper(), direction)
-        return {"direction": direction, "reason": reason.strip()[:42]}
-    except (json.JSONDecodeError, AttributeError):
+    payload = extract_tagged_json(text, "VERDICT")
+    if payload is None:
         return None
+    result = extract_direction_result(text)
+    if result.direction is None:
+        return None
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        return None
+    return {"direction": result.direction, "reason": reason[:42]}
 
 
 # ---------------------------------------------------------------------------
@@ -198,13 +201,34 @@ def render_report_html(report: "ReportDB", frontend_url: str = "", stock_name: s
     parts.append(
         '<tr><td style="background:#0f172a;padding:28px 32px;">'
         f'<table width="100%" cellpadding="0" cellspacing="0"><tr>'
-        f'<td><p style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.3px;">TradingAgents 投研报告</p>'
+        f'<td><p style="margin:0;font-size:22px;font-weight:700;color:#ffffff;letter-spacing:-0.3px;">AlphaPilot A-Share 投研报告</p>'
         f'<p style="margin:6px 0 0;font-size:14px;color:#94a3b8;">{name + " " if name else ""}{symbol} &middot; {trade_date}</p></td>'
         f'<td align="right" valign="top">'
         f'<span style="display:inline-block;background:{direction_bg};color:{direction_color};font-size:15px;font-weight:700;padding:6px 16px;border-radius:20px;">{_escape(direction) or "-"}</span>'
         f'</td></tr></table>'
         '</td></tr>'
     )
+
+    # --- freshness warning before decision ---
+    fs_payload = getattr(report, "result_data", None) if hasattr(report, "result_data") else None
+    fs_status = getattr(report, "freshness_status", None)
+    fs_summary = fs_payload.get("freshness_summary") if isinstance(fs_payload, dict) else None
+    if not fs_status and isinstance(fs_summary, dict):
+        fs_status = fs_summary.get("overall_status")
+    if fs_status in ("error", "stale", "warning"):
+        label = {"error": "数据异常", "stale": "数据过时", "warning": "部分滞后"}.get(fs_status, fs_status)
+        detail = ""
+        if fs_status == "error" and isinstance(fs_summary, dict):
+            errors = fs_summary.get("fetch_errors") or []
+            if errors:
+                first = errors[0]
+                detail = f"（{first.get('source_key', 'unknown')}: {first.get('error_message') or first.get('error_code') or '拉取失败'}）"
+        parts.append(
+            '<tr><td style="padding:16px 32px 0;">'
+            f'<p style="margin:0;padding:12px 16px;background:#fef2f2;border-left:4px solid #ef4444;color:#991b1b;font-size:13px;">'
+            f'⚠ 本报告数据状态：{label}{detail}，请谨慎参考以下决策。'
+            '</p></td></tr>'
+        )
 
     # --- decision card: 3-column summary ---
     conf_str = f"{confidence}%" if confidence is not None else "-"
@@ -383,16 +407,10 @@ def render_report_html(report: "ReportDB", frontend_url: str = "", stock_name: s
     # --- footer ---
     parts.append(
         '<tr><td style="padding:28px 32px;border-top:1px solid #e2e8f0;margin-top:24px;text-align:center;">'
-        '<p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.6;">本报告由 TradingAgents 多智能体系统自动生成，仅供参考，不构成投资建议。</p>'
+        '<p style="margin:0;font-size:12px;color:#94a3b8;line-height:1.6;">本报告由 AlphaPilot A-Share 多智能体系统自动生成，仅供参考，不构成投资建议。</p>'
         f'<p style="margin:10px 0 0;font-size:12px;color:#94a3b8;">'
-        f'<a href="{_GITHUB_URL}" style="color:#3b82f6;text-decoration:none;font-weight:600;">TradingAgents-AShare</a>'
+        f'<a href="{_GITHUB_URL}" style="color:#3b82f6;text-decoration:none;font-weight:600;">AlphaPilot A-Share</a>'
         f' &mdash; 14 名 AI Agent 协作分析的 A 股智能投研系统</p>'
-        f'<p style="margin:8px 0 0;font-size:12px;color:#94a3b8;">'
-        f'觉得有帮助？给项目点个 '
-        f'<a href="{_GITHUB_URL}" style="color:#3b82f6;text-decoration:none;">&#11088; Star</a>'
-        f' 或 '
-        f'<a href="{_GITHUB_URL}/sponsors" style="color:#3b82f6;text-decoration:none;">&#10084;&#65039; 赞助支持</a>'
-        f'</p>'
         f'<p style="margin:12px 0 0;font-size:11px;color:#cbd5e1;">不想收到此邮件？请登录后在「设置」页面关闭「邮件报告推送」即可取消订阅。</p>'
         '</td></tr>'
     )
@@ -437,12 +455,12 @@ def send_report_email(user: "UserDB", report: "ReportDB", stock_name: str = "") 
         report_link = f"\n\n查看完整报告: {frontend_url.rstrip('/')}/reports?report={report.id}"
 
     msg = EmailMessage()
-    msg["Subject"] = f"TradingAgents 投研报告 - {display_name} ({trade_date})"
+    msg["Subject"] = f"AlphaPilot A-Share 投研报告 - {display_name} ({trade_date})"
     msg["From"] = smtp_from
     msg["To"] = user.email
 
     # text/plain fallback
-    plain = f"TradingAgents 投研报告\n{display_name} {trade_date}\n决策: {report.decision or '-'}\n方向: {report.direction or '-'}\n置信度: {report.confidence or '-'}%{report_link}\n\n请使用支持 HTML 的邮件客户端查看完整报告。"
+    plain = f"AlphaPilot A-Share 投研报告\n{display_name} {trade_date}\n决策: {report.decision or '-'}\n方向: {report.direction or '-'}\n置信度: {report.confidence or '-'}%{report_link}\n\n请使用支持 HTML 的邮件客户端查看完整报告。"
     msg.set_content(plain)
     msg.add_alternative(html_body, subtype="html")
 

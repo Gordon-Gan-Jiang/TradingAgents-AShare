@@ -54,11 +54,9 @@ class TestPropagatorInitialState:
 def _make_mock_graph_class():
     """Return a lightweight TradingAgentsGraph without real LLM/tool setup."""
     with patch("tradingagents.graph.trading_graph.create_llm_client"), \
-         patch("tradingagents.graph.trading_graph.FinancialSituationMemory"), \
          patch("tradingagents.graph.trading_graph.GraphSetup"), \
          patch("tradingagents.graph.trading_graph.ConditionalLogic"), \
          patch("tradingagents.graph.trading_graph.Propagator"), \
-         patch("tradingagents.graph.trading_graph.Reflector"), \
          patch("tradingagents.graph.trading_graph.SignalProcessor"), \
          patch("tradingagents.graph.trading_graph.set_config"):
         from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -234,6 +232,7 @@ def test_graph_setup_wires_market_analyst_without_name_errors():
         "create_news_analyst": MagicMock(return_value="news_node"),
         "create_research_manager": MagicMock(return_value="research_node"),
         "create_risk_manager": MagicMock(return_value="risk_node"),
+        "create_decision_critic": MagicMock(return_value="critic_node"),
         "create_smart_money_analyst": MagicMock(return_value="smart_money_node"),
         "create_social_media_analyst": MagicMock(return_value="social_node"),
         "create_trader": MagicMock(return_value="trader_node"),
@@ -245,11 +244,6 @@ def test_graph_setup_wires_market_analyst_without_name_errors():
             quick_llm,
             deep_llm,
             tool_nodes,
-            bull_memory=object(),
-            bear_memory=object(),
-            trader_memory=object(),
-            invest_judge_memory=object(),
-            risk_manager_memory=object(),
             conditional_logic=conditional_logic,
             data_collector=object(),
         )
@@ -258,6 +252,7 @@ def test_graph_setup_wires_market_analyst_without_name_errors():
 
     create_market.assert_called_once_with(quick_llm, graph_setup.data_collector)
     assert "Market Analyst" in compiled["nodes"]
+    assert "Decision Critic" in compiled["nodes"]
     assert "Market Analyst Done" in compiled["nodes"]
     assert ("tools_market", "Market Analyst") in compiled["edges"]
     assert compiled["checkpointer"] == "cp"

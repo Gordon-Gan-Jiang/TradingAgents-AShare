@@ -9,12 +9,15 @@ from api.database import ScheduledAnalysisDB
 
 MAX_SCHEDULED_ITEMS = 10
 
-# 非交易时间窗口：15:00~次日9:15 允许设置
+# 定时分析时间口径：用户可以设置任意 HH:MM（含交易时段），调度循环会在交易日
+# 按配置时间触发。历史上本文件注释写的是"仅非交易时间可设置"，而调度循环又
+# 写死跳过 08:00~20:00，二者叠加导致 15:00~19:59 的设置被静默延后到 20:00；
+# 现已统一为"配置时间即执行时间"，见 _scheduler_loop。
 VALID_HORIZONS = {"short", "medium"}
 
 
 def _validate_trigger_time(t: str) -> str:
-    """Validate HH:MM format. Allowed: 20:00~23:59 or 00:00~08:00."""
+    """Validate HH:MM format."""
     parts = t.strip().split(":")
     if len(parts) != 2:
         raise ValueError("时间格式错误，请使用 HH:MM")
@@ -24,10 +27,6 @@ def _validate_trigger_time(t: str) -> str:
         raise ValueError("时间格式错误，请使用 HH:MM")
     if not (0 <= hh <= 23 and 0 <= mm <= 59):
         raise ValueError("时间格式错误，请使用 HH:MM")
-    time_val = hh * 60 + mm
-    # Allowed: 20:00 (1200) ~ 23:59 (1439) or 00:00 (0) ~ 08:00 (480)
-    if 8 * 60 < time_val < 20 * 60:
-        raise ValueError("定时时间仅允许 20:00~次日 08:00（避免影响白天使用）")
     return f"{hh:02d}:{mm:02d}"
 
 
@@ -104,6 +103,10 @@ def _apply_scheduled_updates(item: ScheduledAnalysisDB, **kwargs) -> None:
         item.horizon = _validate_horizon(kwargs["horizon"])
     if "trigger_time" in kwargs:
         item.trigger_time = _validate_trigger_time(kwargs["trigger_time"])
+    if "prompt_template_id" in kwargs:
+        item.prompt_template_id = (kwargs["prompt_template_id"] or "").strip() or None
+    if "prompt_vars" in kwargs:
+        item.prompt_vars_json = dict(kwargs["prompt_vars"] or {})
 
 
 def create_scheduled(
@@ -112,6 +115,8 @@ def create_scheduled(
     symbol: str,
     horizon: str = "short",
     trigger_time: str = "20:00",
+    prompt_template_id: Optional[str] = None,
+    prompt_vars: Optional[dict] = None,
 ) -> dict:
     """Create a scheduled analysis task."""
     count = db.query(ScheduledAnalysisDB).filter(
@@ -138,6 +143,8 @@ def create_scheduled(
         symbol=symbol,
         horizon=horizon,
         trigger_time=trigger_time,
+        prompt_template_id=(prompt_template_id or "").strip() or None,
+        prompt_vars_json=dict(prompt_vars or {}),
     )
     db.add(item)
     db.commit()
@@ -151,6 +158,8 @@ def ensure_scheduled_for_symbols(
     symbols: Iterable[str],
     horizon: str = "short",
     trigger_time: str = "20:00",
+    prompt_template_id: Optional[str] = None,
+    prompt_vars: Optional[dict] = None,
 ) -> dict:
     """Ensure the given symbols exist in scheduled tasks without duplicating existing items."""
 
@@ -193,6 +202,8 @@ def ensure_scheduled_for_symbols(
                 symbol=symbol,
                 horizon=horizon,
                 trigger_time=trigger_time,
+                prompt_template_id=(prompt_template_id or "").strip() or None,
+                prompt_vars_json=dict(prompt_vars or {}),
             )
         )
         existing_symbols.add(symbol)
@@ -373,6 +384,8 @@ def _to_dict(item: ScheduledAnalysisDB) -> dict:
         "symbol": item.symbol,
         "horizon": item.horizon or "short",
         "trigger_time": item.trigger_time or "15:30",
+        "prompt_template_id": item.prompt_template_id,
+        "prompt_vars": item.prompt_vars_json or {},
         "is_active": item.is_active,
         "last_run_date": item.last_run_date,
         "last_run_status": item.last_run_status,

@@ -5,6 +5,7 @@ import remarkGfm from 'remark-gfm'
 import { useAnalysisStore } from '@/stores/analysisStore'
 import type { ReportDetail } from '@/types'
 import { sanitizeReportMarkdown } from '@/utils/reportText'
+import { FreshnessBanner, ReportAgeNote, sectionFreshnessIcon, sectionFreshnessTooltip } from '@/components/FreshnessBadge'
 
 const REPORT_SECTIONS = [
     { key: 'market_report', title: '市场分析报告', team: '分析团队' },
@@ -118,6 +119,8 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
         }
         return (
             <div className="space-y-2">
+                <FreshnessBanner summary={reportData?.freshness_summary} />
+                <ReportAgeNote note={reportData?.freshness_summary?.report_age_note} />
                 <div className="flex items-center justify-between mb-4">
                     <div className="flex items-center gap-2">
                         <FileText className="w-5 h-5 text-blue-500" />
@@ -133,6 +136,13 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
                         const content = getSectionContent(section.key)
                         if (!content) return null
                         const isExpanded = expandedSections.includes(section.key)
+                        const sectionImpact = reportData?.freshness_summary?.section_impacts?.[section.key]
+                        const impactIcon = sectionFreshnessIcon(sectionImpact)
+                        const impactTooltip = sectionFreshnessTooltip(
+                            reportData?.freshness_summary,
+                            section.key,
+                            sectionImpact,
+                        )
                         return (
                             <div key={section.key} className="border border-slate-200 dark:border-slate-700 rounded-2xl overflow-hidden bg-white dark:bg-slate-900/40">
                                 <button
@@ -143,6 +153,11 @@ export default function ReportViewer({ reportData, activeSection }: ReportViewer
                                         {isExpanded ? <ChevronDown className="w-4 h-4 text-slate-400" /> : <ChevronRight className="w-4 h-4 text-slate-400" />}
                                         <span className="font-medium text-slate-900 dark:text-slate-100">{section.title}</span>
                                         <span className="text-xs text-slate-500 dark:text-slate-400">{section.team}</span>
+                                        {impactIcon && (
+                                            <span className="text-xs text-amber-600 dark:text-amber-400" title={impactTooltip}>
+                                                {impactIcon}
+                                            </span>
+                                        )}
                                     </div>
                                     <span className="text-xs text-green-500">✓</span>
                                 </button>

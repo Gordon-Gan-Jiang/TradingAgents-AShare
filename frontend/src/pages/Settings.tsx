@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { Save, Key, Database, Loader2, Trash2, Link2, Copy, Plus, CheckCircle2, Mail, Flame, Webhook } from 'lucide-react'
 import { api } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
-import type { RuntimeWarmupResult, UserToken } from '@/types'
+import type { RuntimeWarmupResult, UserToken, PromptTemplate } from '@/types'
 
 type ProviderPreset = {
     id: string
@@ -11,6 +11,8 @@ type ProviderPreset = {
     baseUrl: string
     protocol: string
     editableBaseUrl?: boolean
+    /** 覆盖 Base URL 输入框下方的说明文案 */
+    baseUrlHint?: string
 }
 
 const PROVIDER_PRESETS: ProviderPreset[] = [
@@ -22,12 +24,28 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     { id: 'moonshot', label: 'Moonshot AI（Kimi）', provider: 'openai', baseUrl: 'https://api.moonshot.cn/v1', protocol: 'OpenAI 兼容' },
     { id: 'zhipu', label: '智谱 AI', provider: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', protocol: 'OpenAI 兼容' },
     { id: 'siliconflow', label: '硅基流动', provider: 'openai', baseUrl: 'https://api.siliconflow.cn/v1', protocol: 'OpenAI 兼容' },
+    {
+        id: 'volcengine-ark',
+        label: '火山引擎方舟（豆包等）',
+        provider: 'openai',
+        baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+        protocol: 'OpenAI 兼容',
+        editableBaseUrl: true,
+        baseUrlHint:
+            '默认北京地域；若控制台为其他地域，请改为方舟文档中的 Base URL（须含 /api/v3）。模型名填「推理接入点 ID」。',
+    },
     { id: 'custom-openai', label: '自定义 OpenAI 兼容', provider: 'openai', baseUrl: '', protocol: 'OpenAI 兼容', editableBaseUrl: true },
 ]
 
 function inferPreset(llmProvider: string, backendUrl: string): string {
     const normalizedProvider = (llmProvider || '').toLowerCase()
     const normalizedUrl = (backendUrl || '').replace(/\/$/, '')
+
+    // 火山方舟：多地域 endpoint 均为 ark.*.volces.com/api/v3
+    if (normalizedProvider === 'openai' && /ark\.[^/]+\.volces\.com\/api\/v3/i.test(normalizedUrl)) {
+        return 'volcengine-ark'
+    }
+
     const matched = PROVIDER_PRESETS.find((preset) => {
         if (preset.provider !== normalizedProvider) return false
         if (!preset.baseUrl && preset.id !== 'custom-openai') return true
@@ -47,6 +65,9 @@ export default function Settings() {
     const [wecomWebhook, setWecomWebhook] = useState('')
     const [hasStoredWebhook, setHasStoredWebhook] = useState(false)
     const [storedWebhookDisplay, setStoredWebhookDisplay] = useState('')
+    const [wpsWebhook, setWpsWebhook] = useState('')
+    const [hasStoredWpsWebhook, setHasStoredWpsWebhook] = useState(false)
+    const [storedWpsDisplay, setStoredWpsDisplay] = useState('')
 
     const [providerPreset, setProviderPreset] = useState('openai')
     const [customBaseUrl, setCustomBaseUrl] = useState('')
@@ -54,9 +75,12 @@ export default function Settings() {
     const [quickThinkLlm, setQuickThinkLlm] = useState('')
     const [maxDebateRounds, setMaxDebateRounds] = useState(1)
     const [maxRiskRounds, setMaxRiskRounds] = useState(1)
+    const [decisionCriticEnabled, setDecisionCriticEnabled] = useState(true)
+    const [decisionCriticThreshold, setDecisionCriticThreshold] = useState(40)
     const [serverFallbackEnabled, setServerFallbackEnabled] = useState(true)
     const [emailReportEnabled, setEmailReportEnabled] = useState(true)
     const [wecomReportEnabled, setWecomReportEnabled] = useState(true)
+    const [wpsReportEnabled, setWpsReportEnabled] = useState(true)
     const [configLoading, setConfigLoading] = useState(false)
     const [saving, setSaving] = useState(false)
     const [saveAllSaving, setSaveAllSaving] = useState(false)
@@ -69,6 +93,9 @@ export default function Settings() {
     const [wecomWarmingUp, setWecomWarmingUp] = useState(false)
     const [wecomWarmupMessage, setWecomWarmupMessage] = useState<string | null>(null)
     const [wecomWarmupError, setWecomWarmupError] = useState<string | null>(null)
+    const [wpsWarmingUp, setWpsWarmingUp] = useState(false)
+    const [wpsWarmupMessage, setWpsWarmupMessage] = useState<string | null>(null)
+    const [wpsWarmupError, setWpsWarmupError] = useState<string | null>(null)
 
     // API Token states
     const [tokens, setTokens] = useState<UserToken[]>([])
@@ -77,6 +104,11 @@ export default function Settings() {
     const [isCreatingToken, setIsCreatingToken] = useState(false)
     const [copiedTokenId, setCopiedTokenId] = useState<string | null>(null)
     const [newlyCreatedToken, setNewlyCreatedToken] = useState<string | null>(null)
+    const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([])
+    const [templatesLoading, setTemplatesLoading] = useState(false)
+    const [templateSaving, setTemplateSaving] = useState(false)
+    const [newTemplateName, setNewTemplateName] = useState('')
+    const [newTemplateText, setNewTemplateText] = useState('')
 
     const selectedPreset = useMemo(
         () => PROVIDER_PRESETS.find((item) => item.id === providerPreset) || PROVIDER_PRESETS[0],
@@ -94,6 +126,11 @@ export default function Settings() {
         setWecomWarmupMessage(null)
         setWecomWarmupError(null)
     }, [wecomWebhook])
+
+    useEffect(() => {
+        setWpsWarmupMessage(null)
+        setWpsWarmupError(null)
+    }, [wpsWebhook])
 
     useEffect(() => {
         try {
@@ -123,12 +160,21 @@ export default function Settings() {
                 setQuickThinkLlm(cfg.quick_think_llm)
                 setMaxDebateRounds(cfg.max_debate_rounds)
                 setMaxRiskRounds(cfg.max_risk_discuss_rounds)
+                setDecisionCriticEnabled(cfg.decision_critic_enabled !== false)
+                setDecisionCriticThreshold(
+                    typeof cfg.decision_critic_revision_threshold === 'number'
+                        ? cfg.decision_critic_revision_threshold
+                        : 40
+                )
                 setHasStoredApiKey(!!cfg.has_api_key)
                 setHasStoredWebhook(!!cfg.has_wecom_webhook)
                 setStoredWebhookDisplay(cfg.wecom_webhook_display || '')
+                setHasStoredWpsWebhook(!!cfg.has_wps_webhook)
+                setStoredWpsDisplay(cfg.wps_webhook_display || '')
                 setServerFallbackEnabled(!!cfg.server_fallback_enabled)
                 setEmailReportEnabled(cfg.email_report_enabled !== false)
                 setWecomReportEnabled(cfg.wecom_report_enabled !== false)
+                setWpsReportEnabled(cfg.wps_report_enabled !== false)
             })
             .catch(err => {
                 setConfigError(err instanceof Error ? err.message : '无法连接到后端')
@@ -137,6 +183,7 @@ export default function Settings() {
 
         // Fetch tokens
         fetchTokens()
+        void fetchPromptTemplates()
     }, [])
 
     const fetchTokens = async () => {
@@ -148,6 +195,18 @@ export default function Settings() {
             console.error('Failed to fetch tokens:', err)
         } finally {
             setTokensLoading(false)
+        }
+    }
+
+    const fetchPromptTemplates = async () => {
+        setTemplatesLoading(true)
+        try {
+            const data = await api.listPromptTemplates('deep_analysis')
+            setPromptTemplates(data.templates)
+        } catch (err) {
+            console.error('Failed to fetch prompt templates:', err)
+        } finally {
+            setTemplatesLoading(false)
         }
     }
 
@@ -198,10 +257,14 @@ export default function Settings() {
         quick_think_llm: quickThinkLlm,
         max_debate_rounds: maxDebateRounds,
         max_risk_discuss_rounds: maxRiskRounds,
+        decision_critic_enabled: decisionCriticEnabled,
+        decision_critic_revision_threshold: decisionCriticThreshold,
         api_key: llmApiKey || undefined,
         ...(options?.includeWecom ? {
             wecom_webhook_url: wecomWebhook.trim() || undefined,
+            wps_webhook_url: wpsWebhook.trim() || undefined,
             wecom_report_enabled: wecomReportEnabled,
+            wps_report_enabled: wpsReportEnabled,
         } : {}),
         ...(options?.includeEmail ? { email_report_enabled: emailReportEnabled } : {}),
     })
@@ -223,9 +286,13 @@ export default function Settings() {
         setHasStoredApiKey(!!response.has_api_key)
         setHasStoredWebhook(!!response.current.has_wecom_webhook)
         setStoredWebhookDisplay(response.current.wecom_webhook_display || '')
+        setHasStoredWpsWebhook(!!response.current.has_wps_webhook)
+        setStoredWpsDisplay(response.current.wps_webhook_display || '')
         setWecomReportEnabled(response.current.wecom_report_enabled !== false)
+        setWpsReportEnabled(response.current.wps_report_enabled !== false)
         setLlmApiKey('')
         setWecomWebhook('')
+        setWpsWebhook('')
         showSavedMessage(response.warmup?.message || successMessage)
         return response
     }
@@ -292,6 +359,24 @@ export default function Settings() {
         }
     }
 
+    const handleClearWpsWebhook = async () => {
+        if (!hasStoredWpsWebhook) return
+        setSaving(true)
+        try {
+            const response = await api.updateConfig({ clear_wps_webhook: true })
+            setHasStoredWpsWebhook(!!response.current.has_wps_webhook)
+            setStoredWpsDisplay(response.current.wps_webhook_display || '')
+            setWpsWebhook('')
+            setWpsWarmupMessage(null)
+            setWpsWarmupError(null)
+            showSavedMessage('WPS 协作 Webhook 已清除')
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '清除 WPS Webhook 失败')
+        } finally {
+            setSaving(false)
+        }
+    }
+
     const handleWecomWarmup = async () => {
         setWecomWarmingUp(true)
         setWecomWarmupMessage(null)
@@ -312,10 +397,90 @@ export default function Settings() {
         }
     }
 
+    const handleWpsWarmup = async () => {
+        setWpsWarmingUp(true)
+        setWpsWarmupMessage(null)
+        setWpsWarmupError(null)
+        try {
+            const response = await api.warmupWps({
+                wps_webhook_url: wpsWebhook.trim() || undefined,
+            })
+            setWpsWarmupMessage(
+                response.webhook_display
+                    ? `${response.message}，目标：${response.webhook_display}`
+                    : response.message
+            )
+        } catch (err) {
+            setWpsWarmupError(err instanceof Error ? err.message : 'WPS Webhook 测试失败')
+        } finally {
+            setWpsWarmingUp(false)
+        }
+    }
+
     const toggleAnalyst = (analyst: string) => {
         setDefaultAnalysts(prev =>
             prev.includes(analyst) ? prev.filter(a => a !== analyst) : [...prev, analyst]
         )
+    }
+
+    const handleCreateTemplate = async () => {
+        const name = newTemplateName.trim()
+        const text = newTemplateText.trim()
+        if (!name || !text) {
+            alert('请输入模板名称和模板内容')
+            return
+        }
+        setTemplateSaving(true)
+        try {
+            await api.createPromptTemplate({
+                scope: 'deep_analysis',
+                name,
+                template_text: text,
+                intent_json: {},
+                is_active: true,
+            })
+            setNewTemplateName('')
+            setNewTemplateText('')
+            await fetchPromptTemplates()
+            showSavedMessage('提示词模板已创建')
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '创建模板失败')
+        } finally {
+            setTemplateSaving(false)
+        }
+    }
+
+    const toggleTemplateActive = async (template: PromptTemplate) => {
+        if (template.is_builtin) return
+        setTemplateSaving(true)
+        try {
+            await api.updatePromptTemplate(template.id, { is_active: !template.is_active })
+            await fetchPromptTemplates()
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '更新模板状态失败')
+        } finally {
+            setTemplateSaving(false)
+        }
+    }
+
+    const editTemplate = async (template: PromptTemplate) => {
+        if (template.is_builtin) return
+        const nextName = prompt('模板名称', template.name)
+        if (nextName == null) return
+        const nextText = prompt('模板内容（支持 {name} {symbol} {horizon_label} {trade_date}）', template.template_text)
+        if (nextText == null) return
+        setTemplateSaving(true)
+        try {
+            await api.updatePromptTemplate(template.id, {
+                name: nextName.trim() || template.name,
+                template_text: nextText.trim() || template.template_text,
+            })
+            await fetchPromptTemplates()
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '更新模板失败')
+        } finally {
+            setTemplateSaving(false)
+        }
     }
 
     return (
@@ -343,7 +508,18 @@ export default function Settings() {
                         </label>
                         <select
                             value={providerPreset}
-                            onChange={e => setProviderPreset(e.target.value)}
+                            onChange={(e) => {
+                                const nextId = e.target.value
+                                const preset = PROVIDER_PRESETS.find((p) => p.id === nextId)
+                                setProviderPreset(nextId)
+                                // 切换到方舟：若当前 URL 不是方舟域名，填入默认北京 endpoint，避免沿用 OpenAI 等错误地址
+                                if (nextId === 'volcengine-ark' && preset?.baseUrl) {
+                                    const u = customBaseUrl.trim()
+                                    if (!u || !/volces\.com/i.test(u)) {
+                                        setCustomBaseUrl(preset.baseUrl)
+                                    }
+                                }
+                            }}
                             className="input w-full"
                             disabled={configLoading}
                         >
@@ -377,9 +553,11 @@ export default function Settings() {
                                 placeholder="https://your-openai-compatible-endpoint/v1"
                             />
                             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                                {selectedPreset.editableBaseUrl
-                                    ? '自定义 OpenAI 兼容服务需要自行填写 Base URL。'
-                                    : '该厂商默认通过预设的 OpenAI 兼容地址接入，通常只需填写模型名和 API Key。'}
+                                {selectedPreset.baseUrlHint
+                                    ? selectedPreset.baseUrlHint
+                                    : selectedPreset.editableBaseUrl
+                                      ? '自定义 OpenAI 兼容服务需要自行填写 Base URL。'
+                                      : '该厂商默认通过预设的 OpenAI 兼容地址接入，通常只需填写模型名和 API Key。'}
                             </p>
                         </div>
                     )}
@@ -569,6 +747,45 @@ export default function Settings() {
                     </div>
                 </div>
 
+                <div className="rounded-2xl border border-slate-200/80 dark:border-slate-700/80 bg-slate-50/80 dark:bg-slate-900/40 p-4 space-y-3">
+                    <div className="text-sm font-medium text-slate-900 dark:text-slate-100">决策审查（Risk 之后）</div>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        风控终稿生成后增加一轮一致性审查；严重度达到阈值时才自动修订终稿。服务端若设置{' '}
+                        <code className="text-xs bg-slate-200/80 dark:bg-slate-800 px-1 rounded">TA_DECISION_CRITIC=0</code>{' '}
+                        将强制关闭（个人设置不生效）。
+                    </p>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                            type="checkbox"
+                            checked={decisionCriticEnabled}
+                            onChange={e => setDecisionCriticEnabled(e.target.checked)}
+                            disabled={configLoading}
+                            className="rounded border-slate-300 dark:border-slate-600"
+                        />
+                        <span className="text-sm text-slate-700 dark:text-slate-300">启用决策审查</span>
+                    </label>
+                    <div>
+                        <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
+                            自动修订严重度阈值（0–100）
+                        </label>
+                        <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={decisionCriticThreshold}
+                            onChange={e => setDecisionCriticThreshold(Number(e.target.value))}
+                            className="input w-full max-w-xs"
+                            disabled={configLoading || !decisionCriticEnabled}
+                        />
+                        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            仅当审查标记需要修订且严重度 ≥ 该值时触发第二次改写；可用环境变量{' '}
+                            <code className="text-xs bg-slate-200/80 dark:bg-slate-800 px-1 rounded">TA_DECISION_CRITIC_REVISION_THRESHOLD</code>{' '}
+                            设服务端默认值。
+                        </p>
+                    </div>
+                </div>
+
                 <div>
                     <label className="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">
                         自定义分析提示
@@ -579,6 +796,89 @@ export default function Settings() {
                         className="input w-full min-h-[80px] resize-y"
                         placeholder="例如：更关注估值安全边际、政策催化与机构资金行为。"
                     />
+                </div>
+            </div>
+
+            <div className="card space-y-4">
+                <div className="flex items-center gap-2">
+                    <Database className="w-5 h-5 text-indigo-500" />
+                    <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">深度分析提示词模板</h2>
+                    {templatesLoading && <Loader2 className="ml-auto w-4 h-4 animate-spin text-slate-400" />}
+                </div>
+
+                <div className="space-y-2">
+                    {promptTemplates
+                        .filter(template => template.scope === 'deep_analysis')
+                        .map(template => (
+                            <div
+                                key={template.id}
+                                className="rounded-xl border border-slate-200 bg-slate-50/60 px-3 py-3 dark:border-slate-700 dark:bg-slate-900/40"
+                            >
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-medium text-slate-800 dark:text-slate-100">{template.name}</span>
+                                    <span className={`rounded px-1.5 py-0.5 text-[10px] ${
+                                        template.is_builtin
+                                            ? 'bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-300'
+                                            : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                                    }`}>
+                                        {template.is_builtin ? '系统' : '自定义'}
+                                    </span>
+                                    <button
+                                        type="button"
+                                        disabled={template.is_builtin || templateSaving}
+                                        onClick={() => void toggleTemplateActive(template)}
+                                        className={`ml-auto inline-flex h-6 items-center rounded-full px-2 text-[10px] ${
+                                            template.is_active
+                                                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+                                                : 'bg-slate-200 text-slate-500 dark:bg-slate-700 dark:text-slate-300'
+                                        } disabled:opacity-50`}
+                                    >
+                                        {template.is_active ? '已启用' : '已停用'}
+                                    </button>
+                                    {!template.is_builtin && (
+                                        <button
+                                            type="button"
+                                            disabled={templateSaving}
+                                            onClick={() => void editTemplate(template)}
+                                            className="inline-flex h-6 items-center rounded-md border border-slate-300 px-2 text-[10px] text-slate-600 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700 disabled:opacity-50"
+                                        >
+                                            编辑
+                                        </button>
+                                    )}
+                                </div>
+                                <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 whitespace-pre-wrap">
+                                    {template.template_text}
+                                </p>
+                            </div>
+                        ))}
+                </div>
+
+                <div className="rounded-xl border border-dashed border-slate-300 px-3 py-3 dark:border-slate-600">
+                    <div className="text-sm font-medium text-slate-700 dark:text-slate-200 mb-2">创建自定义模板</div>
+                    <div className="space-y-2">
+                        <input
+                            type="text"
+                            value={newTemplateName}
+                            onChange={e => setNewTemplateName(e.target.value)}
+                            placeholder="模板名称，例如：偏保守交易模板"
+                            className="input w-full"
+                        />
+                        <textarea
+                            value={newTemplateText}
+                            onChange={e => setNewTemplateText(e.target.value)}
+                            placeholder="模板内容，支持变量：{name} {symbol} {horizon_label} {trade_date}"
+                            className="input min-h-[90px] w-full resize-y"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => void handleCreateTemplate()}
+                            disabled={templateSaving}
+                            className="btn-secondary inline-flex items-center gap-2"
+                        >
+                            {templateSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                            新建模板
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -696,27 +996,32 @@ export default function Settings() {
                     </div>
                 </div>
 
-                {/* 企业微信 Webhook */}
+                {/* Webhook：企业微信 + WPS 协作 */}
                 <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-4 py-3 space-y-3 dark:border-slate-700/80 dark:bg-slate-900/40">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <div className="text-sm font-medium text-slate-700 dark:text-slate-200">企业微信 Webhook</div>
-                            <div className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
-                                定时分析完成时向机器人推送摘要
-                                {storedWebhookDisplay && <span className="ml-2 font-mono">({storedWebhookDisplay})</span>}
+                    <div>
+                        <div className="text-sm font-medium text-slate-700 dark:text-slate-200">Webhook 定时报告</div>
+                        <div className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
+                            定时分析完成后，可按下方开关分别推送到企业微信与 WPS 协作（需保存对应 Webhook 地址）
+                        </div>
+                    </div>
+
+                    <div className="border-t border-slate-200/80 pt-3 dark:border-slate-700/80">
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">企业微信（文本）</div>
+                            <div className="flex items-center gap-2 shrink-0">
+                                <span className="text-[10px] text-slate-400 dark:text-slate-500">完成后推送</span>
+                                <button
+                                    type="button"
+                                    onClick={() => setWecomReportEnabled(!wecomReportEnabled)}
+                                    disabled={configLoading}
+                                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                                        wecomReportEnabled ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-600'
+                                    }`}
+                                >
+                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${wecomReportEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                                </button>
                             </div>
                         </div>
-                        <button
-                            type="button"
-                            onClick={() => setWecomReportEnabled(!wecomReportEnabled)}
-                            disabled={configLoading}
-                            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-                                wecomReportEnabled ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-600'
-                            }`}
-                        >
-                            <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${wecomReportEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
-                        </button>
-                    </div>
 
                     <div className="flex items-center gap-2">
                         <div className="relative flex-1">
@@ -751,6 +1056,11 @@ export default function Settings() {
                             </button>
                         )}
                     </div>
+                    {storedWebhookDisplay && (
+                        <p className="mt-1 text-[10px] font-mono text-slate-400 truncate" title={storedWebhookDisplay}>
+                            已保存：{storedWebhookDisplay}
+                        </p>
+                    )}
 
                     {wecomWarmupMessage && (
                         <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300">
@@ -762,6 +1072,81 @@ export default function Settings() {
                             {wecomWarmupError}
                         </div>
                     )}
+                    </div>
+
+                    <div className="border-t border-slate-200/80 pt-3 dark:border-slate-700/80">
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">WPS 协作（Markdown）</div>
+                            <div className="flex items-center gap-2 shrink-0">
+                                <span className="text-[10px] text-slate-400 dark:text-slate-500">完成后推送</span>
+                                <button
+                                    type="button"
+                                    onClick={() => setWpsReportEnabled(!wpsReportEnabled)}
+                                    disabled={configLoading}
+                                    className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                                        wpsReportEnabled ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-600'
+                                    }`}
+                                >
+                                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${wpsReportEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                                </button>
+                            </div>
+                        </div>
+                        <p className="text-[10px] text-slate-400 dark:text-slate-500 mb-2">
+                            支持官方地址，例如{' '}
+                            <code className="rounded bg-slate-100 px-1 dark:bg-slate-800">xz.wps.cn/…/webhook/send</code>
+                            或{' '}
+                            <code className="rounded bg-slate-100 px-1 dark:bg-slate-800">365.kdocs.cn/woa/api/v1/webhook/send</code>
+                            ；频率建议不超过 20 条/分钟
+                        </p>
+                        <div className="flex items-center gap-2">
+                            <div className="relative flex-1">
+                                <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                <input
+                                    type="text"
+                                    value={wpsWebhook}
+                                    onChange={e => setWpsWebhook(e.target.value)}
+                                    className="input w-full pl-10"
+                                    placeholder={hasStoredWpsWebhook ? '已保存，留空则保持不变' : 'WPS Webhook 完整地址'}
+                                    disabled={configLoading}
+                                />
+                            </div>
+                            <button
+                                type="button"
+                                onClick={handleWpsWarmup}
+                                disabled={configLoading || saving || saveAllSaving || wpsWarmingUp || (!wpsWebhook.trim() && !hasStoredWpsWebhook)}
+                                className="btn-secondary inline-flex items-center gap-1.5 text-xs shrink-0"
+                            >
+                                {wpsWarmingUp ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Flame className="w-3.5 h-3.5" />}
+                                {wpsWarmingUp ? '发送中...' : '测试连接'}
+                            </button>
+                            {hasStoredWpsWebhook && (
+                                <button
+                                    type="button"
+                                    onClick={handleClearWpsWebhook}
+                                    disabled={saving || saveAllSaving}
+                                    className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-rose-500 disabled:opacity-50 shrink-0"
+                                >
+                                    <Trash2 className="w-3 h-3" />
+                                    清除
+                                </button>
+                            )}
+                        </div>
+                        {storedWpsDisplay && (
+                            <p className="mt-1 text-[10px] font-mono text-slate-400 truncate" title={storedWpsDisplay}>
+                                已保存：{storedWpsDisplay}
+                            </p>
+                        )}
+                        {wpsWarmupMessage && (
+                            <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300">
+                                {wpsWarmupMessage}
+                            </div>
+                        )}
+                        {wpsWarmupError && (
+                            <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-600 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
+                                {wpsWarmupError}
+                            </div>
+                        )}
+                    </div>
                 </div>
             </div>
 

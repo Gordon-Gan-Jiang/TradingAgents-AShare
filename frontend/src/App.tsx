@@ -8,10 +8,14 @@ import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 import Portfolio from './pages/Portfolio'
 import TrackingBoard from './pages/TrackingBoard'
+import Recommendations from './pages/Recommendations'
+import RecommendationInsights from './pages/RecommendationInsights'
+import QualityInsights from './pages/QualityInsights'
+import PaperTrading from './pages/PaperTrading'
 import Login from './pages/Login'
 import Feedback from './pages/Feedback'
-import Sponsor from './pages/Sponsor'
-import Thanks from './pages/Thanks'
+import ModelProfiles from './pages/ModelProfiles'
+import Mainline from './pages/Mainline'
 import { useAuthStore } from './stores/authStore'
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -37,8 +41,6 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<Login />} />
-        <Route path="/sponsor" element={<Sponsor />} />
-        <Route path="/thanks" element={<Thanks />} />
         <Route
           path="*"
           element={
@@ -48,8 +50,14 @@ function App() {
                   <Route path="/" element={<Dashboard />} />
                   <Route path="/tracking-board" element={<TrackingBoard />} />
                   <Route path="/analysis" element={<Analysis />} />
+                  <Route path="/mainline" element={<Mainline />} />
+                  <Route path="/model-profiles" element={<ModelProfiles />} />
                   <Route path="/reports" element={<Reports />} />
                   <Route path="/portfolio" element={<Portfolio />} />
+                  <Route path="/recommendations" element={<Recommendations />} />
+                  <Route path="/recommendation-insights" element={<RecommendationInsights />} />
+                  <Route path="/quality-insights" element={<QualityInsights />} />
+                  <Route path="/paper-trading" element={<PaperTrading />} />
                   <Route path="/settings" element={<Settings />} />
                   <Route path="/feedback" element={<Feedback />} />
                 </Routes>

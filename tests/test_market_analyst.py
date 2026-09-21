@@ -47,6 +47,7 @@ def test_market_analyst_returns_trace():
     assert len(result["analyst_traces"]) == 1
     assert result["analyst_traces"][0]["agent"] == "market_analyst"
     assert result["analyst_traces"][0]["verdict"] == "看多"
+    assert result["analyst_traces"][0]["confidence"] == 68
     assert result["analyst_traces"][0]["horizon"] == "short"
 
 

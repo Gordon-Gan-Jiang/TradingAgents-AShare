@@ -1,0 +1,83 @@
+# DataCollector task key -> freshness contract entry
+stock_data:
+  category: calendar_anchored
+  criticality: critical
+  grace_minutes: 30
+  anchor_field: last_bar_date
+
+indicators:
+  category: calendar_anchored
+  criticality: critical
+  grace_minutes: 0
+  inherit_from: stock_data
+
+individual_fund_flow:
+  category: calendar_anchored
+  criticality: critical
+  grace_minutes: 120
+  anchor_field: last_row_date
+  collector_keys: [fund_flow_individual]
+
+board_fund_flow:
+  category: calendar_anchored
+  criticality: important
+  grace_minutes: 90
+  anchor_field: snapshot_date
+  collector_keys: [fund_flow_board]
+
+zt_pool:
+  category: calendar_anchored
+  criticality: important
+  grace_minutes: 60
+  anchor_field: request_date
+
+lhb_detail:
+  category: conditional_daily
+  criticality: critical
+  grace_minutes: 0
+  anchor_field: request_date
+  empty_ok: true
+  collector_keys: [lhb]
+
+fundamentals:
+  category: disclosure_period
+  criticality: important
+
+balance_sheet:
+  category: disclosure_period
+  criticality: important
+
+cashflow:
+  category: disclosure_period
+  criticality: important
+
+income_statement:
+  category: disclosure_period
+  criticality: important
+
+news:
+  category: event_driven
+  criticality: informational
+  window_hours: 72
+
+global_news:
+  category: event_driven
+  criticality: informational
+  window_hours: 72
+
+hot_stocks_xq:
+  category: event_driven
+  criticality: informational
+  window_hours: 6
+  collector_keys: [hot_stocks]
+
+insider_transactions:
+  category: event_driven
+  criticality: informational
+  window_hours: 720
+
+realtime_quotes:
+  category: calendar_anchored
+  criticality: important
+  grace_minutes: 0
+  intraday_only: true

@@ -23,10 +23,35 @@ def _clip_text(text: str | None, limit: int = 720) -> str:
     return compact[:limit]
 
 
-def build_report_message(report: "ReportDB") -> str:
+def _lookup_cn_stock_display_name(symbol: str) -> str:
+    """代码 → 中文简称；无映射或异常时返回代码本身。"""
+    s = (symbol or "").strip()
+    if not s:
+        return ""
+    try:
+        from api.main import _get_reverse_stock_map
+
+        return _get_reverse_stock_map().get(s, s)
+    except Exception:
+        return s
+
+
+def _format_target_line(symbol: str, stock_name: str | None = None) -> str:
+    """标的行：有简称时「名称（代码）」，否则仅代码。"""
+    sym = (symbol or "").strip()
+    if not sym:
+        return "标的：-"
+    explicit = (stock_name or "").strip()
+    name = explicit if explicit else _lookup_cn_stock_display_name(sym)
+    if name and name != sym:
+        return f"标的：{name}（{sym}）"
+    return f"标的：{sym}"
+
+
+def build_report_message(report: "ReportDB", stock_name: str | None = None) -> str:
     lines = [
-        "TradingAgents 定时分析完成",
-        f"标的：{report.symbol}",
+        "AlphaPilot A-Share 定时分析完成",
+        _format_target_line(getattr(report, "symbol", "") or "", stock_name),
         f"交易日：{report.trade_date}",
     ]
     if getattr(report, "decision", None):
@@ -35,6 +60,12 @@ def build_report_message(report: "ReportDB") -> str:
         lines.append(f"方向：{report.direction}")
     if getattr(report, "confidence", None) is not None:
         lines.append(f"置信度：{report.confidence}%")
+    fs = getattr(report, "freshness_status", None)
+    if not fs and isinstance(getattr(report, "result_data", None), dict):
+        fs = (report.result_data or {}).get("freshness_status")
+    if fs in ("error", "stale", "warning"):
+        label = {"error": "数据异常", "stale": "数据过时", "warning": "部分滞后"}.get(fs, fs)
+        lines.append(f"数据状态：{label}")
 
     summary = (
         _clip_text(getattr(report, "final_trade_decision", None), 900)
@@ -50,7 +81,7 @@ def build_report_message(report: "ReportDB") -> str:
 
 def build_test_message(content: str | None = None) -> str:
     custom = " ".join(str(content or "").split()).strip()
-    message = custom or "TradingAgents Webhook Warmup\n这是一条企业微信机器人测试消息。"
+    message = custom or "AlphaPilot A-Share Webhook Warmup\n这是一条企业微信机器人测试消息。"
     return message[:1800]
 
 
@@ -111,8 +142,10 @@ def send_message(content: str, webhook_url: str) -> bool:
     return int(body.get("errcode", -1)) == 0
 
 
-async def send_report_message_with_retry(report: "ReportDB", webhook_url: str) -> bool:
-    content = build_report_message(report)
+async def send_report_message_with_retry(
+    report: "ReportDB", webhook_url: str, stock_name: str | None = None
+) -> bool:
+    content = build_report_message(report, stock_name=stock_name)
     try:
         ok = await asyncio.to_thread(send_message, content, webhook_url)
         if ok:

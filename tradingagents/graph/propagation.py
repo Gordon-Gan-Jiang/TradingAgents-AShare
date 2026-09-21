@@ -105,6 +105,7 @@ class Propagator:
             "horizon": horizon,
             "short_term_result": None,
             "medium_term_result": None,
+            "freshness_pool": {},
         }
         if user_intent is not None:
             state["user_intent"] = user_intent

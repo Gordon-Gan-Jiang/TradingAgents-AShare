@@ -1,6 +1,7 @@
 import time
 import json
 from tradingagents.dataflows.config import get_config
+from tradingagents.methodology import get_stock_team_risk_scoring_block
 from tradingagents.prompts import get_prompt
 from tradingagents.agents.utils.agent_states import current_tracker_var
 from tradingagents.agents.utils.context_utils import build_agent_context_view
@@ -12,7 +13,7 @@ from tradingagents.agents.utils.debate_utils import (
 )
 
 
-def create_risk_manager(llm, memory):
+def create_risk_manager(llm):
     async def risk_manager_node(state) -> dict:
 
         company_name = state["company_of_interest"]
@@ -26,19 +27,12 @@ def create_risk_manager(llm, memory):
         trader_plan = state["trader_investment_plan"]
         risk_feedback_state = state.get("risk_feedback_state", {})
 
-        curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
-        past_memories = memory.get_memories(curr_situation, n_matches=2)
-
-        past_memory_str = ""
-        for i, rec in enumerate(past_memories, 1):
-            past_memory_str += rec["recommendation"] + "\n\n"
-
         context_view = build_agent_context_view(state, "risk")
         claims = risk_debate_state.get("claims", [])
         unresolved_claim_ids = risk_debate_state.get("unresolved_claim_ids", [])
-        prompt = get_prompt("risk_manager_prompt", config=get_config()).format(
+        config = get_config()
+        prompt = get_prompt("risk_manager_prompt", config=config).format(
             trader_plan=trader_plan,
-            past_memory_str=past_memory_str,
             history=history,
             market_context_summary=context_view["market_context_summary"],
             user_context_summary=context_view["user_context_summary"],
@@ -46,6 +40,24 @@ def create_risk_manager(llm, memory):
             unresolved_claims_text=format_claim_subset_for_prompt(claims, unresolved_claim_ids),
             round_summary=risk_debate_state.get("round_summary", "暂无风险轮次摘要。"),
         )
+        risk_block = get_stock_team_risk_scoring_block(config)
+        if risk_block:
+            prompt = prompt + "\n\n" + risk_block
+
+        freshness_ctx = ""
+        pool = state.get("freshness_pool")
+        if isinstance(pool, dict) and pool:
+            from tradingagents.dataflows.freshness import build_freshness_summary
+            from tradingagents.dataflows.freshness.prompt import format_freshness_context_summary
+
+            summary = build_freshness_summary(
+                pool,
+                str(state.get("trade_date") or ""),
+                symbol=str(state.get("company_of_interest") or ""),
+            )
+            freshness_ctx = format_freshness_context_summary(summary)
+        if freshness_ctx:
+            prompt = freshness_ctx + "\n\n" + prompt
 
         # ── 流式输出 ──
         tracker = current_tracker_var.get()

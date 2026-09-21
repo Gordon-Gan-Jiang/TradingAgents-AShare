@@ -1,198 +1,297 @@
-# TradingAgents-AShare：A股智能投研多智能体系统
+# AlphaPilot A-Share
 
-本项目是基于多智能体协作的 A 股深度分析系统，模拟顶级投研机构的决策闭环，通过 14 名专业 Agent 的多空辩论与风控博弈，为投资者提供结构化的交易建议。
+A 股多智能体投研与决策系统。项目将研究流程拆成分析、辩论、交易与风控节点，通过 FastAPI + React 提供完整产品化能力（分析任务、研报管理、自选与定时、推荐洞察、模拟盘等）。
 
-[在线体验](https://app.510168.xyz) | [Releases](https://github.com/KylinMountain/TradingAgents-AShare/releases) | [OpenClaw 技能](https://clawhub.ai/kylinmountain/tradingagents-analysis)
+---
 
-<div align="center">
-  <img src="assets/web/analysis.png" width="100%" alt="智能分析"/>
-  <p><em>14 名智能体实时协作，左侧对话驱动，右侧可视化全流程</em></p>
-</div>
+## 1. 项目说明
 
-> TradingAgents-AShare 已正式上线 OpenClaw！您只需通过 `tradingagents-analysis` 技能，即可让您的 AI助手具备专业的 A 股深度投研能力。
+### 1.1 核心能力
+- 多智能体分析链路：分析师并行产出 + 多空研究员辩论 + 交易员 + 风控评审 + 决策校验
+- 自然语言驱动分析：支持输入自然语言意图，自动解析标的与分析范围
+- 结构化研报：报告落库、检索、详情与导出
+- 投研运营能力：自选股、定时分析、跟踪看板、推荐统计、T+1 反馈、模拟盘
+- 多模型接入：可在设置中切换模型厂商与模型，并支持 warmup 验证
 
-## 功能特性
+### 1.2 技术栈
+- 后端：`FastAPI`、`SQLAlchemy`、`LangGraph`、`uv`
+- 前端：`React`、`TypeScript`、`Vite`、`Zustand`
+- 数据：默认 `SQLite`（支持通过 `DATABASE_URL` 切换）
+- 运行：源码模式 / Docker 镜像模式
 
-### 辩论对战可视化
+### 1.3 仓库结构
+```text
+.
+├─ api/                    # FastAPI 应用与服务层
+│  ├─ main.py              # API 入口、生命周期、任务调度、路由
+│  ├─ database.py          # DB engine、ORM 模型、轻量 schema ensure
+│  └─ services/            # 业务服务（report/scheduled/recommendation 等）
+├─ tradingagents/          # 多智能体核心引擎（graph/agents/dataflows/prompts）
+├─ frontend/               # React 前端
+├─ tests/                  # pytest 测试
+├─ Dockerfile              # 多阶段构建镜像
+├─ pyproject.toml          # Python 依赖与脚本入口
+└─ uv.lock                 # 锁文件
+```
 
-点击 Agent 卡片即可打开辩论 Drawer，实时观看多空对抗与风控三方辩论。垂直时间线按 Round 分组，Token 级流式呈现每位 Agent 的发言，裁决卡片独立高亮展示。
+---
 
-<div align="center">
-  <img src="assets/web/debate_drawer.png" width="80%" alt="辩论对战可视化"/>
-</div>
+## 2. 快速启动
 
-### 意图驱动的自然语言交互
-
-直接输入"调研茅台短线"即可自动识别标的、解析投资周期，支持短线与中线双周期分析，无需填写表单。
-
-### 自选股与定时分析
-
-数据库持久化自选列表，支持批量加入股票、自定义周期与触发时间，并可在前端批量更新、删除或手动测试定时任务。定时分析会自动复用持仓上下文，连续失败自动停用，无需人工干预。
-
-<div align="center">
-  <img src="assets/web/timer_analysis.png" width="80%" alt="定时分析"/>
-</div>
-
-### 持仓追踪与跟踪看板
-
-支持导入持仓数据，自动记录持仓、成本价与仓位占比，并可一键将持仓标的补齐到定时分析列表。控制台会展示跟踪看板摘要，完整看板页支持查看实时价格、当日区间、持仓盈亏与上一交易日报告区间，方便盘中快速跟踪。
-
-### 结构化研报管理
-
-分析结果结构化存储，支持按标的、日期检索历史研报，决策卡片一目了然地展示方向、置信度、目标价与止损价。
-
-<div align="center">
-  <table style="width: 100%">
-    <tr>
-      <td width="50%"><img src="assets/web/reports.png" alt="历史报告"/><br><em>研报历史</em></td>
-      <td width="50%"><img src="assets/web/detail.png" alt="研报详情"/><br><em>深度详情</em></td>
-    </tr>
-  </table>
-</div>
-
-### 多模型厂商支持
-
-OpenAI、Anthropic、Google Gemini、DeepSeek、Moonshot、智谱、硅基流动等，用户可在前端自由切换模型厂商与具体模型；保存配置后会自动执行模型 warmup，也可以在设置页手动发送“你好”查看模型原始返回，便于排查接入问题。
-
-<div align="center">
-  <img src="assets/web/settings.png" width="80%" alt="定时分析"/>
-</div>
-
-## 核心架构
-
-TradingAgents 模拟真实交易机构的部门协作，将复杂任务拆解为专业的智能体角色：
-
-<p align="center">
-  <img src="assets/schema.png" style="width: 100%; height: auto;">
-</p>
-
-*图中仅展示核心节点，完整流程包含 14 名智能体。
-
-### 分析师团队
-基本面、情绪、新闻、技术、宏观、主力资金 6 大维度同步作业，对市场数据进行深度提取与初步评估。
-
-<p align="center">
-  <img src="assets/analyst.png" width="90%">
-</p>
-
-### 研究员团队
-多头与空头研究员针对分析师结论开展 Claim 驱动的结构化辩论（红蓝对抗），研究总监综合裁决形成投资计划。
-
-<p align="center">
-  <img src="assets/researcher.png" width="80%">
-</p>
-
-### 决策与风控
-交易员将研究结论转化为可执行方案，激进/稳健/中性三方风控辩论审查，组合经理最终裁决。
-
-<p align="center">
-  <img src="assets/risk.png" width="80%">
-</p>
-
-## 快速上手
-
-### Docker 一键部署 (推荐)
+## 2.1 方式 A：Docker 启动（推荐）
 
 ```bash
 docker pull ghcr.io/kylinmountain/tradingagents-ashare:latest
 
-mkdir -p $(pwd)/data
-export TA_APP_SECRET_KEY=$(openssl rand -base64 32)
+mkdir -p "$(pwd)/data"
+export TA_APP_SECRET_KEY="$(openssl rand -base64 32)"
 
 docker run -d -p 8000:8000 \
   --name tradingagents \
-  -v $(pwd)/data:/app/data \
+  -v "$(pwd)/data:/app/data" \
   -e DATABASE_URL="sqlite:///./data/tradingagents.db" \
   -e TA_APP_SECRET_KEY="${TA_APP_SECRET_KEY}" \
   ghcr.io/kylinmountain/tradingagents-ashare:latest
 ```
 
-访问 `http://localhost:8000` 即可使用。
+访问：`http://localhost:8000`
 
-> **`TA_APP_SECRET_KEY`**：用于加密用户 LLM API Key 和签发登录 JWT。不设置时使用内置默认密钥（仅适合本地开发）。生产环境务必设置，且不可更改。
+> Docker 镜像启动命令等价于：`uv run --no-sync tradingagents-api`
 
-> **LLM 配置**：启动后在前端"设置"页面配置模型厂商、API Key 和模型名称即可，无需环境变量预设。
+## 2.2 方式 B：源码启动（开发常用）
 
-### 源码安装
+### 前置要求
+- Python `>= 3.10`
+- Node.js `>= 18`，npm `>= 9`
+- 建议安装 `nvm`（仓库内提供 `.nvmrc`：Node `20`）
 
+### 安装依赖
 ```bash
-git clone https://github.com/KylinMountain/TradingAgents-AShare.git
-cd TradingAgents-AShare
+cd AlphaPilot-A-Share
 
-# 后端（Python 3.10+）
+# 后端依赖
 uv sync
 
-# 前端（Node.js 18+）
+# 前端依赖
 cd frontend
+nvm use
 npm install
-npm run build
 cd ..
 ```
 
-复制 `.env.example` 到 `.env` 并按需修改，然后：
+### 配置环境变量
+当前仓库提供模板文件：`.env copy.example`
 
 ```bash
-# 启动后端
-uv run python -m uvicorn api.main:app --port 8000
+cp ".env copy.example" .env
 ```
 
-访问 `http://localhost:8000` 即可开始 AI 投研之旅。
+> 如果你的分支存在 `.env.example`，也可使用：`cp .env.example .env`
 
-## API 集成
+### 启动（推荐：一键脚本）
+```bash
+./scripts/dev.sh start
+```
 
-系统提供标准 REST API，方便集成到自定义脚本、交易机器人或第三方看板：
+访问前端：`http://127.0.0.1:5173`  
+后端：`http://127.0.0.1:8000`（文档 `/docs`）
 
-| 操作 | 接口 |
-|------|------|
-| 触发分析 | `POST /v1/analyze` → 返回 `job_id` |
-| 状态追踪 | `GET /v1/jobs/{job_id}` |
-| 获取结果 | `GET /v1/jobs/{job_id}/result` |
-| 历史检索 | `GET /v1/reports` |
-| 批量获取最新报告 | `POST /v1/reports/latest-by-symbols` |
-| 持仓导入 | `GET/POST/DELETE /v1/portfolio/imports` |
-| 跟踪看板摘要/明细 | `GET /v1/dashboard/tracking-board` |
-| 批量定时任务操作 | `PATCH /v1/scheduled/batch`、`POST /v1/scheduled/batch/delete`、`POST /v1/scheduled/batch/trigger` |
-| 模型 warmup | `POST /v1/config/warmup` |
+常用命令：
+```bash
+./scripts/dev.sh status     # 查看 PID 与健康检查
+./scripts/dev.sh logs       # 跟踪后端日志（logs f 看前端）
+./scripts/dev.sh restart    # 重启
+./scripts/dev.sh stop       # 停止并释放端口
+./scripts/dev.sh preview    # 编译后以 vite preview 运行（4173）
+```
 
-认证：Web 端登录后在"设置 / API Token"生成密钥，通过 `Authorization: Bearer <TOKEN>` 传入。
+请用 `127.0.0.1` 打开页面。macOS 上 `localhost` 常解析到 IPv6（`::1`），容易出现登录请求 30 秒超时。
+
+### 启动后端（手动）
+```bash
+uv run python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+### 启动前端（开发热更新，单独终端）
+```bash
+cd frontend
+nvm use
+npm run dev
+```
+
+前端开发地址：`http://127.0.0.1:5173`  
+后端地址：`http://127.0.0.1:8000`
+
+---
+
+## 3. 项目配置（完整）
+
+配置分为两层：
+- **系统级环境变量**：通过 `.env` 或容器环境注入
+- **用户运行时配置**：通过前端“设置”页或 `PATCH /v1/config` 持久化
+
+## 3.1 环境变量总览（基于 `.env copy.example` + 默认配置）
+
+| 变量 | 是否必填 | 说明 | 示例 |
+|---|---|---|---|
+| `TA_API_KEY` | 建议 | 默认模型 API Key（也可在用户设置中单独配置） | `sk-xxx` |
+| `TA_BASE_URL` | 建议 | 模型网关地址 | `https://api.openai.com/v1` |
+| `TA_LLM_PROVIDER` | 建议 | 默认模型提供方标识 | `openai` |
+| `TA_LLM_QUICK` | 建议 | 快速模型名（分析链路中快思考节点） | `gpt-4o-mini` |
+| `TA_LLM_DEEP` | 建议 | 深度模型名（管理/裁决等重推理节点） | `gpt-4o` |
+| `TA_LLM_TEMPERATURE` | 可选 | 采样温度，默认 `0.0` | `0` |
+| `TA_APP_SECRET_KEY` | **生产必填** | JWT 与用户密钥加密主密钥，不可随意更换 | `openssl rand -base64 32` |
+| `DATABASE_URL` | 可选 | 数据库连接，默认 `sqlite:///./tradingagents.db` | `sqlite:///./data/tradingagents.db` |
+| `TA_MAX_DEBATE` | 可选 | 投资辩论轮数 | `1` |
+| `TA_MAX_RISK` | 可选 | 风控讨论轮数 | `1` |
+| `TA_DECISION_CRITIC_REVISION_THRESHOLD` | 可选 | 决策批评器触发阈值 | `40` |
+| `TA_LANGUAGE` | 可选 | 提示词语言（`zh`/`en`/`auto`） | `zh` |
+| `TA_TRACE` | 可选 | provider trace 开关 | `1` |
+| `CORS_ALLOW_ORIGINS` | 可选 | 逗号分隔 CORS 白名单 | `http://localhost:5173` |
+| `CORS_ALLOW_ORIGIN_REGEX` | 可选 | CORS 正则白名单 | `https://.*\\.example\\.com` |
+| `ENV` | 可选 | `prod` 时关闭 docs/openapi 暴露 | `prod` |
+| `APP_VERSION` | 可选 | 服务版本号 | `v0.2.0` |
+| `TA_MAX_WORKERS` | 可选 | 线程池 worker 数 | `2` |
+| `TA_JOB_TIMEOUT` | 可选 | 分析任务超时秒数 | `1800` |
+| `TA_SCHEDULED_ANALYSIS_MAX_CONCURRENCY` | 可选 | 定时分析并发上限 | `10` |
+
+### 方法论 / 策略知识库相关（可选）
+| 变量 | 说明 |
+|---|---|
+| `TA_METHODOLOGY_ASHARE_FUNDAMENTALS` | 启用 A 股基本面方法论 |
+| `TA_METHODOLOGY_ASHARE_NEWS` | 启用新闻事件方法论 |
+| `TA_METHODOLOGY_ASHARE_MACRO` | 启用行业宏观方法论 |
+| `TA_METHODOLOGY_EXTRA` / `_NEWS` / `_MACRO` | 额外方法论文档路径 |
+| `FINSKILLS_ROOT` / `TA_FINSKILLS_ROOT` | 本地 FinSkills 仓库根目录 |
+| `TA_METHODOLOGY_STOCK_TEAM` | 启用 stock-analysis-team 方法论 |
+| `STOCK_ANALYSIS_TEAM_ROOT` / `TA_STOCK_ANALYSIS_TEAM_ROOT` | stock-analysis-team 根目录 |
+
+### 通知/运营相关（可选）
+| 变量 | 说明 |
+|---|---|
+| `TA_TRACKING_PRICE_ALERTS` | 跟踪看板价格提醒开关 |
+| `TA_TRACKING_ALERT_INTERVAL_SEC` | 价格提醒轮询间隔 |
+| `TA_TRACKING_SURGE_PCT` | 异动阈值（百分比） |
+| `TA_TRACKING_SURGE_COOLDOWN_SEC` | 提醒冷却时间 |
+| `TA_RECOMMEND_PUSH_ENABLED` | 推荐推送总开关 |
+| `TA_RECOMMEND_PUSH_INTERVAL_SEC` | 推荐推送轮询间隔 |
+
+### VLM / 邮件（可选）
+| 变量 | 说明 |
+|---|---|
+| `TA_VLM_API_KEY` / `TA_VLM_BASE_URL` / `TA_VLM_MODEL` | 持仓截图识别模型配置 |
+| `MAIL_HOST` / `MAIL_PORT` / `MAIL_USER` / `MAIL_PASS` / `MAIL_FROM` / `MAIL_SSL` | 邮箱验证码登录配置 |
+
+## 3.2 运行时配置（用户维度）
+
+通过设置页或 API 维护：
+- 模型厂商、模型名、API Key、Base URL
+- 辩论轮数与风险轮数
+- 决策批评器开关与阈值
+- 企业微信/WPS webhook 与开关
+
+相关接口：
+- `GET /v1/config`
+- `PATCH /v1/config`
+- `POST /v1/config/warmup`
+- `POST /v1/config/wecom/warmup`
+- `POST /v1/config/wps/warmup`
+
+---
+
+## 4. 常用命令
+
+## 4.1 后端（Python / uv）
+
+| 命令 | 说明 |
+|---|---|
+| `uv sync` | 安装/同步依赖 |
+| `uv run tradingagents-api` | 使用 pyproject 脚本启动 API |
+| `uv run python -m uvicorn api.main:app --port 8000` | 手动启动 API |
+| `uv run pytest` | 运行测试 |
+
+## 4.2 前端（frontend）
+
+| 命令 | 说明 |
+|---|---|
+| `npm run dev` | 本地开发 |
+| `npm run build` | 生产构建 |
+| `npm run preview` | 本地预览构建结果 |
+| `npm run lint` | ESLint 检查 |
+
+---
+
+## 5. API 使用说明（摘要）
+
+认证方式：
+- 登录后创建 API Token
+- 请求头携带：`Authorization: Bearer <TOKEN>`
+
+高频接口：
+- 分析：`POST /v1/analyze`
+- 任务状态：`GET /v1/jobs/{job_id}`
+- 任务结果：`GET /v1/jobs/{job_id}/result`
+- 报告列表：`GET /v1/reports`
+- 自选管理：`GET/POST/DELETE /v1/watchlist*`
+- 定时任务：`GET/POST/PATCH/DELETE /v1/scheduled*`
+- 推荐与洞察：`/v1/recommendations*`、`/v1/insights/t1*`
+- 模拟盘：`/v1/paper-portfolio*`、`/v1/paper-trades`
+
+健康检查：
+- `GET /healthz`
+
+---
+
+## 6. 生产部署建议
+
+- 必须设置 `TA_APP_SECRET_KEY`，并固定保存
+- 明确设置 `DATABASE_URL`（生产建议使用托管数据库）
+- 设置 `ENV=prod`，关闭公开文档端点
+- 配置 `CORS_ALLOW_ORIGINS`，避免宽泛跨域
+- 用反向代理（Nginx/Caddy）提供 HTTPS
+- 对定时分析并发设置 `TA_SCHEDULED_ANALYSIS_MAX_CONCURRENCY`
+- 建议配置日志采集与告警（重点关注 `Scheduler`/`RecommendationPush`/`TrackingAlert`）
+
+---
+
+## 7. 常见问题（FAQ）
+
+### Q1：启动后无法访问前端页面，或登录「发送验证码」超时？
+- 优先用 `./scripts/dev.sh start`，浏览器打开 `http://127.0.0.1:5173`（不要用 `localhost`，避免 IPv6 超时）
+- `./scripts/dev.sh status` 确认后端 `healthz=ok`；失败则看 `./scripts/dev.sh logs`
+- 源码模式也可单独 `npm run dev`（Vite 会把 `/v1` 代理到后端）或 `npm run build` 后由后端静态托管
+- Docker 模式镜像已内置前端构建产物
+
+### Q2：分析任务一直 pending / running？
+- 检查模型配置是否可用（设置页执行 warmup）
+- 查看后端日志中是否有上游模型超时/鉴权错误
+- 检查 `TA_JOB_TIMEOUT` 与外部网络连通性
+
+### Q3：定时任务不触发？
+- 确认任务 `is_active=true`
+- 确认系统当前时间、交易日判断与触发时间窗口
+- 查看调度日志前缀 `[Scheduler]`
+
+### Q4：更换 `TA_APP_SECRET_KEY` 后无法解密历史配置？
+- 该密钥涉及用户密钥加密与 JWT，生产环境应一次设置后长期固定
+- 临时切换密钥可能导致历史密文不可读
+
+---
+
+## 8. 测试与质量
 
 ```bash
-curl -X POST 'https://app.510168.xyz/v1/analyze' \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <YOUR_API_TOKEN>' \
-  -d '{"symbol": "分析一下600519.SH短期趋势", "trade_date": "2026-03-28"}'
+uv run pytest
 ```
 
-## 集成 OpenClaw
+测试目录：`tests/`  
+覆盖重点：API 冒烟、调度流程、推荐链路、配置流程、通知与模拟盘核心路径。
 
-1. 在本站生成 API Key
-2. 在 OpenClaw 中安装技能 `tradingagents-analysis`
+---
 
-示例任务："分析 002594.SZ 今天是否适合介入，给我结论、置信度、目标价、止损价和核心风险。"
+## 9. 许可与免责声明
 
-## Project Status
-![Alt](https://repobeats.axiom.co/api/embed/85d68d13f5eee2bf53404a2efa28f9ccef1c2c3f.svg "Repobeats analytics image")
+- 本项目基于 [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents) 二次开发
+- 许可说明以仓库根目录 `LICENSE` 为准
+- 本项目仅供学习研究与技术演示，不构成任何投资建议
 
-## 特别鸣谢
-
-本项目核心架构灵感与部分基础逻辑源自 [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)。感谢原作者及团队在多智能体交易领域做出的卓越探索与开源贡献。
-
-## 许可说明
-- 本项目基于 [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents) (Apache 2.0) 二次开发。
-- 新增模块 (`api/`, `frontend/`) 及对核心逻辑的深度修改采用 `PolyForm Noncommercial 1.0.0` 协议。
-- 详情请参阅根目录下的 [LICENSE](./LICENSE) 文件。
-
-## 重要声明
-- **仅供学习研究**：本项目仅用于学术研究、技术演示及学习交流目的，不构成任何形式的投资建议。
-- **实盘风险**：证券市场有风险，投资需谨慎。基于本系统生成的任何观点、建议或计划，仅代表算法博弈结果，不对实际投资损益负责。
-- **数据延迟**：分析所依赖的数据源可能存在延迟或偏差，请以交易所实时公告为准。
-
-<div align="center">
-<a href="https://www.star-history.com/#KylinMountain/TradingAgents-AShare&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=KylinMountain/TradingAgents-AShare&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=KylinMountain/TradingAgents-AShare&type=Date" />
-   <img alt="TradingAgents Star History" src="https://api.star-history.com/svg?repos=KylinMountain/TradingAgents-AShare&type=Date" style="width: 80%; height: auto;" />
- </picture>
-</a>
-</div>

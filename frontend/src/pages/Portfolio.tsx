@@ -1,17 +1,46 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
     Briefcase, Plus, Trash2, TrendingUp, Activity, Search,
     Clock, AlertTriangle, CheckCircle2, XCircle, Loader2, Timer,
-    Database, ImagePlus,
+    Database, ImagePlus, CheckSquare, Square,
 } from 'lucide-react'
 import { api } from '@/services/api'
-import type { WatchlistItem, ScheduledAnalysis, StockSearchResult, Report } from '@/types'
+import PromptTemplateSelector from '@/components/PromptTemplateSelector'
+import ExitAdvicePanel from '@/components/ExitAdvicePanel'
+import type { WatchlistItem, ScheduledAnalysis, StockSearchResult, Report, PromptTemplate, ModelProfile } from '@/types'
 
 const HORIZON_LABELS: Record<string, string> = { short: '短线', medium: '中线' }
 const WATCHLIST_BATCH_SPLIT_RE = /[,\s，、；;]+/
 const SCHEDULED_TEST_TOOLTIP =
     '会立刻对当前勾选的股票批量发起最近交易日分析请求，并自动带上已导入的持仓上下文；若已开启邮箱报告，也可以顺带检查邮箱是否收到结果。不会改动原有定时设置。'
+const DEEPSEEK_ALLOWED_MODELS = new Set([
+    'deepseek-chat',
+    'deepseek-reasoner',
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
+])
+
+function getStoredDefaultAnalysts(): string[] {
+    try {
+        const stored = localStorage.getItem('tradingagents-settings')
+        if (!stored) return ['market', 'social', 'news', 'fundamentals', 'macro', 'smart_money', 'volume_price']
+        const parsed = JSON.parse(stored) as { defaultAnalysts?: string[] }
+        if (Array.isArray(parsed.defaultAnalysts) && parsed.defaultAnalysts.length > 0) {
+            return parsed.defaultAnalysts
+        }
+    } catch { /* ignore */ }
+    return ['market', 'social', 'news', 'fundamentals', 'macro', 'smart_money', 'volume_price']
+}
+
+function hostFromUrl(value?: string | null): string {
+    if (!value) return ''
+    try {
+        return new URL(value).hostname.toLowerCase()
+    } catch {
+        return ''
+    }
+}
 
 function HorizonSwitch({
     value,
@@ -64,11 +93,20 @@ export default function Portfolio() {
     const [latestReports, setLatestReports] = useState<Record<string, Report>>({})
     const [loading, setLoading] = useState(true)
     const [loadError, setLoadError] = useState<string | null>(null)
+    const [selectedWatchlistIds, setSelectedWatchlistIds] = useState<string[]>([])
+    const [watchlistBatchBusyAction, setWatchlistBatchBusyAction] = useState<string | null>(null)
     const [selectedScheduledIds, setSelectedScheduledIds] = useState<string[]>([])
     const [batchHorizon, setBatchHorizon] = useState<'short' | 'medium'>('short')
     const [batchTriggerTime, setBatchTriggerTime] = useState('20:00')
     const [scheduledBatchBusyAction, setScheduledBatchBusyAction] = useState<string | null>(null)
     const [pendingHorizonTaskIds, setPendingHorizonTaskIds] = useState<Record<string, boolean>>({})
+    const [watchlistFilter, setWatchlistFilter] = useState('')
+    const [scheduledFilter, setScheduledFilter] = useState('')
+    const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([])
+    const [promptTemplatesLoading, setPromptTemplatesLoading] = useState(false)
+    const [selectedTemplateId, setSelectedTemplateId] = useState('')
+    const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([])
+    const [selectedModelProfileId, setSelectedModelProfileId] = useState('')
 
     // Search state
     const [searchQuery, setSearchQuery] = useState('')
@@ -89,11 +127,55 @@ export default function Portfolio() {
     const navigate = useNavigate()
     const trimmedQuery = searchQuery.trim()
     const isBatchInput = trimmedQuery.length > 0 && WATCHLIST_BATCH_SPLIT_RE.test(trimmedQuery)
+    const watchlistFilterText = watchlistFilter.trim().toLowerCase()
+    const filteredWatchlist = watchlist.filter(item => (
+        !watchlistFilterText
+        || item.symbol.toLowerCase().includes(watchlistFilterText)
+        || item.name.toLowerCase().includes(watchlistFilterText)
+    ))
+    const selectedWatchlistIdSet = new Set(selectedWatchlistIds)
+    const selectedWatchlistCount = filteredWatchlist.filter(item => selectedWatchlistIdSet.has(item.id)).length
+    const hasSelectedWatchlist = selectedWatchlistCount > 0
+    const allWatchlistSelected = filteredWatchlist.length > 0 && selectedWatchlistCount === filteredWatchlist.length
+    const isWatchlistBatchBusy = watchlistBatchBusyAction !== null
+    const scheduledFilterText = scheduledFilter.trim().toLowerCase()
+    const filteredScheduled = scheduled.filter(task => (
+        !scheduledFilterText
+        || task.symbol.toLowerCase().includes(scheduledFilterText)
+        || task.name.toLowerCase().includes(scheduledFilterText)
+    ))
     const selectedScheduledIdSet = new Set(selectedScheduledIds)
-    const selectedScheduledCount = scheduled.filter(task => selectedScheduledIdSet.has(task.id)).length
+    const selectedScheduledCount = filteredScheduled.filter(task => selectedScheduledIdSet.has(task.id)).length
     const hasSelectedScheduled = selectedScheduledCount > 0
-    const allScheduledSelected = scheduled.length > 0 && selectedScheduledCount === scheduled.length
+    const allScheduledSelected = filteredScheduled.length > 0 && selectedScheduledCount === filteredScheduled.length
     const isScheduledBatchBusy = scheduledBatchBusyAction !== null
+    const activeDeepTemplates = useMemo(
+        () => promptTemplates.filter(t => t.scope === 'deep_analysis' && t.is_active),
+        [promptTemplates],
+    )
+    const selectedModelProfile = useMemo(
+        () => modelProfiles.find(item => item.id === selectedModelProfileId) || null,
+        [modelProfiles, selectedModelProfileId],
+    )
+    const selectedModelIncompatibleReason = useMemo(() => {
+        if (!selectedModelProfile) return null
+        const backendUrl = String(selectedModelProfile.backend_url || '').trim()
+        if (!backendUrl) {
+            return '当前模型配置未设置 Base URL，会沿用系统设置端点，可能导致模型与端点不匹配。请先到模型管理补全 Base URL。'
+        }
+        const provider = String(selectedModelProfile.llm_provider || '').trim().toLowerCase()
+        const host = hostFromUrl(backendUrl)
+        if (provider === 'openai' && host === 'api.deepseek.com') {
+            const quick = String(selectedModelProfile.quick_think_llm || '').trim()
+            const deep = String(selectedModelProfile.deep_think_llm || '').trim()
+            const models = [quick, deep].filter(Boolean)
+            const bad = models.find(m => !DEEPSEEK_ALLOWED_MODELS.has(m))
+            if (bad) {
+                return `当前配置包含 ${bad}，与 DeepSeek 端点不兼容。请先到模型管理修正该配置后再发起。`
+            }
+        }
+        return null
+    }, [selectedModelProfile])
 
     const fetchAll = async () => {
         setLoading(true)
@@ -118,6 +200,55 @@ export default function Portfolio() {
 
     useEffect(() => { void fetchAll() }, [])
 
+    useEffect(() => {
+        const loadTemplates = async () => {
+            setPromptTemplatesLoading(true)
+            try {
+                const result = await api.listPromptTemplates('deep_analysis')
+                const active = result.templates.filter(item => item.scope === 'deep_analysis' && item.is_active)
+                setPromptTemplates(result.templates)
+                const fallback = result.defaults.manual_deep_analysis || active[0]?.id || ''
+                setSelectedTemplateId(current => {
+                    if (current && active.some(item => item.id === current)) return current
+                    return fallback
+                })
+            } catch (error) {
+                console.error('Failed to load prompt templates:', error)
+            } finally {
+                setPromptTemplatesLoading(false)
+            }
+        }
+        void loadTemplates()
+    }, [])
+
+    useEffect(() => {
+        const loadModelProfiles = async () => {
+            try {
+                const result = await api.listModelProfiles(false)
+                const active = (result.profiles || []).filter(p => p.is_active)
+                setModelProfiles(active)
+                const defaultId = active.find(p => p.is_default)?.id || ''
+                setSelectedModelProfileId(current => {
+                    if (current && active.some(item => item.id === current)) return current
+                    const stored = localStorage.getItem('portfolio-deep-model-profile-id') || ''
+                    if (stored && active.some(item => item.id === stored)) return stored
+                    return defaultId
+                })
+            } catch (error) {
+                console.error('Failed to load model profiles:', error)
+            }
+        }
+        void loadModelProfiles()
+    }, [])
+
+    useEffect(() => {
+        if (selectedModelProfileId) {
+            localStorage.setItem('portfolio-deep-model-profile-id', selectedModelProfileId)
+        } else {
+            localStorage.removeItem('portfolio-deep-model-profile-id')
+        }
+    }, [selectedModelProfileId])
+
     // Close dropdown on outside click
     useEffect(() => {
         const handler = (e: MouseEvent) => {
@@ -128,6 +259,11 @@ export default function Portfolio() {
         document.addEventListener('mousedown', handler)
         return () => document.removeEventListener('mousedown', handler)
     }, [])
+
+    useEffect(() => {
+        const validIds = new Set(watchlist.map(item => item.id))
+        setSelectedWatchlistIds(current => current.filter(id => validIds.has(id)))
+    }, [watchlist])
 
     useEffect(() => {
         const validIds = new Set(scheduled.map(task => task.id))
@@ -251,13 +387,161 @@ export default function Portfolio() {
         }
     }
 
+    const removeWatchlistItemsFromState = (itemIds: string[]) => {
+        if (itemIds.length === 0) return
+        const idSet = new Set(itemIds)
+        setWatchlist(current => current.filter(item => !idSet.has(item.id)))
+        setSelectedWatchlistIds(current => current.filter(id => !idSet.has(id)))
+    }
+
+    const toggleWatchlistSelection = (itemId: string) => {
+        setSelectedWatchlistIds(current => (
+            current.includes(itemId)
+                ? current.filter(id => id !== itemId)
+                : [...current, itemId]
+        ))
+    }
+
+    const toggleSelectAllWatchlist = () => {
+        if (filteredWatchlist.length === 0) return
+        const filteredIds = filteredWatchlist.map(item => item.id)
+        const filteredIdSet = new Set(filteredIds)
+        const allFilteredSelected = filteredIds.every(id => selectedWatchlistIdSet.has(id))
+        setSelectedWatchlistIds(current => {
+            if (allFilteredSelected) {
+                return current.filter(id => !filteredIdSet.has(id))
+            }
+            return [...new Set([...current, ...filteredIds])]
+        })
+    }
+
     const removeFromWatchlist = async (id: string) => {
         try {
             await api.removeFromWatchlist(id)
-            await fetchAll()
+            removeWatchlistItemsFromState([id])
         } catch (error) {
             console.error('Failed to remove watchlist item:', error)
             alert(error instanceof Error ? error.message : '移除自选失败')
+        }
+    }
+
+    const batchDeleteWatchlist = async () => {
+        const selectedItems = watchlist.filter(item => selectedWatchlistIdSet.has(item.id))
+        if (selectedItems.length === 0) {
+            alert('请先勾选要删除的自选股')
+            return
+        }
+        if (!confirm(`确定删除选中的 ${selectedItems.length} 个自选股吗？`)) return
+
+        setWatchlistBatchBusyAction('delete')
+        try {
+            const result = await api.deleteWatchlistBatch(selectedItems.map(item => item.id))
+            removeWatchlistItemsFromState(result.deleted_ids)
+            if (result.missing_ids.length > 0) {
+                await fetchAll()
+            }
+        } catch (e) {
+            alert(e instanceof Error ? e.message : '批量删除自选失败')
+        } finally {
+            setWatchlistBatchBusyAction(null)
+        }
+    }
+
+    const batchDeepAnalyzeBySymbols = async (symbols: string[], source: 'watchlist' | 'scheduled') => {
+        const uniqSymbols = [...new Set(symbols.map(s => s.trim().toUpperCase()).filter(Boolean))]
+        if (uniqSymbols.length === 0) {
+            alert('请先勾选至少 1 只股票')
+            return
+        }
+        if (selectedModelIncompatibleReason) {
+            alert(selectedModelIncompatibleReason)
+            return
+        }
+        const busyKey = source === 'watchlist' ? 'deep-analyze' : 'deep-analyze'
+        if (source === 'watchlist') setWatchlistBatchBusyAction(busyKey)
+        else setScheduledBatchBusyAction(busyKey)
+        try {
+            const analysts = getStoredDefaultAnalysts()
+            let ok = 0
+            let fail = 0
+            const errors: string[] = []
+            for (let i = 0; i < uniqSymbols.length; i++) {
+                const symbol = uniqSymbols[i]
+                try {
+                    await api.startAnalysis({
+                        symbol,
+                        selected_analysts: analysts,
+                        prompt_template_id: selectedTemplateId || undefined,
+                        model_profile_id: selectedModelProfileId || undefined,
+                    })
+                    ok++
+                } catch (e) {
+                    fail++
+                    errors.push(`${symbol}: ${e instanceof Error ? e.message : String(e)}`)
+                }
+                if (i < uniqSymbols.length - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 120))
+                }
+            }
+            const summary = [`成功提交 ${ok} 个任务`]
+            if (fail > 0) summary.push(`失败 ${fail} 个`)
+            alert(summary.join('；') + (errors.length ? `\n\n${errors.slice(0, 5).join('\n')}` : ''))
+            if (ok > 0) navigate('/reports')
+        } finally {
+            if (source === 'watchlist') setWatchlistBatchBusyAction(null)
+            else setScheduledBatchBusyAction(null)
+        }
+    }
+
+    const batchAddScheduledByWatchlist = async () => {
+        const selectedItems = watchlist.filter(item => selectedWatchlistIdSet.has(item.id))
+        if (selectedItems.length === 0) {
+            alert('请先勾选要添加定时任务的自选股')
+            return
+        }
+        setWatchlistBatchBusyAction('add-scheduled')
+        try {
+            const result = await api.ensureScheduledBatch(
+                selectedItems.map(item => item.symbol),
+                { horizon: 'short', trigger_time: '20:00' },
+            )
+            if ((result.created?.length || 0) > 0) {
+                updateWatchlistScheduledFlags(result.created, true)
+            }
+            await fetchAll()
+            alert(`定时任务处理完成：新增 ${result.created.length}，已存在 ${result.existing.length}${result.skipped_limit.length ? `，超上限 ${result.skipped_limit.length}` : ''}`)
+        } catch (e) {
+            alert(e instanceof Error ? e.message : '批量添加定时任务失败')
+        } finally {
+            setWatchlistBatchBusyAction(null)
+        }
+    }
+
+    const batchRemoveScheduledByWatchlist = async () => {
+        const selectedItems = watchlist.filter(item => selectedWatchlistIdSet.has(item.id))
+        if (selectedItems.length === 0) {
+            alert('请先勾选要移除定时任务的自选股')
+            return
+        }
+        const symbolSet = new Set(selectedItems.map(item => item.symbol))
+        const matchedTaskIds = scheduled.filter(task => symbolSet.has(task.symbol)).map(task => task.id)
+        if (matchedTaskIds.length === 0) {
+            alert('所选自选股当前没有定时任务')
+            return
+        }
+        if (!confirm(`确定移除 ${matchedTaskIds.length} 个定时任务吗？`)) return
+
+        setWatchlistBatchBusyAction('remove-scheduled')
+        try {
+            const result = await api.deleteScheduledBatch(matchedTaskIds)
+            removeScheduledTasksFromState(result.deleted_ids)
+            if (result.missing_ids.length > 0) {
+                await fetchAll()
+            }
+        } catch (e) {
+            alert(e instanceof Error ? e.message : '批量移除定时任务失败')
+        } finally {
+            setWatchlistBatchBusyAction(null)
         }
     }
 
@@ -324,11 +608,16 @@ export default function Portfolio() {
     }
 
     const toggleSelectAllScheduled = () => {
-        setSelectedScheduledIds(current => (
-            current.length === scheduled.length
-                ? []
-                : scheduled.map(task => task.id)
-        ))
+        if (filteredScheduled.length === 0) return
+        const filteredIds = filteredScheduled.map(task => task.id)
+        const filteredIdSet = new Set(filteredIds)
+        const allFilteredSelected = filteredIds.every(id => selectedScheduledIdSet.has(id))
+        setSelectedScheduledIds(current => {
+            if (allFilteredSelected) {
+                return current.filter(id => !filteredIdSet.has(id))
+            }
+            return [...new Set([...current, ...filteredIds])]
+        })
     }
 
     const updateScheduledHorizon = async (id: string, horizon: string) => {
@@ -362,7 +651,7 @@ export default function Portfolio() {
             mergeScheduledTask(updatedTask)
         } catch (e) {
             mergeScheduledTask(previousTask)
-            alert(e instanceof Error ? e.message : '时间设置失败（需在交易时段外）')
+            alert(e instanceof Error ? e.message : '时间设置失败')
         }
     }
 
@@ -450,10 +739,8 @@ export default function Portfolio() {
         setScheduledBatchBusyAction('trigger-test')
         try {
             const result = await api.triggerScheduledBatch(selectedTasks.map(task => task.id))
-            const summaryText = result.summary.with_position_context > 0
-                ? `已触发 ${result.summary.total} 个分析请求，其中 ${result.summary.with_position_context} 个已带入持仓上下文。`
-                : `已触发 ${result.summary.total} 个分析请求。`
-            alert(summaryText)
+            // 深度分析不再注入持仓上下文（保持客观），因此这里只报触发数量。
+            alert(`已触发 ${result.summary.total} 个分析请求。`)
             navigate('/reports')
         } catch (e) {
             alert(e instanceof Error ? e.message : '测试触发失败')
@@ -481,6 +768,9 @@ export default function Portfolio() {
                 <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">自选 & 定时分析</h1>
                 <p className="text-slate-500 dark:text-slate-400 mt-1">为关注标的创建每日自动分析任务</p>
             </div>
+
+            {/* 售后闭环：何时卖、卖多少——过去整条决策链没有任何出口 */}
+            <ExitAdvicePanel />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {/* Left: Watchlist */}
@@ -573,23 +863,126 @@ export default function Portfolio() {
 
                     {/* Watchlist */}
                     <div className="card">
-                        <div className="flex items-center gap-2 mb-4">
-                            <Briefcase className="w-5 h-5 text-purple-500" />
-                            <h2 className="font-semibold text-slate-900 dark:text-slate-100">自选列表 ({watchlist.length}/50)</h2>
+                        <div className="mb-4 flex flex-wrap items-center gap-2">
+                            <div className="flex items-center gap-2">
+                                <Briefcase className="w-5 h-5 text-purple-500" />
+                                <h2 className="font-semibold text-slate-900 dark:text-slate-100">自选列表 ({watchlist.length}/200)</h2>
+                            </div>
+                            {watchlist.length > 0 && (
+                                <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                                    <label className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300">
+                                        <input
+                                            type="checkbox"
+                                            checked={allWatchlistSelected}
+                                            onChange={toggleSelectAllWatchlist}
+                                            disabled={isWatchlistBatchBusy}
+                                            className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                        />
+                                        {allWatchlistSelected ? <CheckSquare className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5" />}
+                                        {hasSelectedWatchlist ? `已选 ${selectedWatchlistCount}` : '全选'}
+                                    </label>
+                                    {hasSelectedWatchlist && (
+                                        <>
+                                            <PromptTemplateSelector
+                                                label="模板"
+                                                value={selectedTemplateId}
+                                                templates={activeDeepTemplates}
+                                                loading={promptTemplatesLoading}
+                                                onChange={setSelectedTemplateId}
+                                            />
+                                            <select
+                                                value={selectedModelProfileId}
+                                                onChange={e => setSelectedModelProfileId(e.target.value)}
+                                                className="h-8 min-w-[170px] rounded-lg border border-slate-300 bg-white px-2 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200"
+                                                title="深度分析模型"
+                                            >
+                                                <option value="">默认模型</option>
+                                                {modelProfiles.map(profile => (
+                                                    <option key={profile.id} value={profile.id}>
+                                                        {profile.name}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            {selectedModelIncompatibleReason && (
+                                                <span className="text-[11px] text-rose-600">{selectedModelIncompatibleReason}</span>
+                                            )}
+                                            <button
+                                                type="button"
+                                                onClick={() => void batchDeepAnalyzeBySymbols(
+                                                    watchlist
+                                                        .filter(item => selectedWatchlistIdSet.has(item.id))
+                                                        .map(item => item.symbol),
+                                                    'watchlist',
+                                                )}
+                                                disabled={isWatchlistBatchBusy}
+                                                className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-300 bg-white px-2 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                                            >
+                                                {watchlistBatchBusyAction === 'deep-analyze' ? <Loader2 className="h-3 w-3 animate-spin" /> : '深度分析'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => void batchAddScheduledByWatchlist()}
+                                                disabled={isWatchlistBatchBusy}
+                                                className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-300 bg-white px-2 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                                            >
+                                                {watchlistBatchBusyAction === 'add-scheduled' ? <Loader2 className="h-3 w-3 animate-spin" /> : '添加定时'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => void batchRemoveScheduledByWatchlist()}
+                                                disabled={isWatchlistBatchBusy}
+                                                className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-300 bg-white px-2 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                                            >
+                                                {watchlistBatchBusyAction === 'remove-scheduled' ? <Loader2 className="h-3 w-3 animate-spin" /> : '移除定时'}
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => void batchDeleteWatchlist()}
+                                                disabled={isWatchlistBatchBusy}
+                                                className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-300 bg-white px-2 text-[11px] text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                                            >
+                                                {watchlistBatchBusyAction === 'delete' ? <Loader2 className="h-3 w-3 animate-spin" /> : '批量删除'}
+                                            </button>
+                                        </>
+                                    )}
+                                </div>
+                            )}
                         </div>
 
-                        {watchlist.length === 0 ? (
+                        <div className="mb-3">
+                            <div className="relative">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                                <input
+                                    type="text"
+                                    value={watchlistFilter}
+                                    onChange={e => setWatchlistFilter(e.target.value)}
+                                    placeholder="按名称/代码过滤自选列表"
+                                    className="input w-full pl-9"
+                                />
+                            </div>
+                        </div>
+
+                        {filteredWatchlist.length === 0 ? (
                             <div className="text-center py-10">
                                 <Briefcase className="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-3" />
-                                <p className="text-slate-500 dark:text-slate-400">还没有关注的股票</p>
-                                <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">搜索代码或名称添加</p>
+                                <p className="text-slate-500 dark:text-slate-400">{watchlist.length === 0 ? '还没有关注的股票' : '没有匹配的自选股'}</p>
+                                <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">
+                                    {watchlist.length === 0 ? '搜索代码或名称添加' : '试试其他关键词'}
+                                </p>
                             </div>
                         ) : (
                             <div className="divide-y divide-slate-100 dark:divide-slate-700">
-                                {watchlist.map(item => {
+                                {filteredWatchlist.map(item => {
                                     const report = latestReports[item.symbol]
                                     return (
                                         <div key={item.id} className="flex items-center gap-3 py-3">
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedWatchlistIdSet.has(item.id)}
+                                                onChange={() => toggleWatchlistSelection(item.id)}
+                                                disabled={isWatchlistBatchBusy}
+                                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                            />
                                             <div className="w-9 h-9 rounded-lg bg-blue-100 dark:bg-blue-500/10 flex items-center justify-center shrink-0">
                                                 <TrendingUp className="w-4 h-4 text-blue-600 dark:text-blue-400" />
                                             </div>
@@ -644,7 +1037,20 @@ export default function Portfolio() {
                         <Clock className="w-5 h-5 text-emerald-500" />
                         <h2 className="font-semibold text-slate-900 dark:text-slate-100">定时分析 ({scheduled.length}/10)</h2>
                     </div>
-                    <p className="text-xs text-slate-400 mb-4">每个交易日在设定时间自动执行（允许 20:00~次日 08:00）</p>
+                    <p className="text-xs text-slate-400 mb-4">每个交易日在设定时间自动执行（支持 00:00~23:59）</p>
+
+                    <div className="mb-3">
+                        <div className="relative">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                            <input
+                                type="text"
+                                value={scheduledFilter}
+                                onChange={e => setScheduledFilter(e.target.value)}
+                                placeholder="按名称/代码过滤定时任务"
+                                className="input w-full pl-9"
+                            />
+                        </div>
+                    </div>
 
                     {scheduled.length > 0 && (
                         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200/80 bg-slate-50/60 px-3 py-2 dark:border-slate-700 dark:bg-slate-800/30">
@@ -662,6 +1068,42 @@ export default function Portfolio() {
                             {hasSelectedScheduled && (
                                 <>
                                     <span className="mx-1 h-4 w-px bg-slate-200 dark:bg-slate-700" />
+                                    <PromptTemplateSelector
+                                        label="模板"
+                                        value={selectedTemplateId}
+                                        templates={activeDeepTemplates}
+                                        loading={promptTemplatesLoading}
+                                        onChange={setSelectedTemplateId}
+                                    />
+                                    <select
+                                        value={selectedModelProfileId}
+                                        onChange={e => setSelectedModelProfileId(e.target.value)}
+                                        className="h-8 min-w-[180px] rounded-lg border border-slate-300 bg-white px-2 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200"
+                                        title="深度分析模型"
+                                    >
+                                        <option value="">默认模型</option>
+                                        {modelProfiles.map(profile => (
+                                            <option key={profile.id} value={profile.id}>
+                                                {profile.name}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    {selectedModelIncompatibleReason && (
+                                        <span className="text-[11px] text-rose-600">{selectedModelIncompatibleReason}</span>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => void batchDeepAnalyzeBySymbols(
+                                            scheduled
+                                                .filter(task => selectedScheduledIdSet.has(task.id))
+                                                .map(task => task.symbol),
+                                            'scheduled',
+                                        )}
+                                        disabled={isScheduledBatchBusy}
+                                        className="h-8 rounded-lg border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
+                                    >
+                                        {scheduledBatchBusyAction === 'deep-analyze' ? <Loader2 className="h-3 w-3 animate-spin" /> : '深度分析'}
+                                    </button>
                                     <HorizonSwitch
                                         value={batchHorizon}
                                         compact
@@ -733,15 +1175,17 @@ export default function Portfolio() {
                         </div>
                     )}
 
-                    {scheduled.length === 0 ? (
+                    {filteredScheduled.length === 0 ? (
                         <div className="text-center py-10">
                             <Clock className="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-3" />
-                            <p className="text-slate-500 dark:text-slate-400">暂无定时任务</p>
-                            <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">在自选列表中点击"定时"开启</p>
+                            <p className="text-slate-500 dark:text-slate-400">{scheduled.length === 0 ? '暂无定时任务' : '没有匹配的定时任务'}</p>
+                            <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">
+                                {scheduled.length === 0 ? '在自选列表中点击"定时"开启' : '试试其他关键词'}
+                            </p>
                         </div>
                     ) : (
                         <div className="space-y-3">
-                            {scheduled.map(task => (
+                            {filteredScheduled.map(task => (
                                 <div
                                     key={task.id}
                                     className={`rounded-xl border p-3 transition-all ${
@@ -795,9 +1239,9 @@ export default function Portfolio() {
                                                 </div>
                                             )}
                                             {task.has_imported_context && (
-                                                <div className="flex items-center gap-1 mt-1.5 text-[10px] text-indigo-600 dark:text-indigo-300 flex-wrap">
+                                                <div className="flex items-center gap-1 mt-1.5 text-[10px] text-slate-500 dark:text-slate-400 flex-wrap">
                                                     <Database className="w-3 h-3" />
-                                                    <span>已带入持仓上下文</span>
+                                                    <span>已导入持仓参考（定时分析不注入，保持客观）</span>
                                                     {task.imported_current_position != null && <span>持仓 {task.imported_current_position}</span>}
                                                     {task.imported_average_cost != null && <span>成本 {task.imported_average_cost}</span>}
                                                     {(task.imported_trade_points_count || 0) > 0 && <span>买卖点 {task.imported_trade_points_count}</span>}

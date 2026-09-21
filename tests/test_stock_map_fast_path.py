@@ -17,10 +17,15 @@ def test_reverse_stock_map_cached_only_uses_existing_cache():
     from api import main as main_mod
 
     original_map = main_mod._cn_stock_map
+    original_reverse = main_mod._cn_stock_reverse_map
     try:
         main_mod._cn_stock_map = {
             "贵州茅台": "600519.SH",
             "宁德时代": "300750.SZ",
+        }
+        main_mod._cn_stock_reverse_map = {
+            "600519.SH": "贵州茅台",
+            "300750.SZ": "宁德时代",
         }
         assert main_mod._get_reverse_stock_map_cached_only() == {
             "600519.SH": "贵州茅台",
@@ -28,3 +33,4 @@ def test_reverse_stock_map_cached_only_uses_existing_cache():
         }
     finally:
         main_mod._cn_stock_map = original_map
+        main_mod._cn_stock_reverse_map = original_reverse

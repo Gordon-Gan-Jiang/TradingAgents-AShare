@@ -7,6 +7,7 @@ import {
     Loader2,
     RefreshCw,
     Save,
+    Search,
     ShieldAlert,
     Target,
     Trash2,
@@ -19,7 +20,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { api } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
-import type { PortfolioPositionInput, TrackingBoardItem, TrackingBoardResponse } from '@/types'
+import type { PortfolioPositionInput, StockSearchResult, TrackingBoardItem, TrackingBoardResponse } from '@/types'
 
 const CLAMP_TWO_LINES_STYLE: CSSProperties = {
     display: '-webkit-box',
@@ -51,6 +52,7 @@ export default function TrackingBoardPanel() {
     const [importClearing, setImportClearing] = useState(false)
     const [importFeedback, setImportFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
     const [vlmParsing, setVlmParsing] = useState(false)
+    const [deletingSymbol, setDeletingSymbol] = useState<string | null>(null)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const navigate = useNavigate()
 
@@ -154,8 +156,13 @@ export default function TrackingBoardPanel() {
         setImportSaving(true)
         setImportFeedback(null)
         try {
-            await api.syncPortfolioImport({ positions, auto_apply_scheduled: true })
-            setImportFeedback({ tone: 'success', message: `已保存 ${positions.length} 只持仓` })
+            if (positions.length === 1) {
+                await api.mergePortfolioImport({ positions, auto_apply_scheduled: true })
+                setImportFeedback({ tone: 'success', message: `已增量保存 ${positions[0].symbol}，未覆盖其他持仓` })
+            } else {
+                await api.syncPortfolioImport({ positions, auto_apply_scheduled: true })
+                setImportFeedback({ tone: 'success', message: `已保存 ${positions.length} 只持仓` })
+            }
             setPositionText('')
             setShowImportSection(false)
             await refreshBoard()
@@ -181,6 +188,32 @@ export default function TrackingBoardPanel() {
             setImportClearing(false)
         }
     }, [refreshBoard])
+
+    const handleDeleteSymbol = useCallback(
+        async (symbol: string, displayName: string) => {
+            if (!confirm(`确定从跟踪看板移除「${displayName}」(${symbol})？\n将同时删除该标的的定时分析（若有）。`)) {
+                return
+            }
+            setDeletingSymbol(symbol)
+            setImportFeedback(null)
+            try {
+                const r = await api.deletePortfolioImportPosition(symbol)
+                setImportFeedback({
+                    tone: 'success',
+                    message:
+                        r.scheduled_removed
+                            ? `已移除 ${r.symbol}，并删除对应定时任务`
+                            : `已移除 ${r.symbol}`,
+                })
+                await refreshBoard()
+            } catch (e) {
+                setImportFeedback({ tone: 'error', message: e instanceof Error ? e.message : '移除失败' })
+            } finally {
+                setDeletingSymbol(null)
+            }
+        },
+        [refreshBoard],
+    )
 
     const handleImageUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0]
@@ -296,19 +329,27 @@ export default function TrackingBoardPanel() {
                                 清空持仓
                             </button>
                         </div>
+                    </div>
+                )}
 
-                        {importFeedback && (
-                            <div className={`rounded-xl border px-3 py-2.5 text-xs ${
-                                importFeedback.tone === 'success'
-                                    ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300'
-                                    : 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300'
-                            }`}>
-                                {importFeedback.message}
-                            </div>
-                        )}
+                {importFeedback && (
+                    <div
+                        className={`mb-4 rounded-xl border px-3 py-2.5 text-xs ${
+                            importFeedback.tone === 'success'
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300'
+                                : 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300'
+                        }`}
+                    >
+                        {importFeedback.message}
                     </div>
                 )}
             </div>
+
+            <TrackingAddSymbolBar
+                existingSymbols={new Set(trackingItems.map(i => i.symbol))}
+                onFeedback={setImportFeedback}
+                onDone={refreshBoard}
+            />
 
             {trackingLoading && !trackingBoard ? (
                 <div className="flex items-center justify-center py-12 text-slate-500 dark:text-slate-400">
@@ -329,6 +370,8 @@ export default function TrackingBoardPanel() {
                     trackingRefreshing={trackingRefreshing}
                     trackingError={trackingError}
                     lastQuoteTime={lastQuoteTime}
+                    deletingSymbol={deletingSymbol}
+                    onDeleteSymbol={handleDeleteSymbol}
                 />
             ) : (
                 <DetailedBoardView
@@ -339,7 +382,130 @@ export default function TrackingBoardPanel() {
                     floatingPnlTotal={floatingPnlTotal}
                     onAnalyze={symbol => navigate(`/analysis?symbol=${symbol}`)}
                     onOpenReport={reportId => navigate(`/reports?report=${reportId}`)}
+                    deletingSymbol={deletingSymbol}
+                    onDeleteSymbol={handleDeleteSymbol}
                 />
+            )}
+        </div>
+    )
+}
+
+function TrackingAddSymbolBar({
+    existingSymbols,
+    onFeedback,
+    onDone,
+}: {
+    existingSymbols: Set<string>
+    onFeedback: (v: { tone: 'success' | 'error'; message: string } | null) => void
+    onDone: () => void | Promise<void>
+}) {
+    const [query, setQuery] = useState('')
+    const [results, setResults] = useState<StockSearchResult[]>([])
+    const [searchLoading, setSearchLoading] = useState(false)
+    const [dropdownOpen, setDropdownOpen] = useState(false)
+    const [adding, setAdding] = useState(false)
+    const searchTimerRef = useRef<ReturnType<typeof setTimeout>>()
+    const boxRef = useRef<HTMLDivElement>(null)
+    const trimmed = query.trim()
+
+    useEffect(() => {
+        const handler = (e: MouseEvent) => {
+            if (boxRef.current && !boxRef.current.contains(e.target as Node)) {
+                setDropdownOpen(false)
+            }
+        }
+        document.addEventListener('mousedown', handler)
+        return () => document.removeEventListener('mousedown', handler)
+    }, [])
+
+    useEffect(() => {
+        if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+        if (!trimmed) {
+            setResults([])
+            setDropdownOpen(false)
+            setSearchLoading(false)
+            return
+        }
+        setSearchLoading(true)
+        searchTimerRef.current = window.setTimeout(async () => {
+            try {
+                const res = await api.searchStocks(trimmed)
+                setResults(res.results)
+                setDropdownOpen(true)
+            } catch {
+                setResults([])
+                setDropdownOpen(false)
+            } finally {
+                setSearchLoading(false)
+            }
+        }, 300)
+        return () => {
+            if (searchTimerRef.current) clearTimeout(searchTimerRef.current)
+        }
+    }, [trimmed])
+
+    const pickSymbol = async (r: StockSearchResult) => {
+        if (existingSymbols.has(r.symbol)) {
+            onFeedback({ tone: 'error', message: `「${r.name}」已在跟踪列表中` })
+            setDropdownOpen(false)
+            return
+        }
+        setAdding(true)
+        onFeedback(null)
+        try {
+            await api.mergePortfolioImport({
+                positions: [{ symbol: r.symbol, name: r.name }],
+                auto_apply_scheduled: true,
+            })
+            onFeedback({ tone: 'success', message: `已加入跟踪：${r.name}（${r.symbol}）` })
+            setQuery('')
+            setDropdownOpen(false)
+            await onDone()
+        } catch (e) {
+            onFeedback({ tone: 'error', message: e instanceof Error ? e.message : '添加失败' })
+        } finally {
+            setAdding(false)
+        }
+    }
+
+    return (
+        <div ref={boxRef} className="relative rounded-xl border border-slate-200 bg-slate-50/80 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-800/40">
+            <p className="mb-2 text-xs font-medium text-slate-500 dark:text-slate-400">加入单只标的（合并到当前持仓，不覆盖已有股票）</p>
+            <div className="relative flex items-center gap-2">
+                <Search className="h-4 w-4 shrink-0 text-slate-400" />
+                <input
+                    type="text"
+                    value={query}
+                    onChange={e => setQuery(e.target.value)}
+                    onFocus={() => results.length > 0 && setDropdownOpen(true)}
+                    placeholder="输入代码或名称搜索，点击结果添加"
+                    disabled={adding}
+                    className="min-w-0 flex-1 border-0 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400 dark:text-slate-100 dark:placeholder:text-slate-500"
+                />
+                {(searchLoading || adding) && <Loader2 className="h-4 w-4 shrink-0 animate-spin text-slate-400" />}
+            </div>
+            {dropdownOpen && results.length > 0 && (
+                <ul className="absolute left-0 right-0 top-full z-30 mt-1 max-h-52 overflow-auto rounded-xl border border-slate-200 bg-white py-1 shadow-lg dark:border-slate-600 dark:bg-slate-900">
+                    {results.map(r => {
+                        const exists = existingSymbols.has(r.symbol)
+                        return (
+                            <li key={r.symbol}>
+                                <button
+                                    type="button"
+                                    disabled={adding || exists}
+                                    onClick={() => void pickSymbol(r)}
+                                    className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-slate-200 dark:hover:bg-slate-800"
+                                >
+                                    <span className="truncate font-medium">{r.name}</span>
+                                    <span className="shrink-0 text-xs text-slate-400">
+                                        {r.symbol}
+                                        {exists ? ' · 已在列表' : ''}
+                                    </span>
+                                </button>
+                            </li>
+                        )
+                    })}
+                </ul>
             )}
         </div>
     )
@@ -380,11 +546,15 @@ function SimpleBoardView({
     trackingRefreshing,
     trackingError,
     lastQuoteTime,
+    deletingSymbol,
+    onDeleteSymbol,
 }: {
     items: TrackingBoardItem[]
     trackingRefreshing: boolean
     trackingError: string | null
     lastQuoteTime: string | null
+    deletingSymbol: string | null
+    onDeleteSymbol: (symbol: string, displayName: string) => void
 }) {
     return (
         <div className="overflow-hidden rounded-[24px] border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-900">
@@ -404,7 +574,12 @@ function SimpleBoardView({
                     </div>
 
                     {items.map(item => (
-                        <SimpleTrackingRow key={item.symbol} item={item} />
+                        <SimpleTrackingRow
+                            key={item.symbol}
+                            item={item}
+                            deleting={deletingSymbol === item.symbol}
+                            onDelete={() => onDeleteSymbol(item.symbol, item.name || item.symbol)}
+                        />
                     ))}
                 </div>
             </div>
@@ -421,7 +596,15 @@ function SimpleBoardView({
     )
 }
 
-function SimpleTrackingRow({ item }: { item: TrackingBoardItem }) {
+function SimpleTrackingRow({
+    item,
+    deleting,
+    onDelete,
+}: {
+    item: TrackingBoardItem
+    deleting: boolean
+    onDelete: () => void
+}) {
     const priceChangePct = item.price_change_pct ?? null
     const isUp = (priceChangePct ?? 0) >= 0
     const costToneClass = item.average_cost != null && item.live_price != null && item.average_cost > item.live_price
@@ -438,7 +621,20 @@ function SimpleTrackingRow({ item }: { item: TrackingBoardItem }) {
     return (
         <div className="grid grid-cols-[1.36fr_0.88fr_0.74fr_0.78fr_1.28fr_0.86fr_0.96fr] gap-4 border-b border-slate-200 px-5 py-5 last:border-b-0 dark:border-slate-700">
             <div className="min-w-0">
-                <div className="truncate text-[18px] font-semibold text-slate-900 dark:text-slate-100">{item.name}</div>
+                <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 truncate text-[18px] font-semibold text-slate-900 dark:text-slate-100">
+                        {item.name}
+                    </div>
+                    <button
+                        type="button"
+                        title="从跟踪看板移除"
+                        onClick={onDelete}
+                        disabled={deleting}
+                        className="shrink-0 rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
+                    >
+                        {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                    </button>
+                </div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500 dark:text-slate-400">
                     <span>{item.symbol}</span>
                     <span>成本 {formatPlainPrice(item.average_cost)}</span>
@@ -594,6 +790,8 @@ function DetailedBoardView({
     floatingPnlTotal,
     onAnalyze,
     onOpenReport,
+    deletingSymbol,
+    onDeleteSymbol,
 }: {
     items: TrackingBoardItem[]
     trackingRefreshing: boolean
@@ -602,6 +800,8 @@ function DetailedBoardView({
     floatingPnlTotal: number
     onAnalyze: (symbol: string) => void
     onOpenReport: (reportId: string) => void
+    deletingSymbol: string | null
+    onDeleteSymbol: (symbol: string, displayName: string) => void
 }) {
     return (
         <div className="space-y-4 pt-4">
@@ -638,6 +838,8 @@ function DetailedBoardView({
                                 onOpenReport(item.analysis.report_id)
                             }
                         }}
+                        deleting={deletingSymbol === item.symbol}
+                        onDelete={() => onDeleteSymbol(item.symbol, item.name || item.symbol)}
                     />
                 ))}
             </div>
@@ -649,10 +851,14 @@ function DetailedTrackingRow({
     item,
     onAnalyze,
     onOpenReport,
+    deleting,
+    onDelete,
 }: {
     item: TrackingBoardItem
     onAnalyze: () => void
     onOpenReport: () => void
+    deleting: boolean
+    onDelete: () => void
 }) {
     const priceChangePct = item.price_change_pct ?? null
     const floatingPnl = item.floating_pnl ?? null
@@ -869,6 +1075,16 @@ function DetailedTrackingRow({
                             >
                                 重新分析
                             </button>
+                            <button
+                                type="button"
+                                title="从跟踪看板移除"
+                                onClick={onDelete}
+                                disabled={deleting}
+                                className="inline-flex items-center gap-1 rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-500 transition-colors hover:border-rose-300 hover:text-rose-600 disabled:opacity-40 dark:border-slate-700 dark:text-slate-400 dark:hover:border-rose-500/40 dark:hover:text-rose-400"
+                            >
+                                {deleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                                移除跟踪
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -1047,7 +1263,7 @@ function getDailyLimitPercent(item: TrackingBoardItem): number {
 
     if (name.includes('ST')) return 5
     if (symbol.endsWith('.BJ')) return 30
-    if (symbol.startsWith('300') || symbol.startsWith('688')) return 20
+    if (symbol.startsWith('300') || symbol.startsWith('301') || symbol.startsWith('688') || symbol.startsWith('689')) return 20
     return 10
 }
 

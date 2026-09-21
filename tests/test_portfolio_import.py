@@ -123,7 +123,52 @@ class TestPortfolioImportService:
         state = portfolio_import_service.get_import_state(db, "user-clear")
         assert state["summary"]["positions"] == 0
 
-    def test_scheduled_job_uses_imported_position_context(self, db):
+    def test_delete_imported_positions_for_symbol(self, db):
+        from api.services import portfolio_import_service
+
+        portfolio_import_service.sync_positions(
+            db=db,
+            user_id="user-del-one",
+            positions=[
+                {"symbol": "600519.SH", "current_position": 100},
+                {"symbol": "300750.SZ", "current_position": 200},
+            ],
+            auto_apply_scheduled=True,
+        )
+        out = portfolio_import_service.delete_imported_positions_for_symbol(db, "user-del-one", "600519")
+        assert out["symbol"] == "600519.SH"
+        assert out["deleted_positions"] >= 1
+        assert out["scheduled_removed"] is True
+        state = portfolio_import_service.get_import_state(db, "user-del-one")
+        assert state["summary"]["positions"] == 1
+        tasks = scheduled_service.list_scheduled(db, "user-del-one")
+        assert [t["symbol"] for t in tasks] == ["300750.SZ"]
+
+    def test_merge_imported_positions_appends_without_dropping(self, db):
+        from api.services import portfolio_import_service
+
+        portfolio_import_service.sync_positions(
+            db=db,
+            user_id="user-merge",
+            positions=[{"symbol": "600519.SH", "name": "贵州茅台", "current_position": 100}],
+            source="manual",
+            auto_apply_scheduled=False,
+        )
+        portfolio_import_service.merge_imported_positions(
+            db=db,
+            user_id="user-merge",
+            positions=[{"symbol": "300750.SZ", "name": "宁德时代"}],
+            source="manual",
+            auto_apply_scheduled=False,
+        )
+        state = portfolio_import_service.get_import_state(db, "user-merge")
+        symbols = sorted(p["symbol"] for p in state["positions"])
+        assert symbols == ["300750.SZ", "600519.SH"]
+        maotai = next(p for p in state["positions"] if p["symbol"] == "600519.SH")
+        assert maotai["current_position"] == pytest.approx(100.0)
+
+    def test_scheduled_job_ignores_imported_position_context(self, db):
+        """深度分析保持客观：定时任务不再注入导入持仓上下文。"""
         from api.main import _run_scheduled_job
         from api.services import portfolio_import_service
 
@@ -167,9 +212,10 @@ class TestPortfolioImportService:
             )
 
         request = captured["request"]
-        assert request.current_position == pytest.approx(500.0)
-        assert request.average_cost == pytest.approx(1700.0)
-        assert "持仓导入" in (request.user_notes or "")
+        # 持仓/成本不得进入提示词：否则模型会围绕用户持仓作答并引入噪音。
+        assert request.current_position is None
+        assert request.average_cost is None
+        assert "持仓导入" not in (request.user_notes or "")
 
     def test_scheduled_job_marks_failed_when_underlying_job_fails(self, db):
         from api.main import _run_scheduled_job, _set_job
@@ -236,3 +282,63 @@ class TestPortfolioImportApi:
         assert scheduled.status_code == 200
         scheduled_symbols = [item["symbol"] for item in scheduled.json()["items"]]
         assert scheduled_symbols == ["600519.SH", "300750.SZ"]
+
+    def test_delete_single_position_endpoint(self):
+        from api.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        token = _auth_unique(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        sync = client.post(
+            "/v1/portfolio/imports",
+            headers=headers,
+            json={
+                "positions": [
+                    {"symbol": "600519.SH", "name": "贵州茅台", "current_position": 500},
+                    {"symbol": "300750.SZ", "name": "宁德时代", "current_position": 200},
+                ],
+                "auto_apply_scheduled": False,
+            },
+        )
+        assert sync.status_code == 200
+
+        deleted = client.delete("/v1/portfolio/imports/position?symbol=600519.SH", headers=headers)
+        assert deleted.status_code == 200
+        body = deleted.json()
+        assert body["symbol"] == "600519.SH"
+        assert body["deleted_positions"] >= 1
+
+        state = client.get("/v1/portfolio/imports", headers=headers)
+        assert state.status_code == 200
+        symbols = [p["symbol"] for p in state.json()["positions"]]
+        assert symbols == ["300750.SZ"]
+
+    def test_merge_portfolio_import_endpoint(self):
+        from api.main import app
+
+        client = TestClient(app, raise_server_exceptions=False)
+        token = _auth_unique(client)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        sync = client.post(
+            "/v1/portfolio/imports",
+            headers=headers,
+            json={
+                "positions": [{"symbol": "600519.SH", "name": "贵州茅台", "current_position": 100}],
+                "auto_apply_scheduled": False,
+            },
+        )
+        assert sync.status_code == 200
+
+        merged = client.post(
+            "/v1/portfolio/imports/merge",
+            headers=headers,
+            json={
+                "positions": [{"symbol": "300750.SZ", "name": "宁德时代"}],
+                "auto_apply_scheduled": False,
+            },
+        )
+        assert merged.status_code == 200
+        body = merged.json()
+        assert body["summary"]["positions"] == 2

@@ -1,11 +1,9 @@
 from typing import Dict
 
 from .base import BaseMarketDataProvider
-from .yfinance_provider import YFinanceProvider
-from .alpha_vantage_provider import AlphaVantageProvider
 from .china_equity_provider import CnStubProvider
-from .cn_akshare_provider import CnAkshareProvider
-from .cn_baostock_provider import CnBaoStockProvider
+from .cn_eastmoney_http_provider import CnEastmoneyHttpProvider
+from .cn_sina_moneyflow_provider import CnSinaMoneyflowProvider
 
 
 class DataProviderRegistry:
@@ -26,9 +24,35 @@ class DataProviderRegistry:
 
 def build_default_registry() -> DataProviderRegistry:
     registry = DataProviderRegistry()
-    registry.register(CnAkshareProvider())
-    registry.register(CnBaoStockProvider())
-    registry.register(YFinanceProvider())
-    registry.register(AlphaVantageProvider())
+    registry.register(CnSinaMoneyflowProvider())
+    registry.register(CnEastmoneyHttpProvider())
+    # Optional (heavier) providers
+    try:
+        from .cn_akshare_provider import CnAkshareProvider
+
+        registry.register(CnAkshareProvider())
+    except Exception:
+        pass
+
+    try:
+        from .cn_baostock_provider import CnBaoStockProvider
+
+        registry.register(CnBaoStockProvider())
+    except Exception:
+        pass
+    # Optional providers: import may fail in minimal runtimes.
+    try:
+        from .yfinance_provider import YFinanceProvider
+
+        registry.register(YFinanceProvider())
+    except Exception:
+        pass
+
+    try:
+        from .alpha_vantage_provider import AlphaVantageProvider
+
+        registry.register(AlphaVantageProvider())
+    except Exception:
+        pass
     registry.register(CnStubProvider())
     return registry

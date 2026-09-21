@@ -1,0 +1,32 @@
+market_report:
+  sources: [stock_data, indicators]
+
+volume_price_report:
+  sources: [stock_data]
+
+smart_money_report:
+  sources: [individual_fund_flow, lhb_detail]
+
+macro_report:
+  sources: [board_fund_flow, global_news]
+
+game_theory_report:
+  sources: [zt_pool, lhb_detail, hot_stocks_xq]
+
+fundamentals_report:
+  sources: [fundamentals, balance_sheet, cashflow, income_statement]
+
+news_report:
+  sources: [news, global_news]
+
+sentiment_report:
+  sources: [hot_stocks_xq, news]
+
+investment_plan:
+  inherit: all_critical_important
+
+trader_investment_plan:
+  inherit: all_critical_important
+
+final_trade_decision:
+  inherit: all_critical_important

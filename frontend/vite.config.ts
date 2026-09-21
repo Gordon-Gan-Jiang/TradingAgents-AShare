@@ -33,6 +33,21 @@ function getBuildMeta() {
 
 const buildMeta = getBuildMeta()
 
+// 用 127.0.0.1 避免 macOS 上 localhost 解析到 ::1，而后端 uvicorn 只监听 IPv4。
+const backendTarget = process.env.VITE_PROXY_TARGET || 'http://127.0.0.1:8000'
+
+const apiProxy = {
+  '/api': {
+    target: backendTarget,
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/api/, ''),
+  },
+  '/v1': { target: backendTarget, changeOrigin: true },
+  '/healthz': { target: backendTarget, changeOrigin: true },
+  '/openapi.json': { target: backendTarget, changeOrigin: true },
+  '/docs': { target: backendTarget, changeOrigin: true },
+}
+
 export default defineConfig({
   define: {
     __APP_BUILD_COMMIT__: JSON.stringify(buildMeta.commit),
@@ -45,30 +60,20 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  test: {
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
+  },
   server: {
+    host: '127.0.0.1',
     port: 5173,
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
-      },
-      '/v1': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/healthz': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/openapi.json': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/docs': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-    },
+    strictPort: true,
+    proxy: apiProxy,
+  },
+  preview: {
+    host: '127.0.0.1',
+    port: 4173,
+    strictPort: true,
+    proxy: apiProxy,
   },
 })

@@ -1,9 +1,106 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
+/* ── 按主题修正 slate-400 / slate-500 的对比度 ─────────────────
+   slate-400：原值 #94a3b8 在白底上只有 2.56:1，远低于正文 4.5:1 的 AA 要求；
+   但它在深色底上（6.96:1）恰恰是合格的。
+   slate-500：原值 #62748e 在深色底上只有 3.75:1，同样不达 AA；
+   它在白底上 4.76:1 是好的。
+   两者都是「单一色值不可能两头都达标」，所以按主题切换变量本身，
+   而不是覆盖 .text-slate-400 / .text-slate-500 规则——覆盖规则会与
+   dark:text-* 产生同权重竞争，300+ 处调用结果无法预测。
+
+   这两段刻意写在所有 @layer 之外：未分层的声明优先级高于 Tailwind 的
+   @layer theme，因此能覆盖默认调色板，同时不干扰任何其它属性。
+   顺序也不能调换：:root 与 .dark 权重相同，靠先后决定胜负。
+
+   dark 下 slate-500 用 #7a889f 而不是直接提亮到 slate-400 的 #94a3b8：
+   这样既过 AA，又保留了「500 比 400 更弱」的原有层级，
+   不会把二级文字变得和三级文字一样亮。
+
+   取值依据（都是浏览器实测出来的真实底色，不是假设）：
+     浅色：白卡片 #fff 与 slate-100 底 #f1f5f9 —— 后者是最紧的约束
+     深色：OLED 页底 #020618、卡片 #141f32、slate-800/70 面 #151f32
+   注意 400 仍须比 500 浅，否则层级反转。 */
+:root {
+  --color-slate-400: #5f6c82; /* 白底 5.31:1，slate-100 底 4.85:1，均过 AA */
+  --color-slate-500: #5b687e; /* 白底 5.64:1，slate-100 底 5.14:1，且深于 400 */
+
+  /* 语义色 -500：Tailwind 的 -500 是为深色面设计的中间调，直接放在白底上几乎全部不达 AA
+     （实测 emerald 2.47、amber 2.13、orange 2.89、rose 3.75、red 3.81、cyan 2.37…）。
+     这里把浅色主题下的 -500 解析成「该色系中最浅且仍过 AA」的一档，视觉层级保持不变。 */
+  --color-red-500: #e7000b;     /* 白底 4.77:1 */
+  --color-orange-500: #ca3500;  /* 白底 5.22:1 */
+  --color-amber-500: #bb4d00;   /* 白底 5.03:1 */
+  --color-green-500: #008236;   /* 白底 4.95:1 */
+  --color-emerald-500: #007a55; /* 白底 5.36:1 */
+  --color-teal-500: #0f766e;    /* 白底 5.47:1 */
+  --color-cyan-500: #007595;    /* 白底 5.28:1 */
+  --color-sky-500: #0069a8;     /* 白底 5.86:1 */
+  --color-blue-500: #155dfc;    /* 白底 5.25:1 */
+  --color-indigo-500: #4f39f6;  /* 纯白 6.46:1；原值在 indigo-50 淡底上只有 4.10:1 */
+  --color-violet-500: #7f22fe;  /* 白底 5.89:1 */
+  --color-purple-500: #9810fa;  /* 白底 5.54:1 */
+  --color-fuchsia-500: #c800de; /* 白底 4.66:1 */
+  --color-pink-500: #e60076;    /* 白底 4.54:1 */
+  --color-rose-500: #e70039;    /* 白底 4.71:1 */
+}
+
+.dark {
+  --color-slate-400: #94a3b8; /* OLED 7.86:1 / 卡片 6.43:1 */
+  --color-slate-500: #8b98ad; /* 卡片 5.66:1；紫色调 chip 5.32:1、青色调 chip 4.85:1（原 #7a889f 只有 4.33/3.94） */
+
+  /* 深色面上恢复 -500 的原始亮值：它们本来就是为深底设计的（emerald 6.68、amber 7.73、orange 5.72）。 */
+  --color-red-500: #fb2c36;
+  --color-orange-500: #ff6900;
+  --color-amber-500: #fe9a00;
+  --color-green-500: #00c950;
+  --color-emerald-500: #00bc7d;
+  --color-teal-500: #00baa7;
+  --color-cyan-500: #00b8db;
+  --color-sky-500: #00a6f4;
+  --color-blue-500: #4f90ff; /* 比原 #2b7fff 略亮：落在蓝调 chip #162947 上 4.69:1（原值 3.87） */
+  --color-indigo-500: #615fff;
+  --color-violet-500: #8e51ff;
+  --color-purple-500: #ad46ff;
+  --color-fuchsia-500: #e12afb;
+  --color-pink-500: #f6339a;
+  --color-rose-500: #ff2056;
+}
+
+/* 常暗容器：侧边栏这类底色调色板不随主题切换的区域（bg-slate-900/95）。
+   上面的变量是按主题切换的，浅色主题下 slate-400/500 会解析成深灰，
+   落在始终深色的侧边栏上只有 2.8~3.0:1——正文和导航文字几乎看不清。
+   所以这里把这两个变量在容器上重新钉回「深色面」取值，让子树继承。
+
+   同理，-500 语义色在浅色主题下会被上面的 :root 调深，而侧边栏的 Logo/选中态
+   渐变（from-cyan-500 via-blue-600 to-violet-600）本来就长在深色底上，
+   必须拿回原始亮值，否则浅色主题下品牌色会发暗。
+
+   同样必须写在 @layer 之外：未分层的声明才能压过上面 :root / .dark 里的同名声明。 */
+.on-dark-surface {
+  --color-slate-400: #94a3b8; /* 侧边栏底 #1b2236 上 6.16:1 */
+  --color-slate-500: #828fa4; /* 同底 4.83:1；原值 #64748b 只有 3.32:1 */
+  --color-cyan-500: #00b8db;
+  --color-blue-500: #2b7fff;
+  --color-indigo-500: #615fff;
+  --color-violet-500: #8e51ff;
+  --color-emerald-500: #00bc7d;
+  --color-amber-500: #fe9a00;
+  --color-red-500: #fb2c36;
+  --color-rose-500: #ff2056;
+  --color-green-500: #00c950;
+  --color-orange-500: #ff6900;
+  --color-teal-500: #00baa7;
+  --color-sky-500: #00a6f4;
+  --color-purple-500: #ad46ff;
+  --color-fuchsia-500: #e12afb;
+  --color-pink-500: #f6339a;
+}
+
 @layer base {
   * {
-    @apply border-slate-200 dark:border-slate-700;
+    @apply border-slate-200/90 dark:border-slate-700/70;
   }
 
   html {
@@ -11,25 +108,61 @@
   }
 
   body {
-    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
+    @apply bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100;
     font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* 键盘可达性：统一焦点环，鼠标点击不触发 */
+  :focus-visible {
+    outline: 2px solid #3b82f6;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  ::selection {
+    background-color: rgba(37, 99, 235, 0.22);
+  }
+
+  /* 原生表单控件（全站 16 个 checkbox/radio/range）默认跟随系统强调色，
+     macOS 上会变成用户自定义的系统色（可能是粉/紫/石墨色），与品牌色冲突。
+     统一指定 accent-color 把勾选框拉回品牌蓝。
+     浅色用 brand.blue，深色提亮一档以保证在深底上的可辨识度。 */
+  input[type='checkbox'],
+  input[type='radio'],
+  input[type='range'],
+  progress {
+    accent-color: #2563eb; /* brand.blue */
+  }
+
+  .dark input[type='checkbox'],
+  .dark input[type='radio'],
+  .dark input[type='range'],
+  .dark progress {
+    accent-color: #3b82f6;
   }
 
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 10px;
+    height: 10px;
   }
 
   ::-webkit-scrollbar-track {
-    @apply bg-slate-100 dark:bg-slate-800 rounded;
+    @apply bg-slate-100/70 dark:bg-slate-900/60;
   }
 
   ::-webkit-scrollbar-thumb {
-    @apply bg-slate-300 dark:bg-slate-600 rounded-full;
+    @apply bg-slate-300 dark:bg-slate-700;
+    border-radius: 9999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    @apply bg-slate-400 dark:bg-slate-500;
+    @apply bg-slate-400 dark:bg-slate-600;
+    background-clip: content-box;
   }
 }
 
@@ -44,10 +177,22 @@
 
 @layer components {
 
-  /* 卡片样式 - 亮色/暗色适配 */
+  /* 卡片样式 - 亮色/暗色适配
+     深度来自「边框 + 分层阴影 + 顶部内高光」，而非背景图，
+     这样页面上叠加的 bg-* 工具类仍可正常覆盖背景色。 */
   .card {
-    @apply bg-white dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl p-4;
-    @apply shadow-sm dark:shadow-lg;
+    @apply bg-white dark:bg-slate-800/70 border border-slate-200/90 dark:border-slate-700/70 rounded-xl p-4;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.9),
+      0 1px 2px rgba(15, 23, 42, 0.04),
+      0 10px 24px -14px rgba(15, 23, 42, 0.22);
+  }
+
+  .dark .card {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.055),
+      0 1px 2px rgba(0, 0, 0, 0.3),
+      0 14px 30px -18px rgba(0, 0, 0, 0.65);
   }
 
   .card-hover {
@@ -55,86 +200,146 @@
   }
 
   .card-hover:hover {
-    @apply border-blue-400 dark:border-blue-500/50;
-    @apply shadow-md dark:shadow-blue-500/10;
+    @apply border-blue-400/80 dark:border-blue-500/50;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.9),
+      0 2px 4px rgba(15, 23, 42, 0.06),
+      0 18px 34px -16px rgba(15, 23, 42, 0.28);
     transform: translateY(-2px);
   }
 
-  /* 按钮样式 */
+  .dark .card-hover:hover {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.075),
+      0 2px 6px rgba(0, 0, 0, 0.35),
+      0 20px 40px -18px rgba(0, 0, 0, 0.7),
+      0 0 0 1px rgba(59, 130, 246, 0.12);
+  }
+
+  /* 按钮样式 - 主按钮使用品牌渐变（cyan → blue → violet）
+     每个色标与白色文字的对比度均 ≥ 5:1 */
   .btn-primary {
     @apply px-4 py-2 rounded-lg font-medium text-white transition-all duration-200;
-    @apply bg-gradient-to-r from-blue-500 to-blue-600;
-    @apply hover:from-blue-600 hover:to-blue-700;
-    @apply shadow-md hover:shadow-lg;
+    background-image: linear-gradient(101deg, #0e7490 0%, #1d4ed8 48%, #6d28d9 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 1px 2px rgba(15, 23, 42, 0.2),
+      0 8px 20px -10px rgba(29, 78, 216, 0.55);
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    filter: brightness(1.08) saturate(1.05);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.22),
+      0 2px 4px rgba(15, 23, 42, 0.22),
+      0 14px 28px -10px rgba(29, 78, 216, 0.68);
+  }
+
+  .btn-primary:active:not(:disabled) {
+    transform: translateY(1px);
+    filter: brightness(0.98);
+  }
+
+  .btn-primary:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
   }
 
   .btn-primary:disabled {
     @apply opacity-50 cursor-not-allowed;
     transform: none;
+    filter: none;
+    box-shadow: none;
   }
 
   .btn-secondary {
     @apply px-4 py-2 rounded-lg font-medium transition-all duration-200;
     @apply bg-slate-100 text-slate-700 border border-slate-300;
-    @apply dark:bg-slate-700 dark:text-slate-200 dark:border-slate-600;
-    @apply hover:bg-slate-200 dark:hover:bg-slate-600;
+    @apply dark:bg-slate-700/70 dark:text-slate-200 dark:border-slate-600/70;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
   }
 
-  /* 输入框 */
+  .btn-secondary:hover {
+    @apply bg-slate-200 dark:bg-slate-600/70 border-slate-400 dark:border-slate-500/70;
+  }
+
+  .btn-secondary:active {
+    transform: translateY(1px);
+  }
+
+  .btn-secondary:disabled {
+    @apply opacity-50 cursor-not-allowed;
+    transform: none;
+  }
+
+  /* 输入框 - 深色下比卡片更深，读作「凹陷的输入井」 */
   .input {
     @apply px-3 py-2 rounded-lg transition-all duration-200;
-    @apply bg-white dark:bg-slate-800;
+    @apply bg-white dark:bg-slate-900/60;
     @apply text-slate-900 dark:text-slate-100;
     @apply placeholder:text-slate-400 dark:placeholder:text-slate-500;
-    @apply border border-slate-300 dark:border-slate-600;
-    @apply focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500;
+    @apply border border-slate-300 dark:border-slate-600/70;
+  }
+
+  .input:hover:not(:disabled) {
+    @apply border-slate-400 dark:border-slate-500/70;
+  }
+
+  .input:focus {
+    @apply outline-none border-blue-500 dark:border-blue-500;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18);
+  }
+
+  .input:disabled {
+    @apply opacity-60 cursor-not-allowed;
   }
 
   /* 标签样式 */
   .badge-green {
-    @apply badge bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400;
-    @apply border border-green-200 dark:border-green-500/30;
+    @apply badge bg-green-50 text-green-700 dark:bg-green-500/15 dark:text-green-400;
+    @apply border border-green-200/80 dark:border-green-500/25;
   }
 
   .badge-red {
-    @apply badge bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-400;
-    @apply border border-red-200 dark:border-red-500/30;
+    @apply badge bg-red-50 text-red-700 dark:bg-red-500/15 dark:text-red-400;
+    @apply border border-red-200/80 dark:border-red-500/25;
   }
 
   .badge-blue {
-    @apply badge bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-400;
-    @apply border border-blue-200 dark:border-blue-500/30;
+    @apply badge bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400;
+    @apply border border-blue-200/80 dark:border-blue-500/25;
   }
 
   .badge-orange {
-    @apply badge bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-400;
-    @apply border border-orange-200 dark:border-orange-500/30;
+    @apply badge bg-orange-50 text-orange-700 dark:bg-orange-500/15 dark:text-orange-400;
+    @apply border border-orange-200/80 dark:border-orange-500/25;
   }
 
   .badge-purple {
-    @apply badge bg-purple-100 text-purple-700 dark:bg-purple-500/20 dark:text-purple-400;
-    @apply border border-purple-200 dark:border-purple-500/30;
+    @apply badge bg-purple-50 text-purple-700 dark:bg-purple-500/15 dark:text-purple-400;
+    @apply border border-purple-200/80 dark:border-purple-500/25;
   }
 
-  /* 渐变文字 */
+  /* 渐变文字 - 与品牌渐变同源；浅色下起点 #0e7490 保证在白底可读 */
   .text-gradient {
-    @apply bg-clip-text text-transparent bg-gradient-to-r from-blue-500 via-purple-500 to-cyan-400;
+    @apply bg-clip-text text-transparent;
+    background-image: linear-gradient(101deg, #0e7490 0%, #1d4ed8 48%, #6d28d9 100%);
   }
 
   /* 状态指示器 */
   .status-dot-green {
     @apply status-dot bg-green-500;
-    box-shadow: 0 0 8px rgba(34, 197, 94, 0.6);
+    box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15), 0 0 10px rgba(34, 197, 94, 0.55);
   }
 
   .status-dot-blue {
     @apply status-dot bg-blue-500;
-    box-shadow: 0 0 8px rgba(59, 130, 246, 0.6);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15), 0 0 10px rgba(59, 130, 246, 0.55);
   }
 
   .status-dot-orange {
     @apply status-dot bg-orange-500;
-    box-shadow: 0 0 8px rgba(249, 115, 22, 0.6);
+    box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.15), 0 0 10px rgba(249, 115, 22, 0.55);
   }
 }
 
@@ -153,5 +358,18 @@
       opacity: 1;
       transform: translateY(0);
     }
+  }
+}
+
+/* 动效自律：仅保留 transform / opacity，并在系统偏好下关闭 */
+@media (prefers-reduced-motion: reduce) {
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 }

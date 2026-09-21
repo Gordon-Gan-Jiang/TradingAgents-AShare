@@ -6,7 +6,7 @@ from .en import PROMPTS as EN_PROMPTS
 from .zh import PROMPTS as ZH_PROMPTS
 
 
-def _resolve_language(config: Mapping[str, Any] | None = None) -> str:
+def resolve_prompt_language(config: Mapping[str, Any] | None = None) -> str:
     cfg = dict(config or get_config())
     language = str(cfg.get("prompt_language", "auto")).lower()
     if language in ("zh", "en"):
@@ -22,7 +22,7 @@ def _resolve_language(config: Mapping[str, Any] | None = None) -> str:
 
 
 def get_prompt(key: str, config: Mapping[str, Any] | None = None) -> str:
-    lang = _resolve_language(config)
+    lang = resolve_prompt_language(config)
     if lang == "zh":
         if key in ZH_PROMPTS:
             return ZH_PROMPTS[key]

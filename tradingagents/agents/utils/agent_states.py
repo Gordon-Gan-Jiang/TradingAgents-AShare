@@ -1,11 +1,16 @@
 import contextvars
-import json
 import operator
-import re
-from typing import Annotated, Any, List, Tuple
+from typing import Annotated, Any, List, Tuple, Union
 
 from typing_extensions import Optional, TypedDict
 from langgraph.graph import MessagesState
+
+from tradingagents.agents.utils.direction import (
+    NEUTRAL as _NEUTRAL,
+    coerce_confidence,
+    extract_direction_result,
+    normalize_direction,
+)
 
 # ContextVar used to pass the AgentProgressTracker into async graph nodes
 # without putting it in the LangGraph state (which would require serialization).
@@ -15,16 +20,69 @@ current_tracker_var: contextvars.ContextVar = contextvars.ContextVar(
 )
 
 
-def extract_verdict(text: str) -> Tuple[str, str]:
-    """Extract VERDICT block from analyst output. Returns (direction, confidence)."""
-    m = re.search(r'<!--\s*VERDICT:\s*(\{.*?\})\s*-->', text or "", re.DOTALL)
-    if m:
-        try:
-            d = json.loads(m.group(1))
-            return d.get("direction", "中性"), "中"
-        except Exception:
-            pass
-    return "中性", "低"
+def _fallback_confidence_from_direction(direction: str) -> int:
+    """Integer 0-100 when the model omits confidence (deterministic prior).
+
+    Delegates to the canonical parser so the prior lives in exactly one place.
+    """
+    canonical = normalize_direction(direction) or _NEUTRAL
+    return coerce_confidence(None, canonical)
+
+
+def _coerce_verdict_confidence(raw: Any, direction: str) -> int:
+    """Normalize model-supplied confidence to a 0-100 integer.
+
+    Delegates to the canonical parser. Retained as a module-level name because
+    callers and tests reference it.
+    """
+    canonical = normalize_direction(direction) or _NEUTRAL
+    return coerce_confidence(raw, canonical)
+
+
+def extract_verdict(text: str) -> Tuple[str, int]:
+    """Extract the VERDICT block from analyst output.
+
+    Returns ``(direction, confidence)`` where ``direction`` is a **canonical**
+    direction (看多/偏多/中性/偏空/看空) and ``confidence`` is an integer 0-100.
+
+    Two intentional behaviour changes versus the previous implementation:
+
+    * The direction is normalized, so an analyst emitting ``"NEUTRAL"`` or
+      ``"bullish"`` no longer leaks a non-canonical value into
+      ``analyst_traces.verdict`` and therefore into the consensus vote.
+    * Parsing delegates to :mod:`tradingagents.agents.utils.direction`, which
+      fixes the nested-brace JSON truncation and drops the whole-document
+      keyword scan.
+
+    Analysts deliberately keep a neutral fallback: the LLM trace always renders a
+    value, and the analyst layer is descriptive input rather than the trading
+    decision. The trading-decision path does **not** use this fallback; it goes
+    through ``extract_direction_result`` and abstains when evidence is absent.
+    """
+    direction, confidence, _parsed = extract_verdict_with_flag(text)
+    return direction, confidence
+
+
+def extract_verdict_with_flag(text: str) -> Tuple[str, int, bool]:
+    """Same as :func:`extract_verdict`, but also reports whether it *parsed*.
+
+    The third element is the whole point. ``extract_verdict`` must always render
+    something for the trace UI, so an unparseable report yields 中性. But
+    ``consensus_service`` reads ``analyst_traces[*].verdict`` and feeds it into the
+    weighted direction score — so without this flag a **parse failure is
+    indistinguishable from a genuine neutral opinion**, and a broken analyst report
+    silently votes "中性" with full weight.
+
+    ``False`` means no verdict was parsed: the caller must treat the analyst as
+    having said nothing, not as having said 中性.
+    """
+    result = extract_direction_result(text, allow_labelled_lines=False)
+    if result.direction is None:
+        return _NEUTRAL, _fallback_confidence_from_direction(_NEUTRAL), False
+    confidence = result.confidence
+    if confidence is None:
+        confidence = _fallback_confidence_from_direction(result.direction)
+    return result.direction, confidence, True
 
 
 class UserIntent(TypedDict, total=False):
@@ -42,7 +100,8 @@ class TraceItem(TypedDict, total=False):
     data_window: str
     key_finding: str
     verdict: str
-    confidence: str
+    confidence: Union[int, float, str]
+    structured: dict[str, Any]
 
 
 class InstrumentContext(TypedDict):
@@ -181,4 +240,5 @@ class AgentState(MessagesState):
     analyst_traces: Annotated[List[TraceItem], operator.add]
     short_term_result: Annotated[Optional[dict], "Final short-term analysis result"]
     medium_term_result: Annotated[Optional[dict], "Final medium-term analysis result"]
+    freshness_pool: Annotated[Optional[dict[str, Any]], "Per-source freshness metadata keyed by source_key"]
     metadata: Annotated[dict[str, Any], "Optional runtime metadata"]

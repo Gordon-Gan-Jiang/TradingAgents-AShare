@@ -16,6 +16,115 @@ _HORIZON_LABELS = {
     "medium": "中线（1-3月，基本面主导）",
 }
 
+# --- P6/F2：信息集与周期匹配 ---
+#
+# `build_horizon_context` 以前接受 `agent_type` 却**完全忽略**它，`weight_hint` 恒为
+# 空串——于是"按周期调整重点"只是一句空话，基本面/宏观/新闻这些慢变量和量价快变量
+# 在 T+1 里拿到了同样的权重。
+#
+# 实测：这些慢变量对次日收益没有可预测性（长周期因子在 h=1 上 IC 全部 ≤0 或不显著），
+# 让它们参与方向判断等于往决策里注入纯噪声。所以这里显式分层：
+#   快变量 → 主导次日方向；慢变量 → 只做背景与风险。
+# 中线反过来。两套清单都写成模块常量，便于测试直接引用、也避免和字符串比较脱节。
+# 快的/慢的清单取自**真实调用点**（`grep -rn "agent_type=" tradingagents/agents/`）：
+#   analysts: market, volume_price, smart_money, social, news, macro, fundamentals
+#   researchers: bull, bear
+# 之前凭直觉写的 "capital_flow"/"sector"/"policy"/"valuation" 在生产里**一个都不存在**，
+# 等于分层只对 fundamentals/macro 生效、对量价与资金完全不生效（它们是快变量，本该主导）。
+# 清单与实际取值脱节时，这类"看起来做了分层"的代码是静默失效的。
+_FAST_AGENT_TYPES = frozenset(
+    {
+        "market",         # 技术面：量价异动、成交量突变、形态
+        "volume_price",   # 量价关系（生产实际使用的名字）
+        "smart_money",    # 主力资金净流入
+        "social",         # 短线情绪、舆情热度
+        "news",           # 时效性消息、隔夜外盘
+        # 兼容别名，避免改名后静默失配
+        "technical",
+        "capital_flow",
+        "money_flow",
+        "sentiment",
+        "hot_money",
+    }
+)
+
+_SLOW_AGENT_TYPES = frozenset(
+    {
+        "fundamentals",   # 基本面、长期估值
+        "macro",          # 宏观
+        # 兼容别名
+        "fundamental",
+        "economy",
+        "valuation",
+        "industry",
+    }
+)
+
+# `bull` / `bear` 是辩论角色而非信息源：它们读的是全部分析师的产出，本身不携带
+# "快/慢"属性。所以刻意不分类——`variable_speed` 会返回 None，不加权重提示。
+# 给它们硬塞一边的提示会误导整场辩论的方向来源。
+
+
+def variable_speed(agent_type: Optional[str]) -> Optional[str]:
+    """Classify an analyst dimension as a fast or slow variable.
+
+    Returns ``"fast"``, ``"slow"``, or ``None`` when the dimension is unknown.
+    Unknown is deliberately not defaulted to either side: a wrong classification
+    would silently change what drives the T+1 direction call, and the honest
+    behaviour is to add no weight guidance rather than guess.
+    """
+    key = str(agent_type or "").strip().lower()
+    if not key:
+        return None
+    if key in _FAST_AGENT_TYPES:
+        return "fast"
+    if key in _SLOW_AGENT_TYPES:
+        return "slow"
+    return None
+
+
+def build_horizon_context(
+    horizon: str,
+    focus_areas: List[str],
+    specific_questions: List[str],
+    agent_type: Optional[str] = None,
+) -> str:
+    """Build the horizon context block to prepend to any agent's system prompt.
+
+    The ``weight_hint`` is chosen by ``(horizon, variable speed)``: for the next-day
+    horizon a slow dimension is explicitly told it is *secondary* and may not drive
+    direction, while a fast dimension is told it is primary. For the medium horizon
+    the two swap. An unknown ``agent_type`` yields no hint at all — see
+    :func:`variable_speed`.
+    """
+    config = get_config()
+    template = get_prompt("horizon_context_block", config=config)
+
+    horizon_label = _HORIZON_LABELS.get(horizon, horizon)
+    focus_str = "、".join(focus_areas) if focus_areas else "无特殊关注"
+    questions_str = "；".join(specific_questions) if specific_questions else "无"
+
+    weight_hint = ""
+    speed = variable_speed(agent_type)
+    if speed is not None:
+        # `horizons` 目前恒为 ["short"]（单次运行），但 medium 分支保留：周期拆分
+        # （A5/D5）落地后这里必须已经是对的，否则慢变量会重新拿到方向权。
+        is_short = str(horizon or "").strip().lower() != "medium"
+        key = f"weight_hint_{speed}_{'short' if is_short else 'medium'}"
+        try:
+            weight_hint = "\n\n" + str(get_prompt(key, config=config)).strip()
+        except Exception:
+            # 缺少该语言的提示词时不要静默丢掉分层约束——宁可不加权重说明，
+            # 也不要退回"所有维度等权"的旧行为却让人以为已经分层。
+            weight_hint = ""
+
+    return template.format(
+        horizon_label=horizon_label,
+        focus_areas_str=focus_str,
+        specific_questions_str=questions_str,
+        weight_hint=weight_hint,
+    )
+
 
 def parse_intent(
     query: str,
@@ -63,28 +172,6 @@ def parse_intent(
             "specific_questions": [],
             "user_context": fallback_user_context,
         }
-
-
-def build_horizon_context(
-    horizon: str,
-    focus_areas: List[str],
-    specific_questions: List[str],
-    agent_type: Optional[str] = None,
-) -> str:
-    """Build the horizon context block to prepend to any agent's system prompt."""
-    config = get_config()
-    template = get_prompt("horizon_context_block", config=config)
-
-    horizon_label = _HORIZON_LABELS.get(horizon, horizon)
-    focus_str = "、".join(focus_areas) if focus_areas else "无特殊关注"
-    questions_str = "；".join(specific_questions) if specific_questions else "无"
-
-    return template.format(
-        horizon_label=horizon_label,
-        focus_areas_str=focus_str,
-        specific_questions_str=questions_str,
-        weight_hint="",
-    )
 
 
 def _merge_inferred_user_context(

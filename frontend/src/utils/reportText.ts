@@ -43,6 +43,8 @@ export function buildAgentSummary(text?: string | null): string {
 export interface Verdict {
     direction: string
     reason: string
+    /** 0–100，与后端 analyst_traces 一致；旧报告无 JSON 字段时用方向回退估算 */
+    confidence: number
 }
 
 // Map English direction values (en.py prompts) to Chinese display labels
@@ -55,19 +57,61 @@ const DIRECTION_ALIAS: Record<string, string> = {
     CAUTIOUS:      '谨慎',  // 向后兼容旧报告
 }
 
+function fallbackConfidenceFromDirection(direction: string): number {
+    if (direction === '看多' || direction === '看空') return 68
+    if (direction === '偏多' || direction === '偏空') return 58
+    if (direction === '中性') return 48
+    return 45
+}
+
+function coerceVerdictConfidence(raw: unknown, direction: string): number {
+    if (raw === null || raw === undefined || raw === '') {
+        return fallbackConfidenceFromDirection(direction)
+    }
+    if (typeof raw === 'boolean') return fallbackConfidenceFromDirection(direction)
+    if (typeof raw === 'number') {
+        if (raw >= 0 && raw <= 1) return Math.min(100, Math.max(0, Math.round(raw * 100)))
+        return Math.min(100, Math.max(0, Math.round(raw)))
+    }
+    if (typeof raw === 'string') {
+        const s = raw.trim()
+        if (/^\d+$/.test(s)) return Math.min(100, Math.max(0, parseInt(s, 10)))
+        const fv = parseFloat(s)
+        if (!Number.isNaN(fv)) {
+            if (fv >= 0 && fv <= 1) return Math.min(100, Math.max(0, Math.round(fv * 100)))
+            return Math.min(100, Math.max(0, Math.round(fv)))
+        }
+        const bucket: Record<string, number> = {
+            高: 82,
+            中: 62,
+            低: 42,
+            high: 82,
+            medium: 62,
+            mid: 62,
+            low: 42,
+        }
+        const k = s.toLowerCase()
+        if (bucket[s] !== undefined) return bucket[s]
+        if (bucket[k] !== undefined) return bucket[k]
+    }
+    return fallbackConfidenceFromDirection(direction)
+}
+
 /**
  * Extract the structured verdict embedded by the agent as an HTML comment.
- * Format: <!-- VERDICT: {"direction": "...", "reason": "..."} -->
+ * Format: <!-- VERDICT: {"direction": "...", "reason": "...", "confidence": 72} -->
  */
 export function extractVerdict(text?: string | null): Verdict | null {
     if (!text) return null
-    const m = text.match(/<!--\s*VERDICT:\s*(\{[^>]+\})\s*-->/)
+    const m = text.match(/<!--\s*VERDICT:\s*(\{[\s\S]*?\})\s*-->/i)
     if (!m) return null
     try {
-        const parsed = JSON.parse(m[1]) as { direction?: string; reason?: string }
+        const rawJson = m[1].trim().replace(/\n/g, ' ').replace(/\r/g, ' ')
+        const parsed = JSON.parse(rawJson) as { direction?: string; reason?: string; confidence?: unknown }
         if (!parsed.direction || !parsed.reason) return null
         const direction = DIRECTION_ALIAS[parsed.direction.toUpperCase()] ?? parsed.direction
-        return { direction, reason: parsed.reason.trim().slice(0, 42) }
+        const confidence = coerceVerdictConfidence(parsed.confidence, direction)
+        return { direction, reason: parsed.reason.trim().slice(0, 42), confidence }
     } catch {
         return null
     }

@@ -3,7 +3,9 @@ import time
 import threading
 import contextvars
 from datetime import datetime, timedelta
+from typing import Callable
 
+import numpy as np
 import pandas as pd
 from stockstats import wrap
 
@@ -44,8 +46,8 @@ class _AkshareLock:
     - 僵尸线程最终退出 ``with`` 块时不会 double-release（已被回收）
     """
 
-    ACQUIRE_TIMEOUT = 60   # 等待 slot 的最大秒数
-    STALE_TIMEOUT = 120    # 单次 akshare 调用不应超过 2 分钟，超过视为僵尸
+    ACQUIRE_TIMEOUT = 20   # 等待 slot 的最大秒数（原 60s：等锁过久会占满 FastAPI 线程池 → 前端 fetch 超时）
+    STALE_TIMEOUT = 90    # 单次 akshare 调用超过 90s 视为僵尸回收（原 120s：更快释放被网络挂起的锁槽）
 
     def __init__(self, total: int = 5, scheduled_max: int = 3):
         self._total = threading.Semaphore(total)
@@ -118,6 +120,659 @@ class _AkshareLock:
 
 
 AKSHARE_CALL_LOCK = _AkshareLock(total=5, scheduled_max=3)
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    if name in {
+        "ConnectionError",
+        "Timeout",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ChunkedEncodingError",
+        "RemoteDisconnected",
+        "ProtocolError",
+    }:
+        return True
+    msg = str(exc)
+    return any(
+        token in msg
+        for token in (
+            "Connection aborted",
+            "Remote end closed",
+            "timed out",
+            "Connection reset",
+        )
+    )
+
+
+def fetch_industry_board_fund_flow_df(ak_module) -> pd.DataFrame:
+    """Fetch industry board fund-flow rankings with akshare API version fallbacks."""
+    api_calls: list[tuple[str, Callable[[], pd.DataFrame]]] = []
+    legacy = getattr(ak_module, "stock_board_industry_fund_flow_em", None)
+    if legacy is not None:
+        api_calls.append(("stock_board_industry_fund_flow_em", lambda: legacy(symbol="今日")))
+    rank = getattr(ak_module, "stock_sector_fund_flow_rank", None)
+    if rank is not None:
+        api_calls.append(
+            (
+                "stock_sector_fund_flow_rank",
+                lambda: rank(indicator="今日", sector_type="行业资金流"),
+            )
+        )
+    if not api_calls:
+        raise AttributeError(
+            "akshare has no supported industry board fund-flow API "
+            "(stock_board_industry_fund_flow_em / stock_sector_fund_flow_rank)"
+        )
+
+    last_exc: Exception | None = None
+    with AKSHARE_CALL_LOCK:
+        for _api_name, call in api_calls:
+            for attempt in range(3):
+                try:
+                    return call()
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 2 and _is_transient_network_error(exc):
+                        time.sleep(0.6 * (2**attempt))
+                        continue
+                    break
+    raise last_exc  # type: ignore[misc]
+
+
+def fetch_board_fund_flow_df(*, ak_module=None) -> pd.DataFrame:
+    """Fetch industry board fund-flow, preferring Sina when Eastmoney is unreachable."""
+    try:
+        from .cn_sina_moneyflow_provider import fetch_sina_industry_board_fund_flow_df
+
+        return fetch_sina_industry_board_fund_flow_df()
+    except Exception:
+        pass
+    module = ak_module if ak_module is not None else __import__("akshare", fromlist=["ak"]).ak
+    return fetch_industry_board_fund_flow_df(module)
+
+
+def format_board_fund_flow_ranking(df: pd.DataFrame, *, snapshot_date: str | None = None) -> str:
+    """Format board fund-flow dataframe with a freshness-parseable anchor date."""
+    if df is None or df.empty:
+        return "今日板块资金流向数据暂不可用。"
+    sort_col = next(
+        (c for c in df.columns if "主力" in c and "净" in c and "额" in c and "今日" in c),
+        next((c for c in df.columns if "主力" in c and "净" in c and "额" in c), None),
+    )
+    df_sorted = df.sort_values(sort_col, ascending=False).reset_index(drop=True) if sort_col else df.reset_index(drop=True)
+    df_sorted.insert(0, "排名", range(1, len(df_sorted) + 1))
+    total = len(df_sorted)
+    anchor = snapshot_date or cn_today_str()
+    result = df_sorted.head(10).to_string(index=False)
+    return f"板块资金流向排名（数据截止 {anchor}，共{total}个板块，前10名）：\n{result}"
+
+
+# ── 板块数据（市场主线洞察 M1）：涨幅榜 / 历史 / 成分股 / 资金流 ──────────
+# 所有 fetch 函数统一做两件事：
+#   1. 用 AKSHARE_CALL_LOCK 串行化 + 对瞬时网络错误重试（与既有模式一致）；
+#   2. 把 akshare 各版本不稳定的中文列名归一化为稳定的英文列名，
+#      供规则层（mainline_scoring.py）与格式化函数消费，屏蔽上游 schema 变化。
+
+_BOARD_SPOT_API = {
+    "industry": "stock_board_industry_spot_em",
+    "concept": "stock_board_concept_spot_em",
+}
+_BOARD_HIST_API = {
+    "industry": "stock_board_industry_hist_em",
+    "concept": "stock_board_concept_hist_em",
+}
+_BOARD_CONS_API = {
+    "industry": "stock_board_industry_cons_em",
+    "concept": "stock_board_concept_cons_em",
+}
+_BOARD_FUND_FLOW_SECTOR_TYPE = {
+    "industry": "行业资金流",
+    "concept": "概念资金流",
+}
+
+
+def _pick_col(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    """Return the first existing column among candidates, or None."""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def _normalize_board_spot_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize board spot DataFrame to stable columns.
+
+    兼容多源列名：
+    - 东方财富 spot_em：板块名称/板块代码/涨跌幅/换手率/上涨家数/下跌家数/领涨股票...
+    - 同花顺 summary_ths：板块/涨跌幅/净流入/上涨家数/下跌家数/领涨股/领涨股-涨跌幅
+    - 新浪 sector_spot：板块/涨跌幅/平均价格/股票名称(领涨股)/个股-涨跌幅...
+
+    Output columns: name, code, latest, chg_1d, total_mv, turnover,
+    up_count, down_count, leader, leader_chg, net_inflow（缺失列填 NaN）。
+    """
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+    mapping = {
+        "name": ("板块名称", "行业", "概念", "名称", "板块"),
+        "code": ("板块代码", "行业代码", "概念代码", "代码", "label"),
+        "latest": ("最新价", "均价", "平均价格"),
+        "chg_1d": ("涨跌幅",),
+        "total_mv": ("总市值",),
+        "turnover": ("换手率",),
+        "up_count": ("上涨家数",),
+        "down_count": ("下跌家数",),
+        "leader": ("领涨股票", "领涨股", "股票名称"),
+        "leader_chg": ("领涨股票-涨跌幅", "领涨股-涨跌幅", "个股-涨跌幅"),
+        "net_inflow": ("净流入", "今日主力净流入-净额"),
+    }
+    out = pd.DataFrame(index=range(len(raw_df)))
+    for target, candidates in mapping.items():
+        col = _pick_col(raw_df, candidates)
+        if col is not None:
+            out[target] = pd.to_numeric(raw_df[col], errors="coerce") if target not in ("name", "code", "leader") else raw_df[col].astype(str)
+        else:
+            out[target] = np.nan if target not in ("name", "code", "leader") else ""
+    for num_col in ("latest", "chg_1d", "total_mv", "turnover", "up_count", "down_count", "leader_chg", "net_inflow"):
+        if num_col in out.columns:
+            out[num_col] = pd.to_numeric(out[num_col], errors="coerce")
+    return out.reset_index(drop=True)
+
+
+def _normalize_board_hist_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize board history DataFrame (板块历史行情) to stable columns.
+
+    兼容多源列名：
+    - 东方财富 hist_em：日期/开盘/收盘/最高/最低/涨跌幅/成交量/成交额/换手率
+    - 同花顺 index_ths：日期/开盘价/收盘价/最高价/最低价/涨跌幅/成交量/成交额/换手率
+
+    Output columns: date, open, close, high, low, pct_chg, volume, amount, turnover.
+    """
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+    mapping = {
+        "date": ("日期", "date"),
+        "open": ("开盘", "开盘价"),
+        "close": ("收盘", "收盘价", "close"),
+        "high": ("最高", "最高价"),
+        "low": ("最低", "最低价"),
+        "pct_chg": ("涨跌幅",),
+        "volume": ("成交量",),
+        "amount": ("成交额",),
+        "turnover": ("换手率",),
+    }
+    out = pd.DataFrame(index=range(len(raw_df)))
+    for target, candidates in mapping.items():
+        col = _pick_col(raw_df, candidates)
+        if col is not None:
+            out[target] = raw_df[col]
+        else:
+            out[target] = np.nan
+    for num_col in ("open", "close", "high", "low", "pct_chg", "volume", "amount", "turnover"):
+        if num_col in out.columns:
+            out[num_col] = pd.to_numeric(out[num_col], errors="coerce")
+    return out.reset_index(drop=True)
+
+
+def _normalize_board_cons_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize EM board constituent DataFrame (板块成分股) to stable columns.
+
+    Output columns: code, name, latest, chg_1d, turnover, total_mv, float_mv,
+    pe, pb, chg_60d, chg_ytd, amount.
+    """
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+    mapping = {
+        "code": ("代码",),
+        "name": ("名称",),
+        "latest": ("最新价",),
+        "chg_1d": ("涨跌幅",),
+        "turnover": ("换手率",),
+        "total_mv": ("总市值",),
+        "float_mv": ("流通市值",),
+        "pe": ("市盈率-动态", "市盈率"),
+        "pb": ("市净率",),
+        "chg_60d": ("60日涨跌幅",),
+        "chg_ytd": ("年初至今涨跌幅",),
+        "amount": ("成交额",),
+    }
+    out = pd.DataFrame()
+    for target, candidates in mapping.items():
+        col = _pick_col(raw_df, candidates)
+        if col is not None:
+            out[target] = raw_df[col]
+    for num_col in ("latest", "chg_1d", "turnover", "total_mv", "float_mv", "pe", "pb", "chg_60d", "chg_ytd", "amount"):
+        if num_col in out.columns:
+            out[num_col] = pd.to_numeric(out[num_col], errors="coerce")
+    return out.reset_index(drop=True)
+
+
+def _normalize_fund_flow_rank_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize EM sector fund-flow rank DataFrame (行业/概念资金流排行) to stable columns.
+
+    Output columns: name, price_idx, chg_1d, inflow, outflow, net_inflow,
+    company_count, leader, leader_chg.
+    """
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+    mapping = {
+        "name": ("行业", "概念", "名称"),
+        "price_idx": ("行业指数", "概念指数"),
+        "chg_1d": ("行业-涨跌幅", "概念-涨跌幅", "涨跌幅"),
+        "inflow": ("流入资金", "主力净流入-流入"),
+        "outflow": ("流出资金", "主力净流入-流出"),
+        "net_inflow": ("净额", "主力净流入-净额"),
+        "company_count": ("公司家数",),
+        "leader": ("领涨股", "领涨股票"),
+        "leader_chg": ("领涨股-涨跌幅", "领涨股票-涨跌幅"),
+    }
+    out = pd.DataFrame()
+    for target, candidates in mapping.items():
+        col = _pick_col(raw_df, candidates)
+        if col is not None:
+            out[target] = raw_df[col]
+    for num_col in ("price_idx", "chg_1d", "inflow", "outflow", "net_inflow", "company_count", "leader_chg"):
+        if num_col in out.columns:
+            out[num_col] = pd.to_numeric(out[num_col], errors="coerce")
+    return out.reset_index(drop=True)
+
+
+def _call_akshare_retry(func: Callable[[], pd.DataFrame], *, api_name: str) -> pd.DataFrame:
+    """Call an akshare function under the global lock with transient-error retry."""
+    last_exc: Exception | None = None
+    with AKSHARE_CALL_LOCK:
+        for attempt in range(3):
+            try:
+                return func()
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2 and _is_transient_network_error(exc):
+                    time.sleep(0.6 * (2**attempt))
+                    continue
+                raise
+    raise last_exc  # type: ignore[misc]
+
+
+def fetch_board_spot_df(ak_module, sector_type: str = "industry") -> pd.DataFrame:
+    """Fetch EM board spot rankings (industry|concept), normalized to stable columns."""
+    api_name = _BOARD_SPOT_API.get(sector_type)
+    if api_name is None:
+        raise ValueError(f"Unknown sector_type={sector_type!r}, expected 'industry' or 'concept'")
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+    raw = _call_akshare_retry(func, api_name=api_name)
+    return _normalize_board_spot_df(raw)
+
+
+def fetch_board_hist_df(
+    ak_module,
+    board_name: str,
+    sector_type: str = "industry",
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> pd.DataFrame:
+    """Fetch board history (板块历史行情) by board NAME, normalized.
+
+    akshare 的板块历史接口以板块名（symbol）而非代码寻址；board_name 如 "小金属"。
+    """
+    api_name = _BOARD_HIST_API.get(sector_type)
+    if api_name is None:
+        raise ValueError(f"Unknown sector_type={sector_type!r}")
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+    end = (end_date or cn_today_str()).replace("-", "")
+    if start_date:
+        start = start_date.replace("-", "")
+    else:
+        # 默认以 end 为锚向前推 180 个自然日（约 120+ 个交易日，覆盖 60 日历史需求）
+        end_dt = datetime.strptime(end, "%Y%m%d")
+        start = (end_dt - timedelta(days=180)).strftime("%Y%m%d")
+
+    def _call():
+        try:
+            return func(symbol=board_name, start_date=start, end_date=end, period="日k", adjust="")
+        except TypeError:
+            # 旧版签名：位置参数 (symbol, start_date, end_date)
+            return func(board_name, start, end)
+
+    raw = _call_akshare_retry(_call, api_name=api_name)
+    return _normalize_board_hist_df(raw)
+
+
+def fetch_board_cons_df(ak_module, board_name: str, sector_type: str = "industry") -> pd.DataFrame:
+    """Fetch board constituents (板块成分股) by board NAME, normalized."""
+    api_name = _BOARD_CONS_API.get(sector_type)
+    if api_name is None:
+        raise ValueError(f"Unknown sector_type={sector_type!r}")
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+
+    def _call():
+        try:
+            return func(symbol=board_name)
+        except TypeError:
+            return func(board_name)
+
+    raw = _call_akshare_retry(_call, api_name=api_name)
+    return _normalize_board_cons_df(raw)
+
+
+def fetch_sector_fund_flow_rank_df(
+    ak_module, sector_type: str = "industry", period: str = "1d"
+) -> pd.DataFrame:
+    """Fetch EM sector fund-flow rank (行业|概念, 今日|5日), normalized.
+
+    period: '1d' | '3d' | '5d' | '10d'（akshare indicator 参数：今日/3日/5日/10日）。
+    """
+    api_name = "stock_sector_fund_flow_rank"
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError("akshare has no supported API: stock_sector_fund_flow_rank")
+    indicator = {"1d": "今日", "3d": "3日", "5d": "5日", "10d": "10日"}.get(period, "今日")
+    sector_label = _BOARD_FUND_FLOW_SECTOR_TYPE.get(sector_type)
+    if sector_label is None:
+        raise ValueError(f"Unknown sector_type={sector_type!r}")
+
+    def _call():
+        return func(indicator=indicator, sector_type=sector_label)
+
+    raw = _call_akshare_retry(_call, api_name=api_name)
+    return _normalize_fund_flow_rank_df(raw)
+
+
+# ── 多源兜底（数据稳定性）：东财 push2 不稳时切同花顺/新浪 ──────────
+
+
+def fetch_ths_industry_summary_df(ak_module) -> pd.DataFrame:
+    """Fetch THS industry board summary (同花顺行业板块汇总，90 个板块)，归一化。
+
+    列：板块/涨跌幅/净流入/上涨家数/下跌家数/领涨股/领涨股-涨跌幅 —— 与东财 spot 兼容。
+    """
+    api_name = "stock_board_industry_summary_ths"
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+    raw = _call_akshare_retry(func, api_name=api_name)
+    return _normalize_board_spot_df(raw)
+
+
+def fetch_sina_sector_spot_df(ak_module) -> pd.DataFrame:
+    """Fetch Sina industry sector spot (新浪行业板块，约 49 个板块)，归一化。"""
+    api_name = "stock_sector_spot"
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+
+    def _call():
+        return func(indicator="新浪行业")
+
+    raw = _call_akshare_retry(_call, api_name=api_name)
+    return _normalize_board_spot_df(raw)
+
+
+def fetch_board_spot_df_chain(ak_module, sector_type: str = "industry") -> tuple[pd.DataFrame, str]:
+    """多源板块涨幅榜链：东财(直连 push2delay 优先 → akshare) → 同花顺(行业) → 新浪(行业)。
+
+    返回 (归一化 df, source)。source ∈ {"em", "ths", "sina"}。
+    - industry：em → ths_summary → sina_sector
+    - concept：em（直连 push2delay 可用；同花顺/新浪无全量概念涨幅榜，失败抛错由调用方降级）
+    注：东财 push2 域名在本网络被重置，akshare spot_em 常失败；直连 push2delay 0.2s 可靠。
+    """
+    if sector_type not in ("industry", "concept"):
+        raise ValueError(f"Unknown sector_type={sector_type!r}")
+    # 1) 东财直连（push2delay）
+    try:
+        from .cn_eastmoney_direct import fetch_em_board_spot_direct
+
+        df = fetch_em_board_spot_direct(sector_type)
+        if df is not None and not df.empty:
+            return df, "em"
+    except Exception:
+        pass
+    # 2) akshare 东财（push2，可能被网络重置）
+    try:
+        return fetch_board_spot_df(ak_module, sector_type), "em"
+    except Exception:
+        if sector_type != "industry":
+            raise
+    # 3) 同花顺行业汇总
+    try:
+        return fetch_ths_industry_summary_df(ak_module), "ths"
+    except Exception:
+        pass
+    # 4) 新浪行业
+    try:
+        return fetch_sina_sector_spot_df(ak_module), "sina"
+    except Exception as exc:
+        raise RuntimeError("所有板块涨幅榜源均不可用（em/ths/sina）") from exc
+
+
+def fetch_ths_board_index_df(
+    ak_module, board_name: str, sector_type: str = "industry"
+) -> pd.DataFrame:
+    """Fetch THS board index daily history (同花顺板块指数日K)，归一化。
+
+    用 THS 板块名（与 summary_ths 的板块名一致）取指数日K，用于计算 5/20 日涨幅。
+    """
+    api_name = {
+        "industry": "stock_board_industry_index_ths",
+        "concept": "stock_board_concept_index_ths",
+    }.get(sector_type)
+    if api_name is None:
+        raise ValueError(f"Unknown sector_type={sector_type!r}")
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+
+    def _call():
+        try:
+            return func(symbol=board_name)
+        except TypeError:
+            return func(board_name)
+
+    raw = _call_akshare_retry(_call, api_name=api_name)
+    return _normalize_board_hist_df(raw)
+
+
+def fetch_market_breadth_df(ak_module) -> dict:
+    """Fetch market breadth (涨跌家数) via Sina full-market snapshot.
+
+    东财全市场快照在本网络不稳定，改用新浪全市场（约 5500 行，单次约 20s，调用方需 TTL 缓存）。
+    返回 {"up": n, "down": n, "flat": n, "total": n, "as_of": iso}。
+    """
+    api_name = "stock_zh_a_spot"
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+    raw = _call_akshare_retry(func, api_name=api_name)
+    if raw is None or raw.empty:
+        return {"up": 0, "down": 0, "flat": 0, "total": 0, "as_of": None}
+    chg_col = next((c for c in ("涨跌幅", "changepercent") if c in raw.columns), None)
+    if chg_col is None:
+        return {"up": 0, "down": 0, "flat": 0, "total": len(raw), "as_of": None}
+    chg = pd.to_numeric(raw[chg_col], errors="coerce").dropna()
+    ts_col = next((c for c in ("时间戳", "timestamp") if c in raw.columns), None)
+    as_of = str(raw[ts_col].iloc[-1]) if ts_col is not None and len(raw) else None
+    return {
+        "up": int((chg > 0).sum()),
+        "down": int((chg < 0).sum()),
+        "flat": int((chg == 0).sum()),
+        "total": int(len(chg)),
+        "as_of": as_of,
+    }
+
+
+def fetch_zt_industry_heat_df(ak_module, date: str) -> pd.DataFrame:
+    """Fetch limit-up pool aggregated by industry (涨停池按所属行业聚合)。
+
+    东财涨停池可用时，按"所属行业"聚合涨停家数/最高连板/连板>=3 家数，
+    作为短线题材热度的真实代理（东财概念涨幅榜不可用时的降级信号）。
+    Output columns: industry, zt_count, max_lianban, lianban_ge3, leaders.
+    """
+    api_name = "stock_zt_pool_em"
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+    raw = _call_akshare_retry(
+        lambda: func(date=date.replace("-", "")), api_name=api_name
+    )
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    ind_col = next((c for c in ("所属行业", "行业") if c in raw.columns), None)
+    lb_col = next((c for c in ("连板数", "连板") if c in raw.columns), None)
+    if ind_col is None:
+        return pd.DataFrame()
+    df = raw.copy()
+    df["_industry"] = df[ind_col].astype(str).str.strip()
+    df["_lianban"] = pd.to_numeric(df[lb_col], errors="coerce") if lb_col else 0
+    agg = (
+        df.groupby("_industry")
+        .agg(
+            zt_count=("_lianban", "size"),
+            max_lianban=("_lianban", "max"),
+            lianban_ge3=("_lianban", lambda s: int((s >= 3).sum())),
+            leaders=("名称", lambda s: "、".join(s.head(3))),
+        )
+        .reset_index()
+        .rename(columns={"_industry": "industry"})
+    )
+    agg["max_lianban"] = agg["max_lianban"].fillna(0).astype(int)
+    return agg.sort_values(["zt_count", "max_lianban"], ascending=False).reset_index(drop=True)
+
+
+def fetch_zt_pool_rows_df(ak_module, date: str) -> pd.DataFrame:
+    """Fetch limit-up pool row-level data (涨停池明细行)，归一化。
+
+    东财涨停池（稳定可用）按代码/名称/连板数/所属行业/封板资金/炸板次数等输出，
+    作为主线选股的候选池（东财板块成分股不可用时的降级/补充）。
+    Output columns: code, name, chg_1d, latest, turnover, amount, seal_amount,
+    lianban, first_seal, last_seal, zha_ban, industry, zt_status.
+    """
+    api_name = "stock_zt_pool_em"
+    func = getattr(ak_module, api_name, None)
+    if func is None:
+        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+    raw = _call_akshare_retry(
+        lambda: func(date=date.replace("-", "")), api_name=api_name
+    )
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    mapping = {
+        "code": ("代码",),
+        "name": ("名称",),
+        "chg_1d": ("涨跌幅",),
+        "latest": ("最新价",),
+        "turnover": ("换手率",),
+        "amount": ("成交额",),
+        "seal_amount": ("封板资金",),
+        "lianban": ("连板数",),
+        "first_seal": ("首次封板时间",),
+        "last_seal": ("最后封板时间",),
+        "zha_ban": ("炸板次数",),
+        "industry": ("所属行业",),
+        "zt_status": ("涨停统计",),
+    }
+    out = pd.DataFrame(index=range(len(raw)))
+    for target, candidates in mapping.items():
+        col = _pick_col(raw, candidates)
+        if col is not None:
+            out[target] = raw[col]
+        else:
+            out[target] = "" if target in ("code", "name", "first_seal", "last_seal", "industry", "zt_status") else np.nan
+    for num_col in ("chg_1d", "latest", "turnover", "amount", "seal_amount", "lianban", "zha_ban"):
+        if num_col in out.columns:
+            out[num_col] = pd.to_numeric(out[num_col], errors="coerce")
+    out["code"] = out["code"].astype(str).str.strip()
+    out["name"] = out["name"].astype(str).str.strip()
+    out["industry"] = out["industry"].astype(str).str.strip()
+    return out.reset_index(drop=True)
+
+
+def _normalize_sina_flow_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Sina industry fund-flow df to the fund-flow-rank schema.
+
+    Sina columns: 名称/今日涨跌幅/今日主力净流入-净额/今日主力净流入-净占比
+    Output columns: name, chg_1d, net_inflow（net_inflow 单位=亿元）。
+    """
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame(index=range(len(raw_df)))
+    name_col = _pick_col(raw_df, ("名称",))
+    chg_col = _pick_col(raw_df, ("今日涨跌幅",))
+    net_col = _pick_col(raw_df, ("今日主力净流入-净额",))
+    out["name"] = raw_df[name_col].astype(str) if name_col else ""
+    out["chg_1d"] = pd.to_numeric(raw_df[chg_col], errors="coerce") if chg_col else np.nan
+    out["net_inflow"] = pd.to_numeric(raw_df[net_col], errors="coerce") if net_col else np.nan
+    return out.reset_index(drop=True)
+
+
+def format_board_spot_ranking(
+    df: pd.DataFrame, *, sector_type: str = "industry", top_n: int = 20, snapshot_date: str | None = None
+) -> str:
+    """Format board spot ranking (涨幅榜) as a markdown-friendly table."""
+    label = "行业" if sector_type == "industry" else "概念"
+    if df is None or df.empty:
+        return f"{label}板块涨幅榜数据暂不可用。"
+    cols = [
+        c for c in ("name", "chg_1d", "turnover", "up_count", "down_count", "leader", "leader_chg")
+        if c in df.columns
+    ]
+    sub = df.sort_values("chg_1d", ascending=False).head(top_n)[cols].reset_index(drop=True)
+    sub.insert(0, "排名", range(1, len(sub) + 1))
+    anchor = snapshot_date or cn_today_str()
+    return f"{label}板块涨幅榜 Top{top_n}（数据截止 {anchor}，共{len(df)}个板块）：\n{sub.to_string(index=False)}"
+
+
+def format_board_rank_ranking(
+    df: pd.DataFrame, *, sector_type: str = "industry", period: str = "1d", top_n: int = 20
+) -> str:
+    """Format sector fund-flow rank (净流入排行) as a markdown-friendly table."""
+    label = "行业" if sector_type == "industry" else "概念"
+    period_label = {"1d": "今日", "3d": "3日", "5d": "5日", "10d": "10日"}.get(period, "今日")
+    if df is None or df.empty:
+        return f"{label}板块{period_label}资金流排行数据暂不可用。"
+    if "net_inflow" in df.columns:
+        df = df.sort_values("net_inflow", ascending=False).reset_index(drop=True)
+    cols = [
+        c for c in ("name", "chg_1d", "net_inflow", "inflow", "outflow", "leader")
+        if c in df.columns
+    ]
+    sub = df.head(top_n)[cols].reset_index(drop=True)
+    sub.insert(0, "排名", range(1, len(sub) + 1))
+    return f"{label}板块{period_label}资金净流入 Top{top_n}：\n{sub.to_string(index=False)}"
+
+
+def format_board_hist_table(
+    df: pd.DataFrame, board_name: str, *, sector_type: str = "industry", recent_days: int = 60
+) -> str:
+    """Format board history (近 N 日涨跌幅) as a markdown-friendly table."""
+    label = "行业" if sector_type == "industry" else "概念"
+    if df is None or df.empty:
+        return f"{label}板块「{board_name}」历史行情数据暂不可用。"
+    cols = [c for c in ("date", "close", "pct_chg", "amount", "turnover") if c in df.columns]
+    sub = df.tail(recent_days)[cols].reset_index(drop=True)
+    return f"{label}板块「{board_name}」近{len(sub)}日行情：\n{sub.to_string(index=False)}"
+
+
+def format_board_cons_table(
+    df: pd.DataFrame, board_name: str, *, sector_type: str = "industry", top_n: int = 30
+) -> str:
+    """Format board constituents (成分股) as a markdown-friendly table."""
+    label = "行业" if sector_type == "industry" else "概念"
+    if df is None or df.empty:
+        return f"{label}板块「{board_name}」成分股数据暂不可用。"
+    cols = [
+        c for c in ("code", "name", "chg_1d", "turnover", "total_mv", "pe", "pb")
+        if c in df.columns
+    ]
+    sub = df.sort_values("chg_1d", ascending=False).head(top_n)[cols].reset_index(drop=True)
+    sub.insert(0, "排名", range(1, len(sub) + 1))
+    return f"{label}板块「{board_name}」成分股 Top{top_n}（按当日涨幅）：\n{sub.to_string(index=False)}"
 
 
 class CnAkshareProvider(BaseMarketDataProvider):
@@ -268,6 +923,23 @@ class CnAkshareProvider(BaseMarketDataProvider):
         rows = min(max_rows, len(df))
         cols = min(max_cols, len(df.columns))
         return df.head(rows).iloc[:, :cols]
+
+    @staticmethod
+    def _latest_disclosure_period_line(df: pd.DataFrame) -> str:
+        from tradingagents.dataflows.freshness.parser import yyyymmdd_to_disclosure_period
+
+        if df is None or df.empty:
+            return ""
+        if "报告日" in df.columns:
+            period = yyyymmdd_to_disclosure_period(str(df["报告日"].iloc[0]))
+            if period:
+                return f"最新披露期: {period}\n\n"
+        yyyymmdd_cols = [str(c) for c in df.columns if re.fullmatch(r"20\d{6}", str(c))]
+        if yyyymmdd_cols:
+            period = yyyymmdd_to_disclosure_period(max(yyyymmdd_cols))
+            if period:
+                return f"最新披露期: {period}\n\n"
+        return ""
 
     def _fetch_hist_df(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         with AKSHARE_CALL_LOCK:
@@ -525,7 +1197,11 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 metric_cols = [c for c in abstract_df.columns if c not in ("选项", "指标")]
                 top_cols = metric_cols[:8]
                 cols = [c for c in ("选项", "指标") if c in abstract_df.columns] + top_cols
-                parts.append(self._shrink_table(abstract_df[cols], max_rows=20, max_cols=10).to_markdown(index=False))
+                abstract_slice = abstract_df[cols]
+                period_line = self._latest_disclosure_period_line(abstract_slice)
+                if period_line:
+                    parts.append(period_line.rstrip())
+                parts.append(self._shrink_table(abstract_slice, max_rows=20, max_cols=10).to_markdown(index=False))
 
             if len(parts) > 1:
                 return "\n\n".join(parts)
@@ -544,7 +1220,9 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 df = ak.stock_financial_report_sina(stock=symbol, symbol=report_name)
                 if df is None or df.empty:
                     raise ValueError("empty dataframe")
-                return self._shrink_table(df, max_rows=12, max_cols=18).to_markdown(index=False)
+                period_line = self._latest_disclosure_period_line(df)
+                body = self._shrink_table(df, max_rows=12, max_cols=18).to_markdown(index=False)
+                return f"{period_line}{body}"
             except Exception as exc:
                 errors.append(f"stock_financial_report_sina: {type(exc).__name__}")
 
@@ -857,22 +1535,42 @@ class CnAkshareProvider(BaseMarketDataProvider):
     def get_board_fund_flow(self) -> str:
         """获取行业板块资金流向排名。"""
         try:
-            ak = self._ak()
-            with AKSHARE_CALL_LOCK:
-                df = ak.stock_board_industry_fund_flow_em(symbol="今日")
-            if df is None or df.empty:
-                return "今日板块资金流向数据暂不可用。"
-            sort_col = "今日主力净流入-净额"
-            if sort_col in df.columns:
-                df_sorted = df.sort_values(sort_col, ascending=False).reset_index(drop=True)
-            else:
-                df_sorted = df.reset_index(drop=True)
-            df_sorted.insert(0, "排名", range(1, len(df_sorted) + 1))
-            total = len(df_sorted)
-            result = df_sorted.head(10).to_string(index=False)
-            return f"板块资金流向排名（共{total}个板块，前10名）：\n{result}"
+            df = fetch_board_fund_flow_df(ak_module=self._ak())
+            return format_board_fund_flow_ranking(df)
         except Exception as exc:
             return f"板块资金流向数据获取失败：{type(exc).__name__}: {exc}"
+
+    def get_board_spot(self, sector_type: str = "industry") -> str:
+        """获取板块涨幅榜（industry=行业板块 / concept=概念板块）。"""
+        try:
+            df = fetch_board_spot_df(self._ak(), sector_type)
+            return format_board_spot_ranking(df, sector_type=sector_type)
+        except Exception as exc:
+            return f"板块涨幅榜获取失败：{type(exc).__name__}: {exc}"
+
+    def get_board_rank(self, sector_type: str = "industry", period: str = "1d") -> str:
+        """获取板块资金流排行（industry|concept，period: 1d|3d|5d|10d）。"""
+        try:
+            df = fetch_sector_fund_flow_rank_df(self._ak(), sector_type, period)
+            return format_board_rank_ranking(df, sector_type=sector_type, period=period)
+        except Exception as exc:
+            return f"板块资金流排行获取失败：{type(exc).__name__}: {exc}"
+
+    def get_board_hist(self, board_name: str, sector_type: str = "industry") -> str:
+        """获取板块历史行情（近60日），用于判断主线持续性。board_name 为板块名。"""
+        try:
+            df = fetch_board_hist_df(self._ak(), board_name, sector_type)
+            return format_board_hist_table(df, board_name, sector_type=sector_type)
+        except Exception as exc:
+            return f"板块历史行情获取失败：{type(exc).__name__}: {exc}"
+
+    def get_board_cons(self, board_name: str, sector_type: str = "industry") -> str:
+        """获取板块成分股列表，用于主线内选股。board_name 为板块名。"""
+        try:
+            df = fetch_board_cons_df(self._ak(), board_name, sector_type)
+            return format_board_cons_table(df, board_name, sector_type=sector_type)
+        except Exception as exc:
+            return f"板块成分股获取失败：{type(exc).__name__}: {exc}"
 
     def get_individual_fund_flow(self, symbol: str) -> str:
         """获取个股近期主力资金净流向。"""
@@ -881,8 +1579,16 @@ class CnAkshareProvider(BaseMarketDataProvider):
             code = self._normalize_symbol(symbol)
             # 沪市：以 5、6、9 开头；其余为深市
             market = "sh" if code[:1] in ("5", "6", "9") else "sz"
-            with AKSHARE_CALL_LOCK:
-                df = ak.stock_individual_fund_flow(stock=code, market=market)
+            for attempt in range(3):
+                try:
+                    with AKSHARE_CALL_LOCK:
+                        df = ak.stock_individual_fund_flow(stock=code, market=market)
+                    break
+                except Exception as exc:
+                    if attempt < 2:
+                        time.sleep(0.6 * (2**attempt))
+                    else:
+                        raise
             if df is None or df.empty:
                 return f"{symbol} 近期主力资金流向数据暂不可用。"
             df_recent = df.tail(5)
@@ -896,7 +1602,35 @@ class CnAkshareProvider(BaseMarketDataProvider):
             ak = self._ak()
             code = self._normalize_symbol(symbol)
             with AKSHARE_CALL_LOCK:
-                df = ak.stock_lhb_detail_em(symbol=code, start_date=date, end_date=date)
+                func = getattr(ak, "stock_lhb_detail_em", None)
+                if func is None:
+                    raise NotImplementedError("akshare.stock_lhb_detail_em not found")
+
+                # akshare 该函数在不同版本间签名变化较多：
+                # - 有的版本使用 (symbol, start_date, end_date)
+                # - 有的版本使用 (symbol, date)
+                # - 有的版本仅接受关键字 (stock=..., start_date=..., end_date=...)
+                # 这里按兼容优先级尝试多种调用方式，避免 TypeError 直接导致数据缺口。
+                last_type_error: TypeError | None = None
+                call_variants = [
+                    lambda: func(code, date, date),
+                    lambda: func(code, date),
+                    lambda: func(symbol=code, start_date=date, end_date=date),
+                    lambda: func(stock=code, start_date=date, end_date=date),
+                    lambda: func(stock=code, date=date),
+                    lambda: func(code),
+                ]
+                df = None
+                for call in call_variants:
+                    try:
+                        df = call()
+                        break
+                    except TypeError as exc:
+                        last_type_error = exc
+                        continue
+
+                if df is None and last_type_error is not None:
+                    raise last_type_error
             if df is None or df.empty:
                 return f"{symbol} 在 {date} 无龙虎榜数据（非异动日属正常）。"
             return f"{symbol} 龙虎榜明细（{date}）：\n{df.head(20).to_string(index=False)}"

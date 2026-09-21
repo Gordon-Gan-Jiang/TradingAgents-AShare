@@ -1,6 +1,7 @@
 # TradingAgents/graph/conditional_logic.py
 
 from tradingagents.agents.utils.agent_states import AgentState
+from tradingagents.agents.utils.critic_config import is_decision_critic_enabled
 from tradingagents.agents.utils.debate_utils import safe_int
 
 
@@ -99,4 +100,6 @@ class ConditionalLogic:
             and safe_int(feedback.get("retry_count", 0), 0) <= safe_int(feedback.get("max_retries", 1), 1)
         ):
             return "Trader"
-        return "END"
+        if not is_decision_critic_enabled():
+            return "END"
+        return "Decision Critic"

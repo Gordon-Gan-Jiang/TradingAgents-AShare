@@ -254,6 +254,10 @@ curl "${TRADINGAGENTS_API_URL:-https://api.510168.xyz}/v1/jobs/{job_id}/result" 
 
 - **沪深 A 股**：中文名称（如 "比亚迪"、"宁德时代"）或代码（`002594.SZ`、`601012.SH`）
 
+## 📎 同仓库其他技能
+
+- **`../stock-analysis-team/`**：基于 yfinance 的快照脚本 + 参考文档；部署本仓库后也可通过 HTTP 调用 `GET /v1/skill/stock-team/yfinance-snapshot` 与 `GET /v1/skill/stock-team/references/{name}`（需登录）。设计见 `docs/stock-analysis-team-integration.md`。
+
 ## 💡 注意事项
 
 - **轮询频率**：每次轮询间隔不低于 15 秒

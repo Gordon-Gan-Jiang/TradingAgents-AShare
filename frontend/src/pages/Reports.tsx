@@ -1,11 +1,16 @@
-import { FileText, Download, Trash2, Search, ChevronLeft, ChevronRight, Loader2, History, Clock3 } from 'lucide-react'
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { FileText, Download, Trash2, Search, ChevronLeft, ChevronRight, Loader2, History, Clock3, Sparkles, Calendar } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import TaskProgressBanner from '@/components/TaskProgressBanner'
+import PromptTemplateSelector from '@/components/PromptTemplateSelector'
 import { api } from '@/services/api'
-import type { Report, ReportDetail } from '@/types'
+import type { ModelProfile, Report, ReportDetail, PromptTemplate } from '@/types'
 import DecisionCard from '@/components/DecisionCard'
+import ConsensusCard from '@/components/ConsensusCard'
 import ReportViewer from '@/components/ReportViewer'
+import { FreshnessBanner, ReportAgeNote } from '@/components/FreshnessBadge'
+import { FRESHNESS_COLUMN_TOOLTIP, REPORT_LIST_TABLE_HEADERS } from '@/components/freshnessListDisplay'
+import { FreshnessStatusCell } from '@/components/FreshnessStatusCell'
 import RiskRadar from '@/components/RiskRadar'
 import KeyMetrics from '@/components/KeyMetrics'
 import { useAuthStore } from '@/stores/authStore'
@@ -21,6 +26,87 @@ const IDLE_PROGRESS: ProgressState = {
     status: 'idle',
     progress: 0,
     detail: null,
+}
+
+function toDateTimeLocalValue(date: Date): string {
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function nowDateTimeLocal(): string {
+    const d = new Date()
+    d.setSeconds(0, 0)
+    return toDateTimeLocalValue(d)
+}
+
+function daysAgoDateTimeLocal(n: number): string {
+    const d = new Date()
+    d.setDate(d.getDate() - n)
+    d.setHours(0, 0, 0, 0)
+    return toDateTimeLocalValue(d)
+}
+
+function toApiStartDateTime(localValue: string): string | undefined {
+    const raw = localValue.trim()
+    if (!raw) return undefined
+    const d = new Date(raw)
+    if (Number.isNaN(d.getTime())) return undefined
+    d.setSeconds(0, 0)
+    return d.toISOString()
+}
+
+function toApiEndDateTime(localValue: string): string | undefined {
+    const raw = localValue.trim()
+    if (!raw) return undefined
+    const d = new Date(raw)
+    if (Number.isNaN(d.getTime())) return undefined
+    d.setSeconds(59, 999)
+    return d.toISOString()
+}
+
+function formatDateTimeLocalLabel(localValue: string): string {
+    const d = new Date(localValue)
+    if (Number.isNaN(d.getTime())) return localValue
+    return d.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    })
+}
+
+function getStoredDefaultAnalysts(): string[] {
+    try {
+        const stored = localStorage.getItem('tradingagents-settings')
+        if (!stored) return ['market', 'social', 'news', 'fundamentals', 'macro', 'smart_money', 'volume_price']
+        const parsed = JSON.parse(stored) as { defaultAnalysts?: string[] }
+        if (Array.isArray(parsed.defaultAnalysts) && parsed.defaultAnalysts.length > 0) {
+            return parsed.defaultAnalysts
+        }
+    } catch { /* ignore */ }
+    return ['market', 'social', 'news', 'fundamentals', 'macro', 'smart_money', 'volume_price']
+}
+
+function reportCanDeepAnalyze(report: Pick<Report, 'status'>): boolean {
+    return report.status !== 'pending' && report.status !== 'running'
+}
+
+const DEEPSEEK_ALLOWED_MODELS = new Set([
+    'deepseek-chat',
+    'deepseek-reasoner',
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
+])
+
+function hostFromUrl(value?: string | null): string {
+    if (!value) return ''
+    try {
+        return new URL(value).hostname.toLowerCase()
+    } catch {
+        return ''
+    }
 }
 
 const parseDecision = (decisionText?: string): { action: 'add' | 'reduce' | 'hold'; label: string } => {
@@ -64,7 +150,7 @@ function ActiveReportStatus({ report }: { report: Report }) {
         : 'text-blue-600 dark:text-blue-300'
     const barCls = isPending
         ? 'from-slate-400 via-slate-500 to-slate-600'
-        : 'from-cyan-500 via-blue-500 to-indigo-500'
+        : 'from-cyan-500 via-blue-500 to-violet-500'
     const queueHint = getQueueHint(report)
 
     return (
@@ -115,7 +201,7 @@ function ActiveDetailStatusCard({ report }: { report: ReportDetail }) {
                         </div>
                         <div className="h-2.5 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
                             <div
-                                className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-blue-500 to-indigo-500 transition-[width] duration-700 ease-out"
+                                className="h-full rounded-full bg-gradient-to-r from-cyan-500 via-blue-500 to-violet-500 transition-[width] duration-700 ease-out"
                                 style={{ width: `${progress}%` }}
                             />
                         </div>
@@ -184,6 +270,11 @@ export default function Reports() {
     setSearchParamsRef.current = setSearchParams
     const PAGE_SIZE = 20
     const [searchQuery, setSearchQuery] = useState('')
+    const [listSearchDebounced, setListSearchDebounced] = useState('')
+    const [filterStartDate, setFilterStartDate] = useState('')
+    const [filterEndDate, setFilterEndDate] = useState('')
+    const [filterModelProfileId, setFilterModelProfileId] = useState('')
+    const [filterFreshnessIssue, setFilterFreshnessIssue] = useState(false)
     const [page, setPage] = useState(0)
     const [reports, setReports] = useState<Report[]>([])
     const [total, setTotal] = useState(0)
@@ -195,8 +286,50 @@ export default function Reports() {
     const [symbolHistory, setSymbolHistory] = useState<Report[]>([])
     const [listProgress, setListProgress] = useState<ProgressState>(IDLE_PROGRESS)
     const [detailProgress, setDetailProgress] = useState<ProgressState>(IDLE_PROGRESS)
+    const [enhancedExporting, setEnhancedExporting] = useState(false)
+    const [selectedIds, setSelectedIds] = useState<string[]>([])
+    const [deepSubmitting, setDeepSubmitting] = useState(false)
+    const [deepAnalyzingId, setDeepAnalyzingId] = useState<string | null>(null)
+    const [promptTemplates, setPromptTemplates] = useState<PromptTemplate[]>([])
+    const [promptTemplatesLoading, setPromptTemplatesLoading] = useState(false)
+    const [selectedTemplateId, setSelectedTemplateId] = useState('')
+    const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([])
+    const [selectedModelProfileId, setSelectedModelProfileId] = useState('')
+    const selectAllCheckboxRef = useRef<HTMLInputElement>(null)
 
     const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+    const eligibleReportsOnPage = useMemo(() => reports.filter(reportCanDeepAnalyze), [reports])
+    const activeDeepTemplates = useMemo(
+        () => promptTemplates.filter(t => t.scope === 'deep_analysis' && t.is_active),
+        [promptTemplates],
+    )
+    const selectedModelProfile = useMemo(
+        () => modelProfiles.find(item => item.id === selectedModelProfileId && item.is_active) || null,
+        [modelProfiles, selectedModelProfileId],
+    )
+    const filterModelProfile = useMemo(
+        () => modelProfiles.find(item => item.id === filterModelProfileId) || null,
+        [filterModelProfileId, modelProfiles],
+    )
+    const selectedModelIncompatibleReason = useMemo(() => {
+        if (!selectedModelProfile) return null
+        const backendUrl = String(selectedModelProfile.backend_url || '').trim()
+        if (!backendUrl) {
+            return '当前模型配置未设置 Base URL，会沿用系统设置端点，可能导致模型与端点不匹配。请先到模型管理补全 Base URL。'
+        }
+        const provider = String(selectedModelProfile.llm_provider || '').trim().toLowerCase()
+        const host = hostFromUrl(backendUrl)
+        if (provider === 'openai' && host === 'api.deepseek.com') {
+            const quick = String(selectedModelProfile.quick_think_llm || '').trim()
+            const deep = String(selectedModelProfile.deep_think_llm || '').trim()
+            const models = [quick, deep].filter(Boolean)
+            const bad = models.find(m => !DEEPSEEK_ALLOWED_MODELS.has(m))
+            if (bad) {
+                return `当前配置包含 ${bad}，与 DeepSeek 端点不兼容。请先到模型管理修正该配置后再发起。`
+            }
+        }
+        return null
+    }, [selectedModelProfile])
 
     useEffect(() => {
         if (listProgress.status !== 'loading') return
@@ -222,6 +355,19 @@ export default function Reports() {
         return () => window.clearInterval(timer)
     }, [detailProgress.status])
 
+    useEffect(() => {
+        const handle = window.setTimeout(() => {
+            const next = searchQuery.trim()
+            setListSearchDebounced(prev => {
+                if (prev !== next) {
+                    setPage(0)
+                }
+                return next
+            })
+        }, 350)
+        return () => window.clearTimeout(handle)
+    }, [searchQuery])
+
     const fetchReports = useCallback(async (targetPage: number, options?: { silent?: boolean }) => {
         const silent = options?.silent === true
         if (!silent) {
@@ -234,7 +380,16 @@ export default function Reports() {
             })
         }
         try {
-            const response = await api.getReports(undefined, targetPage * PAGE_SIZE, PAGE_SIZE)
+            const response = await api.getReports(
+                undefined,
+                targetPage * PAGE_SIZE,
+                PAGE_SIZE,
+                listSearchDebounced || undefined,
+                filterStartDate ? toApiStartDateTime(filterStartDate) : undefined,
+                filterEndDate ? toApiEndDateTime(filterEndDate) : undefined,
+                filterModelProfileId || undefined,
+                filterFreshnessIssue || undefined,
+            )
             setReports(response.reports)
             setTotal(response.total)
             if (!silent) {
@@ -259,9 +414,197 @@ export default function Reports() {
                 setLoading(false)
             }
         }
-    }, [])
+    }, [filterEndDate, filterFreshnessIssue, filterModelProfileId, filterStartDate, listSearchDebounced])
+
+    useEffect(() => {
+        setPage(0)
+    }, [filterStartDate, filterEndDate, filterModelProfileId, filterFreshnessIssue])
 
     useEffect(() => { fetchReports(page) }, [fetchReports, page])
+
+    useEffect(() => {
+        setSelectedIds([])
+    }, [page])
+
+    useEffect(() => {
+        const loadTemplates = async () => {
+            setPromptTemplatesLoading(true)
+            try {
+                const result = await api.listPromptTemplates('deep_analysis')
+                const active = result.templates.filter(item => item.scope === 'deep_analysis' && item.is_active)
+                setPromptTemplates(result.templates)
+                const fallback = result.defaults.manual_deep_analysis || active[0]?.id || ''
+                setSelectedTemplateId(current => {
+                    if (current && active.some(item => item.id === current)) return current
+                    return fallback
+                })
+            } catch (error) {
+                console.error('Failed to load prompt templates:', error)
+            } finally {
+                setPromptTemplatesLoading(false)
+            }
+        }
+        void loadTemplates()
+    }, [])
+
+    useEffect(() => {
+        const loadModelProfiles = async () => {
+            try {
+                const result = await api.listModelProfiles(true)
+                const all = result.profiles || []
+                const active = all.filter(p => p.is_active)
+                setModelProfiles(all)
+                const defaultId = active.find(p => p.is_default)?.id || ''
+                setSelectedModelProfileId(current => {
+                    if (current && active.some(item => item.id === current)) return current
+                    const stored = localStorage.getItem('reports-deep-model-profile-id') || ''
+                    if (stored && active.some(item => item.id === stored)) return stored
+                    return defaultId
+                })
+            } catch (error) {
+                console.error('Failed to load model profiles:', error)
+            }
+        }
+        void loadModelProfiles()
+    }, [])
+
+    useEffect(() => {
+        if (selectedModelProfileId) {
+            localStorage.setItem('reports-deep-model-profile-id', selectedModelProfileId)
+        } else {
+            localStorage.removeItem('reports-deep-model-profile-id')
+        }
+    }, [selectedModelProfileId])
+
+    useEffect(() => {
+        const eligible = eligibleReportsOnPage
+        const selectedEligible = eligible.filter(r => selectedIds.includes(r.id)).length
+        const el = selectAllCheckboxRef.current
+        if (!el) return
+        el.indeterminate = selectedEligible > 0 && selectedEligible < eligible.length
+    }, [eligibleReportsOnPage, selectedIds])
+
+    const queueDeepAnalysis = async (items: Report[]): Promise<{
+        ok: number
+        fail: number
+        skippedDup: number
+        skippedBusy: number
+        errors: string[]
+    }> => {
+        const eligible = items.filter(reportCanDeepAnalyze)
+        const skippedBusy = items.length - eligible.length
+        if (selectedModelIncompatibleReason) {
+            alert(selectedModelIncompatibleReason)
+            return { ok: 0, fail: 0, skippedDup: 0, skippedBusy, errors: [selectedModelIncompatibleReason] }
+        }
+        if (!eligible.length) {
+            return { ok: 0, fail: 0, skippedDup: 0, skippedBusy, errors: [] }
+        }
+        const seenSyms = new Set<string>()
+        const queue: Report[] = []
+        for (const r of eligible) {
+            const sym = r.symbol.trim().toUpperCase()
+            if (seenSyms.has(sym)) continue
+            seenSyms.add(sym)
+            queue.push(r)
+        }
+        const skippedDup = eligible.length - queue.length
+        let ok = 0
+        let fail = 0
+        const errors: string[] = []
+        const analysts = getStoredDefaultAnalysts()
+        for (let i = 0; i < queue.length; i++) {
+            const r = queue[i]
+            try {
+                await api.startAnalysis({
+                    symbol: r.symbol,
+                    selected_analysts: analysts,
+                    prompt_template_id: selectedTemplateId || undefined,
+                    model_profile_id: selectedModelProfileId || undefined,
+                })
+                ok++
+            } catch (e) {
+                fail++
+                errors.push(`${r.symbol}: ${e instanceof Error ? e.message : String(e)}`)
+            }
+            if (i < queue.length - 1) {
+                await new Promise(resolve => window.setTimeout(resolve, 120))
+            }
+        }
+        return { ok, fail, skippedDup, skippedBusy, errors }
+    }
+
+    const toggleReportSelected = (e: React.SyntheticEvent, reportId: string) => {
+        e.stopPropagation()
+        setSelectedIds(prev => (prev.includes(reportId) ? prev.filter(id => id !== reportId) : [...prev, reportId]))
+    }
+
+    const toggleSelectAllEligible = (e: React.SyntheticEvent) => {
+        e.stopPropagation()
+        const eligible = eligibleReportsOnPage
+        const allSelected = eligible.length > 0 && eligible.every(r => selectedIds.includes(r.id))
+        if (allSelected) {
+            const drop = new Set(eligible.map(r => r.id))
+            setSelectedIds(prev => prev.filter(id => !drop.has(id)))
+        } else {
+            setSelectedIds(prev => [...new Set([...prev, ...eligible.map(r => r.id)])])
+        }
+    }
+
+    const handleDeepAnalyzeOne = async (e: React.MouseEvent, report: Report) => {
+        e.stopPropagation()
+        if (!reportCanDeepAnalyze(report)) return
+        setDeepAnalyzingId(report.id)
+        try {
+            const r = await queueDeepAnalysis([report])
+            if (r.skippedBusy) {
+                alert('该报告正在排队或执行中，请稍后再试')
+                return
+            }
+            if (r.fail) {
+                alert(r.errors[0] || '提交失败')
+                return
+            }
+            alert(`已为 ${report.symbol} 提交深度分析任务，新报告生成后将出现在列表中（默认按当前 A 股交易日）。`)
+            void fetchReports(page, { silent: true })
+        } finally {
+            setDeepAnalyzingId(null)
+        }
+    }
+
+    const handleBulkDeepAnalyze = async () => {
+        const picked = reports.filter(r => selectedIds.includes(r.id))
+        if (!picked.length) return
+        const busy = picked.filter(r => !reportCanDeepAnalyze(r))
+        const eligibleCount = picked.length - busy.length
+        if (!eligibleCount) {
+            alert('所选报告均在排队或执行中，请稍后再试')
+            return
+        }
+        const dupSyms = new Set<string>()
+        let uniq = 0
+        for (const r of picked.filter(reportCanDeepAnalyze)) {
+            const s = r.symbol.trim().toUpperCase()
+            if (dupSyms.has(s)) continue
+            dupSyms.add(s)
+            uniq++
+        }
+        const msg = `确定为 ${eligibleCount} 份所选报告发起深度分析吗？${uniq < eligibleCount ? `其中相同标的将只排队 ${uniq} 次。` : ''}`
+        if (!confirm(msg)) return
+        setDeepSubmitting(true)
+        try {
+            const r = await queueDeepAnalysis(picked)
+            const parts = [`成功提交 ${r.ok} 个任务`]
+            if (r.fail) parts.push(`失败 ${r.fail} 个`)
+            if (r.skippedDup) parts.push(`合并重复标的 ${r.skippedDup} 条`)
+            if (r.skippedBusy) parts.push(`跳过进行中 ${r.skippedBusy} 条`)
+            alert(parts.join('；') + (r.errors.length ? `\n\n${r.errors.slice(0, 5).join('\n')}` : ''))
+            setSelectedIds([])
+            void fetchReports(page, { silent: true })
+        } finally {
+            setDeepSubmitting(false)
+        }
+    }
 
     const handleDelete = async (e: React.MouseEvent, reportId: string) => {
         e.stopPropagation()
@@ -270,6 +613,7 @@ export default function Reports() {
         try {
             await api.deleteReport(reportId)
             setReports(prev => prev.filter(r => r.id !== reportId))
+            setSelectedIds(prev => prev.filter(id => id !== reportId))
             setTotal(prev => {
                 const newTotal = prev - 1
                 // Go to prev page if current page is now empty
@@ -346,6 +690,31 @@ export default function Reports() {
         } catch {}
     }
 
+    const exportEnhancedHtml = useCallback(async (report: ReportDetail) => {
+        setEnhancedExporting(true)
+        try {
+            const html = await api.exportStockTeamEnhancedReportHtml({
+                reportId: report.id,
+                market: 'cn',
+                period: '6mo',
+                include_charts: true,
+            })
+            const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+            const url = URL.createObjectURL(blob)
+            const a = document.createElement('a')
+            a.href = url
+            a.download = `analysis-${report.symbol}-${report.trade_date}-enhanced.html`
+            document.body.appendChild(a)
+            a.click()
+            document.body.removeChild(a)
+            URL.revokeObjectURL(url)
+        } catch (err) {
+            alert(err instanceof Error ? err.message : '导出增强版HTML失败')
+        } finally {
+            setEnhancedExporting(false)
+        }
+    }, [])
+
     // Only on mount: restore report from URL
     const initialReportId = useRef(searchParams.get('report'))
     useEffect(() => {
@@ -356,10 +725,6 @@ export default function Reports() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [])
 
-    const filteredReports = reports.filter(r => {
-        const q = searchQuery.toLowerCase()
-        return r.symbol.toLowerCase().includes(q) || (r.name?.toLowerCase().includes(q) ?? false)
-    })
     const hasActiveReport = reports.some(report => report.status === 'pending' || report.status === 'running')
 
     useEffect(() => {
@@ -434,7 +799,7 @@ export default function Reports() {
                             setSelectedReport(null)
                             setSearchParams({})
                         }}
-                        className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                        className="btn-secondary flex items-center gap-2"
                     >
                         <ChevronLeft className="w-4 h-4" />
                         返回列表
@@ -447,17 +812,32 @@ export default function Reports() {
                     </h1>
                     <button
                         onClick={() => exportReport(selectedReport)}
-                        className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
+                        className="btn-secondary ml-auto flex items-center gap-1.5 px-3 py-1.5 text-sm"
                     >
                         <Download className="w-4 h-4" />
                         导出 Markdown
                     </button>
+                    <button
+                        onClick={() => exportEnhancedHtml(selectedReport)}
+                        disabled={enhancedExporting}
+                        className="btn-primary flex items-center gap-1.5 px-3 py-1.5 text-sm"
+                    >
+                        {enhancedExporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                        导出增强HTML
+                    </button>
                 </div>
 
                 {/* 元信息 */}
-                <div className="flex items-center gap-4 text-sm text-slate-500">
+                <div className="flex flex-wrap items-center gap-4 text-sm text-slate-500">
                     <span>分析日期：{selectedReport.trade_date}</span>
                     <span>生成时间：{selectedReport.created_at ? new Date(selectedReport.created_at).toLocaleString('zh-CN') : '-'}</span>
+                    <span>
+                        模型：
+                        {selectedReport.model_profile_name || selectedReport.llm_provider || selectedReport.quick_think_llm || selectedReport.deep_think_llm
+                            ? `${selectedReport.model_profile_name || selectedReport.llm_provider || '-'} / ${selectedReport.quick_think_llm || '-'}${selectedReport.deep_think_llm ? ` / ${selectedReport.deep_think_llm}` : ''}`
+                            : '-'}
+                    </span>
+                    {selectedReport.model_profile_id && <span>配置ID：{selectedReport.model_profile_id}</span>}
                 </div>
 
                 {/* 历史决策时间线 */}
@@ -487,6 +867,9 @@ export default function Reports() {
                         </div>
                     </div>
                 )}
+
+                <FreshnessBanner summary={selectedReport.freshness_summary} />
+                <ReportAgeNote note={selectedReport.freshness_summary?.report_age_note} />
 
                 {/* 主体：概要卡片 + 报告全文 */}
                 <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
@@ -518,6 +901,8 @@ export default function Reports() {
                     <KeyMetrics items={selectedReport.key_metrics ?? undefined} />
                 </div>
 
+                <ConsensusCard summary={selectedReport.result_data?.consensus_summary} />
+
                 <div className="card">
                     <ReportViewer reportData={selectedReport} />
                 </div>
@@ -537,20 +922,146 @@ export default function Reports() {
                 </div>
             </div>
 
-            {/* 搜索 */}
+            {/* 搜索与筛选 */}
             <div className="card">
                 <div className="flex flex-col gap-4">
-                    <div className="relative max-w-md">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                        <input
-                            type="text"
-                            value={searchQuery}
-                            onChange={e => setSearchQuery(e.target.value)}
-                            placeholder="搜索股票代码或名称..."
-                            className="input w-full pl-10"
-                        />
+                    <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-end">
+                        <div className="relative max-w-md flex-1 min-w-[220px]">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                            <input
+                                type="text"
+                                value={searchQuery}
+                                onChange={e => setSearchQuery(e.target.value)}
+                                placeholder="搜索股票代码或中文名称..."
+                                className="input w-full pl-10"
+                            />
+                        </div>
+                        <div className="flex flex-wrap items-end gap-2">
+                            <div>
+                                <label className="mb-1 block text-xs text-slate-500 dark:text-slate-400">生成时间起</label>
+                                <input
+                                    type="datetime-local"
+                                    value={filterStartDate}
+                                    max={filterEndDate || nowDateTimeLocal()}
+                                    onChange={e => setFilterStartDate(e.target.value)}
+                                    className="input h-9 text-sm min-w-[190px]"
+                                />
+                            </div>
+                            <div>
+                                <label className="mb-1 block text-xs text-slate-500 dark:text-slate-400">生成时间止</label>
+                                <input
+                                    type="datetime-local"
+                                    value={filterEndDate}
+                                    min={filterStartDate || undefined}
+                                    max={nowDateTimeLocal()}
+                                    onChange={e => setFilterEndDate(e.target.value)}
+                                    className="input h-9 text-sm min-w-[190px]"
+                                />
+                            </div>
+                            <div>
+                                <label className="mb-1 block text-xs text-slate-500 dark:text-slate-400">分析模型</label>
+                                <select
+                                    value={filterModelProfileId}
+                                    onChange={e => setFilterModelProfileId(e.target.value)}
+                                    className="input h-9 min-w-[180px] text-sm"
+                                >
+                                    <option value="">全部模型</option>
+                                    {modelProfiles.map(profile => (
+                                        <option key={profile.id} value={profile.id}>
+                                            {profile.name}
+                                            {!profile.is_active ? '（已停用）' : profile.is_default ? '（默认）' : ''}
+                                            {profile.deep_think_llm ? ` · ${profile.deep_think_llm}` : ''}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                            <label className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-300 px-2.5 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300">
+                                <input
+                                    type="checkbox"
+                                    checked={filterFreshnessIssue}
+                                    onChange={e => setFilterFreshnessIssue(e.target.checked)}
+                                    className="rounded border-slate-300 dark:border-slate-600"
+                                />
+                                仅数据异常/过时
+                            </label>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setFilterStartDate(daysAgoDateTimeLocal(30))
+                                    setFilterEndDate(nowDateTimeLocal())
+                                }}
+                                className="inline-flex h-9 items-center gap-1 rounded-lg border border-slate-300 px-2.5 text-xs text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                            >
+                                <Calendar className="h-3.5 w-3.5" />
+                                最近 30 天
+                            </button>
+                            {(filterStartDate || filterEndDate || filterModelProfileId || filterFreshnessIssue || listSearchDebounced) && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSearchQuery('')
+                                        setListSearchDebounced('')
+                                        setFilterStartDate('')
+                                        setFilterEndDate('')
+                                        setFilterModelProfileId('')
+                                        setFilterFreshnessIssue(false)
+                                        setPage(0)
+                                    }}
+                                    className="inline-flex h-9 items-center rounded-lg border border-slate-300 px-2.5 text-xs text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                                >
+                                    清除筛选
+                                </button>
+                            )}
+                        </div>
                     </div>
-
+                    {(filterStartDate || filterEndDate || filterModelProfileId) && (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {filterStartDate || filterEndDate ? (
+                                <>
+                                    按报告<strong className="font-medium text-slate-600 dark:text-slate-300">生成时间</strong>筛选（精确到分钟）
+                                    {filterStartDate && filterEndDate
+                                        ? `：${formatDateTimeLocalLabel(filterStartDate)} 至 ${formatDateTimeLocalLabel(filterEndDate)}`
+                                        : filterStartDate
+                                            ? `：不早于 ${formatDateTimeLocalLabel(filterStartDate)}`
+                                            : `：不晚于 ${formatDateTimeLocalLabel(filterEndDate)}`}
+                                </>
+                            ) : null}
+                            {filterModelProfileId && (
+                                <>
+                                    {filterStartDate || filterEndDate ? ' · ' : ''}
+                                    模型：
+                                    <strong className="font-medium text-slate-600 dark:text-slate-300">
+                                        {filterModelProfile?.name || filterModelProfileId}
+                                    </strong>
+                                    （含同 LLM 名但未绑定配置的历史报告）
+                                </>
+                            )}
+                        </p>
+                    )}
+                    <PromptTemplateSelector
+                        value={selectedTemplateId}
+                        templates={activeDeepTemplates}
+                        loading={promptTemplatesLoading}
+                        onChange={setSelectedTemplateId}
+                    />
+                    <div className="max-w-sm">
+                        <label className="mb-1 block text-xs text-slate-500 dark:text-slate-400">深度分析模型</label>
+                        <select
+                            value={selectedModelProfileId}
+                            onChange={e => setSelectedModelProfileId(e.target.value)}
+                            className="input h-9 w-full text-sm"
+                        >
+                            <option value="">默认模型（系统设置）</option>
+                            {modelProfiles.filter(p => p.is_active).map(profile => (
+                                <option key={profile.id} value={profile.id}>
+                                    {profile.name}
+                                </option>
+                            ))}
+                        </select>
+                        {selectedModelIncompatibleReason && (
+                            <p className="mt-1 text-xs text-rose-600">{selectedModelIncompatibleReason}</p>
+                        )}
+                    </div>
                 </div>
             </div>
 
@@ -570,7 +1081,7 @@ export default function Reports() {
                     <p className="text-red-500 mb-4">{error}</p>
                     <button
                         onClick={() => fetchReports(page)}
-                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                        className="btn-primary"
                     >
                         重试
                     </button>
@@ -580,25 +1091,78 @@ export default function Reports() {
             {/* 报告表格 */}
             {!loading && !error && (
                 <div className="card overflow-hidden">
+                    {selectedIds.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-3 px-4 py-3 border-b border-slate-200 dark:border-slate-700 bg-blue-50/60 dark:bg-blue-950/25">
+                            <span className="text-sm text-slate-700 dark:text-slate-300">
+                                已选 <strong className="tabular-nums">{selectedIds.length}</strong> 项
+                            </span>
+                            <button
+                                type="button"
+                                disabled={deepSubmitting}
+                                onClick={() => void handleBulkDeepAnalyze()}
+                                className="btn-primary inline-flex items-center gap-1.5 px-3 py-1.5 text-sm"
+                            >
+                                {deepSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                                批量深度分析
+                            </button>
+                            <button
+                                type="button"
+                                disabled={deepSubmitting}
+                                onClick={() => setSelectedIds([])}
+                                className="text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 disabled:opacity-50"
+                            >
+                                清除选择
+                            </button>
+                        </div>
+                    )}
                     <div className="overflow-x-auto">
                         <table className="w-full">
                             <thead>
                                 <tr className="border-b border-slate-200 dark:border-slate-700">
-                                    {['股票', '分析日期', '决策建议', '置信度', '目标价/止损价', '生成时间', '操作'].map(h => (
-                                        <th key={h} className={`py-3 px-4 text-sm font-medium text-slate-500 dark:text-slate-400 ${h === '操作' ? 'text-right' : 'text-left'}`}>
+                                    <th className="w-11 py-3 pl-4 pr-2 text-left">
+                                        <input
+                                            ref={selectAllCheckboxRef}
+                                            type="checkbox"
+                                            disabled={eligibleReportsOnPage.length === 0}
+                                            checked={
+                                                eligibleReportsOnPage.length > 0
+                                                && eligibleReportsOnPage.every(r => selectedIds.includes(r.id))
+                                            }
+                                            onChange={toggleSelectAllEligible}
+                                            title="全选当前页（不含排队中）"
+                                            className="rounded border-slate-300 dark:border-slate-600"
+                                        />
+                                    </th>
+                                    {REPORT_LIST_TABLE_HEADERS.map(h => (
+                                        <th
+                                            key={h}
+                                            title={h === '数据状态' ? FRESHNESS_COLUMN_TOOLTIP : undefined}
+                                            className={`py-3 px-4 text-sm font-medium text-slate-500 dark:text-slate-400 ${h === '操作' ? 'text-right' : 'text-left'}`}
+                                        >
                                             {h}
                                         </th>
                                     ))}
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
-                                {filteredReports.map((report) => {
+                                {reports.map((report) => {
+                                    const canAnalyze = reportCanDeepAnalyze(report)
                                     return (
                                         <tr
                                             key={report.id}
                                             className="transition-colors cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50"
                                             onClick={() => handleSelectReport(report)}
                                         >
+                                            <td className="py-3 pl-4 pr-2 align-middle" onClick={e => e.stopPropagation()}>
+                                                <input
+                                                    type="checkbox"
+                                                    disabled={!canAnalyze}
+                                                    checked={selectedIds.includes(report.id)}
+                                                    onChange={e => toggleReportSelected(e, report.id)}
+                                                    title={canAnalyze ? '选择以批量操作' : '排队或执行中不可选'}
+                                                    className="rounded border-slate-300 dark:border-slate-600 disabled:opacity-40"
+                                                />
+                                            </td>
                                             <td className="py-3 px-4">
                                                 <div className="flex items-center gap-3">
                                                     <div className="w-8 h-8 rounded-lg bg-blue-100 dark:bg-blue-500/10 flex items-center justify-center">
@@ -613,6 +1177,17 @@ export default function Reports() {
                                                 </div>
                                             </td>
                                             <td className="py-3 px-4 text-slate-600 dark:text-slate-400">{report.trade_date}</td>
+                                            <td
+                                                className="py-3 px-4 text-xs text-slate-600 dark:text-slate-400"
+                                                title={report.deep_think_llm || report.quick_think_llm || '--'}
+                                            >
+                                                <span className="font-medium text-slate-700 dark:text-slate-200">
+                                                    {report.deep_think_llm || report.quick_think_llm || '--'}
+                                                </span>
+                                            </td>
+                                            <td className="py-3 px-4">
+                                                <FreshnessStatusCell status={report.freshness_status} />
+                                            </td>
                                             <td className="py-3 px-4">
                                                 {renderStatusBadge(report)}
                                             </td>
@@ -640,6 +1215,17 @@ export default function Reports() {
                                             <td className="py-3 px-4">
                                                 <div className="flex items-center justify-end gap-2">
                                                     <button
+                                                        type="button"
+                                                        className={`p-2 transition-colors disabled:opacity-40 ${canAnalyze ? 'text-slate-400 hover:text-violet-600 dark:hover:text-violet-400' : 'text-slate-300 cursor-not-allowed'}`}
+                                                        onClick={e => void handleDeepAnalyzeOne(e, report)}
+                                                        disabled={!canAnalyze || deepAnalyzingId === report.id || deepSubmitting}
+                                                        title={canAnalyze ? '再次发起深度分析（当前交易日）' : '排队或执行中不可用'}
+                                                    >
+                                                        {deepAnalyzingId === report.id
+                                                            ? <Loader2 className="w-4 h-4 animate-spin" />
+                                                            : <Sparkles className="w-4 h-4" />}
+                                                    </button>
+                                                    <button
                                                         className="p-2 text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
                                                         onClick={e => { e.stopPropagation(); handleSelectReport(report) }}
                                                         title="查看详情"
@@ -666,11 +1252,11 @@ export default function Reports() {
                         </table>
                     </div>
 
-                    {filteredReports.length === 0 && (
+                    {reports.length === 0 && (
                         <div className="text-center py-12">
                             <FileText className="w-12 h-12 text-slate-300 dark:text-slate-600 mx-auto mb-4" />
                             <p className="text-slate-500 dark:text-slate-400">
-                                {searchQuery ? '没有匹配的报告' : '暂无报告'}
+                                {listSearchDebounced ? '没有匹配的报告' : '暂无报告'}
                             </p>
                             <p className="text-sm text-slate-400 dark:text-slate-500 mt-1">
                                 在分析页面生成新的报告

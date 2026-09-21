@@ -213,15 +213,15 @@ def send_login_code(email: str, code: str) -> Optional[str]:
     smtp_ssl_tls = smtp_ssl_tls_str in ("1", "true", "on", "yes")
 
     msg = EmailMessage()
-    msg["Subject"] = "TradingAgents 登录验证码"
+    msg["Subject"] = "AlphaPilot A-Share 登录验证码"
     msg["From"] = smtp_from
     msg["To"] = email
-    msg.set_content(f"你的 TradingAgents 登录验证码是：{code}\n\n10 分钟内有效。")
+    msg.set_content(f"你的 AlphaPilot A-Share 登录验证码是：{code}\n\n10 分钟内有效。")
 
     try:
         print(f"[auth] connecting to {smtp_host}:{smtp_port} (SSL: {smtp_ssl_tls}, STARTTLS: {smtp_starttls})")
         smtp_cls = smtplib.SMTP_SSL if smtp_ssl_tls else smtplib.SMTP
-        with smtp_cls(smtp_host, smtp_port, timeout=20) as server:
+        with smtp_cls(smtp_host, smtp_port, timeout=8) as server:
             if smtp_starttls and not smtp_ssl_tls:
                 server.starttls()
             if smtp_user:
@@ -250,10 +250,14 @@ def upsert_user_llm_config(
     deep_think_llm: Optional[str] = None,
     max_debate_rounds: Optional[int] = None,
     max_risk_discuss_rounds: Optional[int] = None,
+    decision_critic_enabled: Optional[bool] = None,
+    decision_critic_revision_threshold: Optional[float] = None,
     api_key: Optional[str] = None,
     wecom_webhook_url: Optional[str] = None,
+    wps_webhook_url: Optional[str] = None,
     clear_api_key: bool = False,
     clear_wecom_webhook: bool = False,
+    clear_wps_webhook: bool = False,
 ) -> UserLLMConfigDB:
     row = get_user_llm_config(db, user_id)
     now = _utcnow()
@@ -273,6 +277,10 @@ def upsert_user_llm_config(
         row.max_debate_rounds = max_debate_rounds
     if max_risk_discuss_rounds is not None:
         row.max_risk_discuss_rounds = max_risk_discuss_rounds
+    if decision_critic_enabled is not None:
+        row.decision_critic_enabled = decision_critic_enabled
+    if decision_critic_revision_threshold is not None:
+        row.decision_critic_revision_threshold = decision_critic_revision_threshold
 
     if clear_api_key:
         row.api_key_encrypted = None
@@ -283,6 +291,11 @@ def upsert_user_llm_config(
         row.wecom_webhook_encrypted = None
     elif wecom_webhook_url:
         row.wecom_webhook_encrypted = encrypt_secret(wecom_webhook_url)
+
+    if clear_wps_webhook:
+        row.wps_webhook_encrypted = None
+    elif wps_webhook_url:
+        row.wps_webhook_encrypted = encrypt_secret(wps_webhook_url)
 
     row.updated_at = now
     db.commit()

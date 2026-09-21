@@ -1,145 +1,69 @@
 # TradingAgents/graph/signal_processing.py
+"""Deterministic extraction of the final trading decision.
 
-import re
-import json
+This module used to combine a loose keyword scan with an LLM fallback:
 
-from langchain_openai import ChatOpenAI
-from tradingagents.dataflows.config import get_config
-from tradingagents.prompts import get_prompt
+* the keyword scan tested **buy keywords before sell keywords**, so a paragraph
+  containing both resolved to BUY;
+* if the scan found nothing it scanned the **entire document**, then
+* if that still found nothing it called an LLM with the prompt "read the report
+  and output only one token: BUY, SELL, or HOLD" — a second, independent
+  inference over free prose.
+
+Measured effect: 48.6% of identical (symbol, day, window, mode) inputs produced
+different directions and 20.5% produced two directions at once, at
+``llm_temperature=0.0``; the bias was strongly long (74% of shipped signals).
+
+Both the trader prompt and the risk-judge prompt mandate a machine-readable
+direction (``<!-- VERDICT: ... -->`` and a final ``最终交易建议：`` line). A document
+without one is a prompt-compliance failure, not an invitation to guess. It now
+yields ``None`` — explicit abstention — which surfaces in the abstention-rate
+metric instead of being silently converted into an opinion.
+
+All parsing lives in :mod:`tradingagents.agents.utils.direction`.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from tradingagents.agents.utils.direction import (
+    extract_direction_result,
+    to_trading_decision,
+)
 
 
 class SignalProcessor:
-    """Processes trading signals to extract actionable decisions."""
+    """Extracts the actionable decision from a completed analysis document."""
 
-    def __init__(self, quick_thinking_llm: ChatOpenAI):
-        """Initialize with an LLM for processing."""
-        self.quick_thinking_llm = quick_thinking_llm
-
-    def process_signal(self, full_signal: str) -> str:
-        """
-        Process a full trading signal to extract the core decision.
+    def process_signal(self, full_signal: str) -> Optional[str]:
+        """Extract the decision from a full trading signal.
 
         Args:
-            full_signal: Complete trading signal text
+            full_signal: Complete trading signal text.
 
         Returns:
-            Extracted decision (BUY, SELL, or HOLD)
+            ``"BUY"``, ``"SELL"`` or ``"HOLD"``, or ``None`` when the document
+            does not state an unambiguous direction. ``None`` means abstention:
+            callers must decide how to record it, and must not substitute an
+            opinion of their own.
         """
-        if not full_signal:
-            return "HOLD"
-
-        decision = _extract_decision_keyword(full_signal)
-        if decision:
-            return decision
-
-        messages = [
-            (
-                "system",
-                get_prompt("signal_extractor_system", config=get_config()),
-            ),
-            ("human", full_signal),
-        ]
-
-        response = str(self.quick_thinking_llm.invoke(messages).content).strip().upper()
-        if response in {"BUY", "SELL", "HOLD"}:
-            return response
-        return "HOLD"
+        return extract_trading_decision(full_signal)
 
 
-def _extract_decision_keyword(text: str) -> str | None:
-    """Rule-based decision extraction to keep UI consistent with final decision text."""
-    upper = text.upper()
+def extract_trading_decision(text: Optional[str]) -> Optional[str]:
+    """Map a document to ``BUY``/``SELL``/``HOLD``, or ``None`` to abstain.
 
-    def parse_verdict_direction(raw_text: str) -> str | None:
-        match = re.search(r"<!--\s*VERDICT:\s*(\{.*?\})\s*-->", raw_text, re.IGNORECASE | re.DOTALL)
-        if not match:
-            return None
-        try:
-            payload = json.loads(match.group(1))
-        except Exception:
-            return None
-        direction = str(payload.get("direction", "")).strip().upper()
-        direction_map = {
-            "看多": "BUY",
-            "偏多": "BUY",
-            "BULLISH": "BUY",
-            "BUY": "BUY",
-            "看空": "SELL",
-            "偏空": "SELL",
-            "BEARISH": "SELL",
-            "SELL": "SELL",
-            "中性": "HOLD",
-            "NEUTRAL": "HOLD",
-            "HOLD": "HOLD",
-            "谨慎": "HOLD",
-            "CAUTIOUS": "HOLD",
-        }
-        return direction_map.get(direction)
-
-    def classify(snippet: str) -> str | None:
-        snippet_upper = snippet.upper()
-        sell_keywords = [
-            "SELL",
-            "卖出",
-            "减持",
-            "清仓",
-            "空仓",
-            "回避",
-            "看空",
-            "偏空",
-        ]
-        buy_keywords = [
-            "BUY",
-            "买入",
-            "增持",
-            "做多",
-            "看多",
-            "偏多",
-            "谨慎看多",
-            "有条件建仓",
-            "条件建仓",
-            "建仓",
-        ]
-        hold_keywords = [
-            "HOLD",
-            "观望",
-            "持有",
-            "中性",
-        ]
-
-        if any(k in snippet_upper for k in buy_keywords):
-            return "BUY"
-        if any(k in snippet_upper for k in sell_keywords):
-            return "SELL"
-        if any(k in snippet_upper for k in hold_keywords):
-            return "HOLD"
+    A ``VERDICT`` block takes precedence; otherwise a single explicitly labelled
+    decision line is read. Contradictory evidence abstains rather than being
+    resolved by keyword order.
+    """
+    if not text:
         return None
 
-    verdict_decision = parse_verdict_direction(text)
-    if verdict_decision:
-        return verdict_decision
-
-    explicit_patterns = [
-        r"最终裁决[:：]\s*([^\n*]+)",
-        r"风控委员会最终裁决[:：]\s*([^\n*]+)",
-        r"最终建议[:：]\s*([^\n*]+)",
-        r"方向[:：]\s*([^\n*]+)",
-        r"核心定性[:：]\s*([^\n*]+)",
-    ]
-    for pattern in explicit_patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            decision = classify(match.group(1).strip())
-            if decision:
-                return decision
-
-    headline = "\n".join(text.splitlines()[:20])
-    decision = classify(headline)
-    if decision:
-        return decision
-
-    decision = classify(upper)
-    if decision:
-        return decision
-
-    return "UNKNOWN"
+    result = extract_direction_result(text)
+    if result.conflict:
+        # The document argues both ways. Breaking that tie by keyword order is
+        # exactly the failure this module removes, so abstain instead.
+        return None
+    return to_trading_decision(result.direction)

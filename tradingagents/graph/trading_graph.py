@@ -15,7 +15,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from tradingagents.llm_clients import create_llm_client
 
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.agents.utils.memory import FinancialSituationMemory
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
@@ -44,7 +43,6 @@ from .data_collector import DataCollector
 from .intent_parser import parse_intent
 from .setup import GraphSetup
 from .propagation import Propagator
-from .reflection import Reflector
 from .signal_processing import SignalProcessor
 
 
@@ -105,13 +103,6 @@ class TradingAgentsGraph:
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
         
-        # Initialize memories
-        self.bull_memory = FinancialSituationMemory("bull_memory", self.config)
-        self.bear_memory = FinancialSituationMemory("bear_memory", self.config)
-        self.trader_memory = FinancialSituationMemory("trader_memory", self.config)
-        self.invest_judge_memory = FinancialSituationMemory("invest_judge_memory", self.config)
-        self.risk_manager_memory = FinancialSituationMemory("risk_manager_memory", self.config)
-
         # Create tool nodes
         self.tool_nodes = self._create_tool_nodes()
 
@@ -127,11 +118,6 @@ class TradingAgentsGraph:
             self.quick_thinking_llm,
             self.deep_thinking_llm,
             self.tool_nodes,
-            self.bull_memory,
-            self.bear_memory,
-            self.trader_memory,
-            self.invest_judge_memory,
-            self.risk_manager_memory,
             self.conditional_logic,
             data_collector=self.data_collector,
         )
@@ -139,8 +125,9 @@ class TradingAgentsGraph:
         self.propagator = Propagator(
             max_recur_limit=self.config.get("max_recur_limit", 100)
         )
-        self.reflector = Reflector(self.quick_thinking_llm)
-        self.signal_processor = SignalProcessor(self.quick_thinking_llm)
+        # SignalProcessor is now purely rule-based (no LLM fallback) so the final
+        # decision is reproducible; see graph/signal_processing.py.
+        self.signal_processor = SignalProcessor()
 
         # State tracking
         self.curr_state = None
@@ -159,6 +146,7 @@ class TradingAgentsGraph:
         """Get provider-specific kwargs for LLM client creation."""
         kwargs = {}
         provider = self.config.get("llm_provider", "").lower()
+        llm_temperature = self.config.get("llm_temperature")
 
         if provider == "google":
             thinking_level = self.config.get("google_thinking_level")
@@ -172,6 +160,15 @@ class TradingAgentsGraph:
             reasoning_effort = self.config.get("openai_reasoning_effort")
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
+            if llm_temperature is not None:
+                kwargs["temperature"] = llm_temperature
+            api_key = self.config.get("api_key")
+            if api_key:
+                kwargs["api_key"] = api_key
+
+        elif provider in ("xai", "openrouter", "ollama"):
+            if llm_temperature is not None:
+                kwargs["temperature"] = llm_temperature
             api_key = self.config.get("api_key")
             if api_key:
                 kwargs["api_key"] = api_key
@@ -334,6 +331,9 @@ class TradingAgentsGraph:
         state = self.propagator.create_initial_state(
             ticker, trade_date, user_intent=user_intent, horizon="short"
         )
+        from tradingagents.dataflows.freshness import inject_freshness_into_state
+
+        inject_freshness_into_state(state, self.data_collector, ticker, trade_date)
         final_state = await self.graph.ainvoke(state, **graph_args)
 
         # Evict cached data to free memory
@@ -366,6 +366,10 @@ class TradingAgentsGraph:
             "macro_report": final_state.get("macro_report", ""),
             "smart_money_report": final_state.get("smart_money_report", ""),
             "volume_price_report": final_state.get("volume_price_report", ""),
+            # 风控裁决的结构化约束必须随视角结果一起返回，否则共识层读不到
+            # risk_feedback_state，risk_gate 会静默退化为默认 "pass"。
+            "risk_feedback_state": final_state.get("risk_feedback_state") or {},
+            "metadata": final_state.get("metadata") or {},
         }
 
     @staticmethod
@@ -464,24 +468,6 @@ class TradingAgentsGraph:
             "w",
         ) as f:
             json.dump(self.log_states_dict, f, indent=4)
-
-    def reflect_and_remember(self, returns_losses):
-        """Reflect on decisions and update memory based on returns."""
-        self.reflector.reflect_bull_researcher(
-            self.curr_state, returns_losses, self.bull_memory
-        )
-        self.reflector.reflect_bear_researcher(
-            self.curr_state, returns_losses, self.bear_memory
-        )
-        self.reflector.reflect_trader(
-            self.curr_state, returns_losses, self.trader_memory
-        )
-        self.reflector.reflect_invest_judge(
-            self.curr_state, returns_losses, self.invest_judge_memory
-        )
-        self.reflector.reflect_risk_manager(
-            self.curr_state, returns_losses, self.risk_manager_memory
-        )
 
     def process_signal(self, full_signal):
         """Process a signal to extract the core decision."""

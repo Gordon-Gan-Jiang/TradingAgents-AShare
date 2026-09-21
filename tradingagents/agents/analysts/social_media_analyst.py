@@ -2,9 +2,17 @@ import asyncio
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from tradingagents.dataflows.config import get_config
+from tradingagents.methodology import get_stock_team_analysis_framework_block
 from tradingagents.prompts import get_prompt
 from tradingagents.graph.intent_parser import build_horizon_context
-from tradingagents.agents.utils.agent_states import current_tracker_var, extract_verdict
+from tradingagents.agents.utils.agent_states import (
+    current_tracker_var,
+    extract_verdict_with_flag,
+)
+from tradingagents.agents.utils.analyst_structured import (
+    extract_analyst_structured_json,
+    get_analyst_json_instruction,
+)
 
 
 def create_social_media_analyst(llm, data_collector=None):
@@ -24,6 +32,9 @@ def create_social_media_analyst(llm, data_collector=None):
 
         config = get_config()
         system_message = get_prompt("social_system_message", config=config)
+        stock_team_framework = get_stock_team_analysis_framework_block(config)
+        if stock_team_framework:
+            system_message = system_message + "\n\n" + stock_team_framework
         horizon_ctx = build_horizon_context(horizon, focus_areas, specific_questions, agent_type="social")
 
         pool = data_collector.get(ticker, current_date) if data_collector else None
@@ -60,6 +71,7 @@ def create_social_media_analyst(llm, data_collector=None):
                 f"【get_news】\n{news_text}\n\n"
                 f"【涨停池数据】\n{zt_data}\n\n"
                 f"【雪球热门股票】\n{hot_stocks}\n"
+                + get_analyst_json_instruction(agent_role="social", config=config)
             )),
         ]
 
@@ -72,17 +84,22 @@ def create_social_media_analyst(llm, data_collector=None):
             if tracker:
                 tracker._emit_token("Social Analyst", "sentiment_report", content)
 
-        verdict, confidence = extract_verdict(full_content)
+        verdict, confidence, verdict_parsed = extract_verdict_with_flag(full_content)
+        trace = {
+            "agent": "social_media_analyst",
+            "horizon": horizon,
+            "data_window": "7天",
+            "key_finding": f"舆情分析结论：{verdict}",
+            "verdict": verdict,
+            "confidence": confidence,
+            "verdict_parsed": verdict_parsed,
+        }
+        parsed = extract_analyst_structured_json(full_content)
+        if parsed:
+            trace["structured"] = parsed
         return {
             "sentiment_report": full_content,
-            "analyst_traces": [{
-                "agent": "social_media_analyst",
-                "horizon": horizon,
-                "data_window": "7天",
-                "key_finding": f"舆情分析结论：{verdict}",
-                "verdict": verdict,
-                "confidence": confidence,
-            }],
+            "analyst_traces": [trace],
         }
 
     return social_media_analyst_node
