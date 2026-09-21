@@ -142,6 +142,40 @@ def build_registry(user_id: str | None = None) -> Any:
 
         return _Port()
 
+    def _holdings_port() -> Any:
+        """持仓端口：**user_id 在闭包里绑定**，不经过模型参数。"""
+        from api.database import ImportedPortfolioPositionDB, get_db_ctx
+
+        class _Port:
+            def list_holdings(self, *, limit: int):
+                if not user_id:
+                    return []
+                with get_db_ctx() as db:
+                    rows = (
+                        db.query(ImportedPortfolioPositionDB)
+                        .filter(ImportedPortfolioPositionDB.user_id == user_id)
+                        .order_by(
+                            ImportedPortfolioPositionDB.market_value.desc(),
+                            ImportedPortfolioPositionDB.symbol,
+                        )
+                        .limit(limit)
+                        .all()
+                    )
+                    return [
+                        {
+                            "symbol": row.symbol,
+                            "security_name": row.security_name,
+                            "current_position": row.current_position,
+                            "available_position": row.available_position,
+                            "average_cost": row.average_cost,
+                            "market_value": row.market_value,
+                            "current_position_pct": row.current_position_pct,
+                        }
+                        for row in rows
+                    ]
+
+        return _Port()
+
     def lazy_screener() -> Any:
         from api.services.market_screen_ports import build_market_screener
 
@@ -156,6 +190,7 @@ def build_registry(user_id: str | None = None) -> Any:
         market_screener=lazy_screener(),
         history_port=_history_port(),
         weight_port=_weight_port(),
+        holdings_port=_holdings_port(),
     )
 
 

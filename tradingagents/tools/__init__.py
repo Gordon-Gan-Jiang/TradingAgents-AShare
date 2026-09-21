@@ -32,6 +32,7 @@ def build_registry(
     market_screener: object | None = None,
     history_port: object | None = None,
     weight_port: object | None = None,
+    holdings_port: object | None = None,
 ) -> ToolRegistry:
     """组装工具注册表。
 
@@ -43,6 +44,7 @@ def build_registry(
     """
     from .data import make_data_tools
     from .history import make_history_tools, make_weight_tools
+    from .portfolio import make_portfolio_tools
     from .news import make_news_tools
     from .screen import make_screen_tools
     from .signals import make_signal_tools
@@ -66,5 +68,8 @@ def build_registry(
             registry.register(spec)
     if weight_port is not None:
         for spec in make_weight_tools(weight_port):
+            registry.register(spec)
+    if holdings_port is not None:
+        for spec in make_portfolio_tools(holdings_port):
             registry.register(spec)
     return registry
