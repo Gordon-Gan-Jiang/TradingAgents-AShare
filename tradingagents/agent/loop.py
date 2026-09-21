@@ -129,6 +129,13 @@ class TurnRequest:
     # 本回合的计划来源（rules / llm）。落进 trace 才能回答"这轮为什么这么走"，
     # 也是灰度期间对比两条路径的依据。
     plan_source: str = "rules"
+    # 规划层给出的意图（规则层没有显式意图时留空）。度量"规划准确率"必须读它，
+    # 否则尺子量的还是旧实现的推断值（实测：规划层上线后规划准确率纹丝不动，
+    # 原因就是度量口径没读计划）。
+    intent: str = ""
+    # 规划层给出的工具步骤。**这是规划层的核心产出**：不给编排层用，规划就只是
+    # 换了个档位，工具仍按旧规则机械决定（实测工具精确率因此从 86% 掉到 51%）。
+    planned_steps: tuple[Mapping[str, Any], ...] = ()
     # 市场级**事实**问句（「今天涨停板有多少只」）：本来就不需要标的。
     # 没有这个标记的话，澄清分支会把它当成"用户没给代码"而追问——那是把
     # 平台已有的市场级工具藏起来（实测踩到）。
@@ -345,6 +352,34 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
     if request.tier == TIER_HEAVY:
         return []
     as_of = request.as_of or ""
+
+    if request.planned_steps:
+        # 规划层给了步骤就以它为准：工具选择是规划层的核心产出，机械规则退居
+        # 降级路径。未在册的工具**丢弃并留痕**（规划已通过 schema 校验，这里
+        # 再挡一次是因为注册表可能按用户/环境不同而缺项）。
+        planned: list[ToolCall] = []
+        for raw in request.planned_steps:
+            if not isinstance(raw, Mapping):
+                continue
+            name = str(raw.get("tool") or "")
+            if not name:
+                continue
+            spec = registry.get(name) if registry is not None and hasattr(registry, "get") else None
+            if spec is None:
+                logging.getLogger(__name__).warning(
+                    "planned tool %r not registered; skipping step", name
+                )
+                continue
+            arguments = raw.get("arguments") or {}
+            planned.append(
+                ToolCall(
+                    tool=name,
+                    arguments=dict(arguments) if isinstance(arguments, Mapping) else {},
+                    reason=str(raw.get("reason") or "planned"),
+                )
+            )
+        if planned:
+            return planned
     if request.tier == TIER_LIGHT:
         # 事实型问句：取**一个**便宜的数据工具。此前这里直接返回空计划，
         # 而档位表承诺的是"1 个数据工具"——承诺没落地，于是"现在多少钱"
@@ -752,6 +787,7 @@ def run_turn(
             "symbols": list(request.symbols),
             "screen": bool(request.screen),
             "intent_source": request.plan_source,
+            "intent": request.intent or None,
             "planned": [
                 {"tool": call.tool, "arguments": dict(call.arguments), "reason": call.reason}
                 for call in planned

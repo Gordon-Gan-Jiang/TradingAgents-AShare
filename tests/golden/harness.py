@@ -235,9 +235,12 @@ def probe(
     tools = tuple(call.tool for call in planned)
     symbols = tuple(request.symbols) or ((request.symbol,) if request.symbol else ())
     clarifying = bool(request.candidates) and not symbols and not request.screen
+    # 有显式意图（来自规划层）就直接用——否则量的是旧实现的推断值，
+    # 规划层的增益永远看不出来。
+    explicit_intent = str(getattr(request, "intent", "") or "")
     return Probe(
         servable=True,
-        intent=_observed_intent(
+        intent=explicit_intent or _observed_intent(
             screen=request.screen, symbols=request.symbols, symbol=request.symbol,
             candidates=request.candidates, planned=tools,
         ),

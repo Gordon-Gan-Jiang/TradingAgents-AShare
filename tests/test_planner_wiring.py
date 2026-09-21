@@ -166,3 +166,71 @@ def test_planner_returning_none_falls_back(monkeypatch):
     assert chat_service.build_turn_request(
         _body("最近哪个板块最强"), user_id="u1", planner=lambda text: None
     ) is None
+
+
+# ── 计划里的步骤必须被编排层采用 ──────────────────────────────────────────
+
+
+def _registry():
+    from tradingagents.tools import build_registry
+
+    return build_registry(
+        ports_factory=lambda *a: object(), news_fetcher=lambda *a: [], market_screener=object()
+    )
+
+
+def test_planned_steps_win_over_mechanical_rules():
+    """规划层给了步骤就以它为准——否则规划只是个"换档位"的装饰。
+
+    实测教训：规划层上线后覆盖率 60%→100%，但工具精确率 86%→51%、
+    召回 75.8%→63.6%。原因就是 `_plan_tools` 仍按档位机械决定工具，
+    规划层选好的步骤被丢在一边。
+    """
+    from tradingagents.agent.loop import TurnRequest, _plan_tools
+
+    request = TurnRequest(
+        text="用日线看看 600519 的量能", user_id="u1", symbol="600519.SH", tier="medium",
+        as_of="2026-09-21", plan_source="llm", intent="factual_lookup",
+        planned_steps=(
+            {"tool": "get_realtime_quotes", "arguments": {"symbols": ["600519.SH"]},
+             "reason": "planned"},
+        ),
+    )
+    planned = _plan_tools(request, registry=_registry())
+
+    assert [call.tool for call in planned] == ["get_realtime_quotes"], (
+        "规划层指定了工具，却仍按档位机械选了探针"
+    )
+    assert planned[0].arguments == {"symbols": ["600519.SH"]}, "参数要原样采用"
+
+
+def test_unknown_planned_tool_is_skipped_with_fallback():
+    """计划里的工具未在册时跳过该步；若全被跳过则回落到机械规则。"""
+    from tradingagents.agent.loop import TurnRequest, _plan_tools
+
+    request = TurnRequest(
+        text="600519 是不是在洗盘", user_id="u1", symbol="600519.SH", tier="medium",
+        as_of="2026-09-21", plan_source="llm", intent="single_symbol_judgement",
+        planned_steps=({"tool": "ghost_tool", "arguments": {}},),
+    )
+    planned = _plan_tools(request, registry=_registry())
+
+    assert [call.tool for call in planned] == ["signal_washout_probe"], (
+        "未在册的步骤被丢后应回落到机械规则，而不是什么都不做"
+    )
+
+
+def test_plan_intent_is_recorded_for_measurement(monkeypatch):
+    """意图必须进回合与 trace：度量规划准确率全靠它。"""
+    from api.services import chat_service
+    from tradingagents.agent.routing import Plan
+
+    _patch_map(monkeypatch)
+    request = chat_service.build_turn_request(
+        _body("最近哪个板块最强"), user_id="u1",
+        planner=lambda text: Plan(intent="market_view", tier="light", market_level=True,
+                                  confidence=0.8),
+    )
+    assert request is not None
+    assert request.intent == "market_view"
+    assert request.plan_source == "llm"

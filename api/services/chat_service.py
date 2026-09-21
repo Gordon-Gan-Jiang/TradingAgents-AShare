@@ -463,6 +463,11 @@ def build_turn_request(
                 screen=bool(plan.screen),
                 market_level=bool(plan.market_level),
                 plan_source="llm",
+                intent=plan.intent,
+                planned_steps=tuple(
+                    {"tool": step.tool, "arguments": dict(step.arguments), "reason": step.reason}
+                    for step in plan.steps
+                ),
                 as_of=body.as_of or cn_today_str(),
                 conversation_id=body.conversation_id,
             )
