@@ -119,7 +119,12 @@ def build_registry(user_id: str | None = None) -> Any:
                 payload = signal_service.list_verdicts(
                     user_id=user_id, symbol=symbol, limit=limit
                 )
-                return payload.get("verdicts") or []
+                # 键名必须与 `list_verdicts` 的实际返回一致（它返回 items/count）。
+                # 事故记录：这里曾写 `payload.get("verdicts")`——键不存在 → 永远拿到
+                # 空列表 → `verdict_history_read` 一直报「尚未落库的判定记录」，
+                # 而该用户其实**有**判定。这正是本平台最不能接受的失败形态：
+                # **「读不到」被说成「没有」**，而且完全静默。
+                return payload.get("items") or []
 
         return _Port()
 

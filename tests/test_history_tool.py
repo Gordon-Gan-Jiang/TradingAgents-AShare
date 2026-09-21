@@ -185,3 +185,40 @@ def test_weight_tool_is_l1_and_registered():
         weight_port=_FakeWeights(active="v1"),
     )
     assert "signal_weight_read" in registry.names_by_layer(PLAN_LAYER_DECISION)
+
+
+def test_history_port_reads_the_real_service_key():
+    """端口必须读 `list_verdicts` 的**实际**返回键。
+
+    事故记录：`_history_port` 曾写 `payload.get("verdicts")`，而该服务返回
+    `{"items": [...], "count": n}`——键不存在 → 永远空列表 →
+    `verdict_history_read` 一直报「尚未落库的判定记录」，而用户其实有判定。
+    这是本平台最不能接受的失败形态：**「读不到」被说成「没有」**，且完全静默。
+
+    这条测试用**真实服务签名**（键名 items）打桩，因此键名再写错就会红。
+    """
+    import api.services.chat_service as cs
+    from api.services import signal_service
+
+    calls: list[dict] = []
+
+    def _fake_list_verdicts(*, user_id, symbol=None, limit=50):
+        calls.append({"user_id": user_id, "limit": limit})
+        return {"items": [{"symbol": "600519.SH", "as_of": "2026-09-15",
+                           "state": "distribution", "confidence": 85}], "count": 1}
+
+    original = signal_service.list_verdicts
+    signal_service.list_verdicts = _fake_list_verdicts  # type: ignore[assignment]
+    try:
+        # 直接构造工具用的端口（build_registry 内部闭包同一实现）
+        registry = cs.build_registry(user_id="u1")
+        spec = registry.get("verdict_history_read")
+        result = spec.handler(limit=5, as_of="2026-09-21")
+    finally:
+        signal_service.list_verdicts = original  # type: ignore[assignment]
+
+    assert calls, "端口没有调用服务"
+    assert result.evidence, (
+        "端口读错键名会让工具永远报「没有判定」——这正是要防的静默失败"
+    )
+    assert "600519.SH" in str(result.evidence[0].value)
