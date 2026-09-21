@@ -191,6 +191,30 @@ def build_registry(user_id: str | None = None) -> Any:
 
         return _Port()
 
+    def _task_port() -> Any:
+        """异步任务端口：**user_id 在闭包里绑定**；只暴露提交与查询。"""
+        from api.services import backtest_service
+
+        class _Port:
+            def submit_backtest(self, *, symbol, start_date, end_date, hold_days, sample_interval):
+                return backtest_service.submit(
+                    symbol=symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    # 回测要跑分析师管道，选一个最轻的分析师组合即可；
+                    # 具体分析师的取舍属于产品决策，这里取最小可用集。
+                    selected_analysts=["market"],
+                    hold_days=hold_days,
+                    sample_interval=sample_interval,
+                    config={},
+                    user_id=user_id,
+                )
+
+            def job_status(self, *, job_id):
+                return backtest_service.get_job(job_id)
+
+        return _Port()
+
     def lazy_screener() -> Any:
         from api.services.market_screen_ports import build_market_screener
 
@@ -207,6 +231,7 @@ def build_registry(user_id: str | None = None) -> Any:
         weight_port=_weight_port(),
         holdings_port=_holdings_port(),
         mainline_port=_mainline_port(),
+        task_port=_task_port(),
     )
 
 
