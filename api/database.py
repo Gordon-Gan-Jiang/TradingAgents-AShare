@@ -1297,6 +1297,31 @@ class ChatTurnTraceDB(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class ChatConversationStateDB(Base):
+    """一个会话的**跨轮状态**：槽位、证据账本、未覆盖项、待确认提议、任务号。
+
+    为什么必须落库而不是只放内存：多轮的全部意义是"下一轮记得上一轮"。进程重启
+    或多副本部署后内存态就没了，而用户看到的是"它"突然不知道该指谁、上一轮声明
+    的未覆盖项凭空消失。
+
+    为什么整块塞 JSON 而不是拆成列：状态是**引擎层的值对象**
+    （`tradingagents/agent/state.py`），带版本号（`payload["version"]`），演进时
+    只加字段不改表。拆成列会让每次加一个槽位都要迁移，而这里没有任何按字段查询
+    的需求（只按 conversation_id + user_id 取整条）。
+
+    `user_id` 与 `conversation_id` 是**双列**：查询必须两者都匹配，否则一个会话 id
+    猜错就能读到别人的槽位与证据——与消息表同一条防串号纪律。
+    """
+
+    __tablename__ = "chat_conversation_states"
+
+    conversation_id = Column(String(36), primary_key=True, index=True)
+    user_id = Column(String(64), index=True, nullable=False)
+    payload = Column(JSON, nullable=True)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class ChatMessageDB(Base):
     """会话内的一条消息。
 

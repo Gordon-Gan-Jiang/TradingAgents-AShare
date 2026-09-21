@@ -88,6 +88,83 @@ def build_news_fetcher():
     return akshare_news_fetcher
 
 
+def build_action_executor(user_id: str | None = None) -> Callable[[Any, str], str]:
+    """动作执行器：用户**确认**提议之后，走既有服务执行状态变更。
+
+    ## 为什么必须有这个函数（此前是死代码）
+
+    `tradingagents/agent/loop.py` 的确认分支要求显式传入 `action_executor`，
+    但生产代码从未传过——于是用户回复「确认」只会得到一句
+    「当前环境未配置动作执行器，操作未执行」，**提议→确认这条链路在生产里
+    从来没有真正执行过**。它只在测试里被走通过。
+
+    ## 为什么有的 kind 直接拒绝
+
+    意图识别（`agent/actions.py`）会提议三类动作，但平台**只对其中一类**有可执行的
+    服务入口：
+
+    | kind | 能否执行 | 依据 |
+    |---|---|---|
+    | `watchlist_add` | ✅ | `watchlist_service.add_watchlist_item` |
+    | `price_alert` | ❌ | 平台没有"用户自定义阈值预警"的落库与服务；`tracking_price_alert_service` 是按**离场计划**轮询的通知器，不是阈值预警 |
+    | `deep_analysis` | ❌ | 任务入口只存在于 `api/main.py` 的路由内联代码里（`_set_job` / `_emit_job_event`），服务层没有可复用入口 |
+
+    不会"硬造"后两者的实现：那会创建一张用户以为存在、实际没人消费的预警，
+    或复制一份与路由并行漂移的任务链路。宁可**如实拒绝并说明原因**——
+    "操作未执行"必须是一个明确结论，而不是静默什么都不做。
+    """
+    from tradingagents.agent.actions import can_execute_actions
+
+    def executor(proposal: Any, uid: str) -> str:
+        scoped_user = uid or user_id
+        if not scoped_user:
+            raise LookupError("动作执行需要一个已绑定的用户")
+        # 提议在 loop 里以 dict 形式传下来（`as_event_payload`），也兼容对象形式
+        kind = (
+            str(proposal.get("kind") or "")
+            if isinstance(proposal, Mapping)
+            else str(getattr(proposal, "kind", "") or "")
+        )
+        params = (
+            proposal.get("params") or {}
+            if isinstance(proposal, Mapping)
+            else getattr(proposal, "params", {}) or {}
+        )
+        symbol = str((params or {}).get("symbol") or "").strip()
+
+        if kind == "watchlist_add":
+            if not symbol:
+                raise ValueError("加入自选缺少标的，未做任何改动")
+            from api.database import get_db_ctx
+            from api.services import watchlist_service
+
+            with get_db_ctx() as db:
+                row = watchlist_service.add_watchlist_item(db, scoped_user, symbol)
+            return f"已把 {row.get('symbol') or symbol} 加入自选股。"
+
+        if kind == "price_alert":
+            # 如实拒绝：平台没有用户自定义阈值预警的落库口径，猜一个实现会推错通知
+            raise NotImplementedError(
+                "平台当前不支持用户自定义价格的阈值预警（现有预警是按离场计划触发的），"
+                "该操作未执行。"
+            )
+        if kind == "deep_analysis":
+            raise NotImplementedError(
+                "深度分析任务入口尚未从路由层接出为可复用服务，本轮无法代你启动；"
+                "该操作未执行。"
+            )
+        raise ValueError(f"未知动作类型 {kind or '未提供'}，未做任何改动")
+
+    return executor
+
+
+def can_execute_actions_for_surface(surface: str) -> bool:
+    """该执行面是否允许执行动作（产品内对话才行；MCP 等外部面只读）。"""
+    from tradingagents.agent.actions import can_execute_actions
+
+    return can_execute_actions(surface)
+
+
 def build_registry(user_id: str | None = None) -> Any:
     """装配工具注册表。
 
@@ -406,6 +483,171 @@ def build_registry(user_id: str | None = None) -> Any:
 
         return _Port()
 
+    def _risk_port() -> Any:
+        """组合体检端口（L1）：**风险和排序都由退出引擎算**，工具只做转换。
+
+        * 排序/优先级/处置动作来自 `exit_engine_service.evaluate_portfolio`
+          （高优先级在前，同级按浮亏从小到大的确定性规则）；
+        * `market_states` 喂的是**平台已落库的判定**（`signal_verdicts` 每标的最新
+          一条），于是组合体检与判定历史/兑现共用同一批结论，而不是让模型另推一份；
+        * `position_rows` 一并回传：让工具能区分「未导入持仓」与「有持仓但本次
+          评估不出来」——把"读不到"说成"空仓"是本平台最不能接受的失败形态。
+        """
+        from api.database import SignalVerdictDB, get_db_ctx
+        from api.services import exit_engine_service
+
+        class _Port:
+            def risk_review(self, *, limit: int):
+                uid = _require_user("portfolio_risk")
+                with get_db_ctx() as db:
+                    rows = (
+                        db.query(SignalVerdictDB)
+                        .filter(SignalVerdictDB.user_id == uid)
+                        .order_by(SignalVerdictDB.created_at.desc())
+                        .limit(200)
+                        .all()
+                    )
+                    # 每标的最新的那一条：dict 覆盖式写入即"最新优先"
+                    market_states: dict[str, dict[str, Any]] = {}
+                    for row in rows:
+                        symbol = str(row.symbol or "").strip().upper()
+                        if symbol and symbol not in market_states:
+                            market_states[symbol] = {
+                                "state": row.state,
+                                "confidence": row.confidence,
+                                "signal_version": row.signal_version,
+                                "daily_only": bool(row.daily_only),
+                                "falsifiers": row.falsifiers or [],
+                            }
+                    position_rows = len(exit_engine_service.exit_engine_positions(db, user_id=uid))
+                    decisions = exit_engine_service.evaluate_portfolio(
+                        db, user_id=uid, market_states=market_states
+                    )
+                    capped = max(1, int(limit))
+                    return {
+                        "items": [d.to_dict() for d in decisions[:capped]],
+                        "summary": exit_engine_service.summarize_decisions(decisions),
+                        "total": len(decisions),
+                        "position_rows": position_rows,
+                    }
+
+        return _Port()
+
+    def _plan_port() -> Any:
+        """交易计划端口（L1）：只读**当前有效且可监控**的计划（含纪律锚点）。
+
+        不过滤、不重排：`list_active_plans` 已经剔除了非 active 与**没有锚点**的
+        计划（`_row_has_anchors`）。在这里再筛一遍，两处口径迟早分叉。
+        """
+        from api.database import get_db_ctx
+        from api.services import trade_plan_service
+
+        class _Port:
+            def active_plans(self, *, limit: int, symbol: str | None = None):
+                uid = _require_user("trade_plan")
+                with get_db_ctx() as db:
+                    rows = trade_plan_service.list_active_plans(db, user_id=uid)
+                plans = [trade_plan_service.plan_dict_from_row(row) for row in rows]
+                plans = [plan for plan in plans if plan]
+                if symbol:
+                    wanted = str(symbol).strip().upper()
+                    plans = [p for p in plans if str(p.get("symbol") or "").upper() == wanted]
+                return plans[: max(1, int(limit))]
+
+        return _Port()
+
+    def _quality_port() -> Any:
+        """T+1 质量端口（L1）：平台自身结论的命中率与**统计效力**（同一把尺子）。"""
+        from api.database import get_db_ctx
+        from api.services import insights_t1_service
+
+        class _Port:
+            def t1_quality(self, *, days: int, scope: str):
+                uid = _require_user("t1_quality")
+                with get_db_ctx() as db:
+                    return insights_t1_service.report_accuracy_t1_summary(
+                        db, user_id=uid, days=int(days), scope=scope
+                    )
+
+        return _Port()
+
+    def _paper_port() -> Any:
+        """模拟盘端口（L1）：快照本身即事实（含"空仓"这一可确证状态）。"""
+        from api.database import get_db_ctx
+        from api.services import paper_trading_service
+
+        class _Port:
+            def portfolio_snapshot(self):
+                uid = _require_user("paper_portfolio")
+                with get_db_ctx() as db:
+                    return paper_trading_service.get_portfolio_snapshot(db, uid)
+
+        return _Port()
+
+    def _ledger_port() -> Any:
+        """交易台账端口（L1）：归因汇总 + 最近流水（盈亏口径由服务层重放得出）。"""
+        from api.database import get_db_ctx
+        from api.services import trade_ledger_service
+
+        class _Port:
+            def ledger(self, *, limit: int, symbol: str | None = None):
+                uid = _require_user("trade_ledger")
+                capped = max(1, int(limit))
+                with get_db_ctx() as db:
+                    summary = trade_ledger_service.attribution_summary(db, user_id=uid)
+                    rows = trade_ledger_service.list_trades(
+                        db, user_id=uid, symbol=symbol
+                    )
+                trades = [
+                    {
+                        "symbol": row.symbol,
+                        "name": row.name,
+                        "action": row.action,
+                        "trade_date": row.trade_date,
+                        "price": row.price,
+                        "shares": row.shares,
+                        "amount": trade_ledger_service._row_amount(row),
+                        "realized_pnl": trade_ledger_service._row_realized(row),
+                        "sell_reason": getattr(row, "sell_reason", None),
+                    }
+                    for row in rows[-capped:]  # 最近若干条（服务按时间升序返回）
+                ]
+                return {"summary": summary, "trades": trades}
+
+        return _Port()
+
+    def _consensus_port() -> Any:
+        """多视角共识端口（L1）：某标的**最近一份报告**里已落库的共识结论。
+
+        共识是报告生成时算好并写进 `result_data` 的（`_attach_consensus_summary`），
+        这里只读不算——重新算一遍等于引入第二个口径。
+        """
+        from api.database import get_db_ctx
+        from api.services import report_service
+
+        class _Port:
+            def latest_consensus(self, *, symbol: str):
+                uid = _require_user("report_consensus")
+                with get_db_ctx() as db:
+                    rows = report_service.get_latest_reports_by_symbols(
+                        db, [symbol], user_id=uid
+                    )
+                    if not rows:
+                        return None
+                    row = rows[0]
+                    result_data = row.result_data if isinstance(row.result_data, dict) else {}
+                    consensus = result_data.get("consensus_summary")
+                    return {
+                        "report_id": row.id,
+                        "symbol": row.symbol,
+                        "trade_date": row.trade_date,
+                        "direction": row.direction,
+                        "confidence": row.confidence,
+                        "consensus": consensus if isinstance(consensus, dict) else None,
+                    }
+
+        return _Port()
+
     def _arena_port() -> Any:
         """模型评测榜端口（L1）：读平台落库的评测产出（已剔除日期漂移样本）。
 
@@ -446,6 +688,12 @@ def build_registry(user_id: str | None = None) -> Any:
         recommendation_port=_recommendation_port(),
         tracking_port=_tracking_board_port(),
         arena_port=_arena_port(),
+        risk_port=_risk_port(),
+        plan_port=_plan_port(),
+        quality_port=_quality_port(),
+        paper_port=_paper_port(),
+        ledger_port=_ledger_port(),
+        consensus_port=_consensus_port(),
         # L2 证据工具的依赖：组合根显式装配，「未注入就不注册」由 build_registry 保证。
         #
         # `default_market_fetchers()` 指向**既有**取数实现（cn_research_data），
@@ -1017,7 +1265,23 @@ def run_turn_streaming(
     # 修复审计 A1——此前 id 只落库不回传、历史从不注入，多轮在结构上不可能发生。
     history = load_recent_history(user_id=user_id, conversation_id=conversation_id)
     model_label = getattr(deps, "model_label", "")
-    request = replace(request, conversation_id=conversation_id, history=history)
+    # 跨轮状态（槽位/证据账本/未覆盖项/待确认提议/任务号）。读不到就是空状态——
+    # 状态是增强，不能让"读状态失败"变成"这轮不能回答"。
+    state = load_conversation_state(user_id=user_id, conversation_id=conversation_id)
+    # 指代消解：没有显式代码时**读槽位**（确定性），不交给模型猜标的。
+    # 槽位有值而文本含「它/这只」→ 直接补上 symbol；槽位为空且文本含指代 →
+    # 什么都不做（让澄清分支去追问），**绝不猜一个代码**。
+    if request.symbol is None:
+        resolved, reason = state.resolve_symbol(request.text)
+        if resolved:
+            request = replace(request, symbol=resolved)
+            logger.info(
+                "reference resolved from conversation state: %s -> %s (%s)",
+                request.text[:20], resolved, reason,
+            )
+    request = replace(
+        request, conversation_id=conversation_id, history=history, state=state
+    )
     _persist_message(
         conversation_id=conversation_id, user_id=user_id, role="user", content=request.text
     )
@@ -1044,7 +1308,14 @@ def run_turn_streaming(
         previous_trading_day=deps.previous_trading_day,
         position_context=position_context,
         model_label=model_label,
+        # 动作执行器必须显式传入：此前从未传过，于是「确认」在生产里只会回
+        # 「当前环境未配置动作执行器」——提议→确认链路从未真正执行过。
+        action_executor=build_action_executor(user_id),
     )
+
+    # 状态回写：下一轮要靠它消解指代、延续未覆盖项、续接「确认」。
+    # 落库失败只记日志（状态是增强，不是回答的前置条件）。
+    save_conversation_state(user_id=user_id, state=result.conversation_state)
 
     verdict_id = _persist_verdict_if_any(
         sink.verdict, user_id=user_id, conversation_id=conversation_id
@@ -1231,6 +1502,44 @@ def load_recent_history(
         for r in ordered
         if str(r.content or "").strip()
     )
+
+
+def load_conversation_state(*, user_id: str, conversation_id: str | None):
+    """读出会话状态（槽位/账本/未覆盖/待确认提议/任务号）。
+
+    读不到就返回空状态：状态是**增强**，不能让"读状态失败"变成"这轮不能回答"。
+    同时刻意不在这里抛错——它与 `load_recent_history` 同一条取舍。
+    """
+    from api.database import get_db_ctx
+    from api.services import conversation_state_service
+
+    from tradingagents.agent.state import ConversationState
+
+    if not conversation_id:
+        return ConversationState()
+    try:
+        with get_db_ctx() as db:
+            return conversation_state_service.load_state(
+                db, user_id=user_id, conversation_id=conversation_id
+            )
+    except Exception as exc:  # noqa: BLE001 — 状态读取失败不得阻断回答
+        logger.info("conversation state load failed for %s: %s", conversation_id, exc)
+        return ConversationState(conversation_id=conversation_id)
+
+
+def save_conversation_state(*, user_id: str, state: Any) -> bool:
+    """把本轮结束后的状态写回。**失败只记日志**。"""
+    if state is None:
+        return False
+    from api.database import get_db_ctx
+    from api.services import conversation_state_service
+
+    try:
+        with get_db_ctx() as db:
+            return conversation_state_service.save_state(db, user_id=user_id, state=state)
+    except Exception as exc:  # noqa: BLE001 — 状态落库失败不得让回答失败
+        logger.warning("conversation state save failed: %s", exc)
+        return False
 
 
 def cost_by_tier(*, user_id: str) -> dict[str, dict[str, Any]]:

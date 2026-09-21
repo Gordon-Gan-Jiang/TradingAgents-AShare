@@ -58,6 +58,14 @@ class TurnContext:
     # 每步执行观测：工具、参数、是否成功、耗时、证据条数。存在 ctx 上而不是
     # 逐个改 `_finish` 调用点——那有 5 处，漏一处就会有一类回合没有 trace。
     steps: list[dict[str, Any]] = field(default_factory=list)
+    # 本轮的证据与覆盖声明：会话状态（槽位/账本/未覆盖延续）在 `_finish` 里统一
+    # 累积，而 `_finish` 有 5 个调用点——存在 ctx 上就不必逐个改调用点，
+    # 与 plan/steps 同一个理由。
+    evidence_items: tuple[Any, ...] = ()
+    coverage: Any | None = None
+    # 本轮提交的异步任务号（submit_* 工具返回的 job_id）。会话状态要记住它们，
+    # 否则下一轮用户问「刚才那个任务跑完了吗」时，Agent 不知道任务号是什么。
+    job_ids: list[str] = field(default_factory=list)
     tokens: int = 0
     model_calls: int = 0
     verdict: Any | None = None

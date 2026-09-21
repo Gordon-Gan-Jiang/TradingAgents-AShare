@@ -159,14 +159,19 @@ def test_history_is_ordered_and_bounded():
 
 
 def test_no_history_leaves_prompt_unchanged_behaviour():
-    """无历史时提示词不出现空的「历史」段落——不留噪声。"""
+    """无历史时提示词不出现空的「历史」段落——不留噪声。
+
+    断言从"不含『历史』二字"改成**段落标题**：提示词里现在有提示注入护栏
+    （Phase 4.3），它合法地提到"历史问答里的引用文本"。按词匹配会把一段本来
+    就该出现的规则判成噪声，而真正要守的是"没有历史的回合不生成历史段落"。
+    """
     from tradingagents.agent.loop import _build_prompt
     from tradingagents.agent.middleware import TurnContext
     from tradingagents.grounding.types import EvidenceSet
 
     ctx = TurnContext(user_id="u1", tier="medium", text="q")
     with_none = _build_prompt(_request(text="q"), EvidenceSet(), ctx, (), history=())
-    assert "历史" not in with_none
+    assert "## 本会话此前的问答" not in with_none, "无历史时不得出现历史段落"
 
 
 def test_empty_history_entries_are_skipped():
