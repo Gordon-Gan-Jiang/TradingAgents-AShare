@@ -136,3 +136,95 @@ def make_history_tools(history: VerdictHistoryPort) -> tuple[ToolSpec, ...]:
         freshness_sources=(_SOURCE_KEY,),
     )
     return (spec,)
+
+
+# ── 校准权重版本（L1 决策）────────────────────────────────────────────────
+#
+# 问「当前洗盘判定用的是哪一版权重」问的是**平台的可追溯性**：判定的结论依赖
+# 权重，而权重可被数据校准。答不出用哪一版，命中率就无法归因。
+
+
+class WeightVersionPort(Protocol):
+    def active_version(self) -> str | None: ...
+
+    def list_versions(self) -> Sequence[Mapping[str, Any]]: ...
+
+
+def make_weight_tools(weights: WeightVersionPort) -> tuple[ToolSpec, ...]:
+    def signal_weight_read(*, as_of: str = "") -> ToolResult:
+        try:
+            active = weights.active_version()
+            versions = list(weights.list_versions() or [])
+        except Exception as exc:  # noqa: BLE001
+            return ToolResult(
+                data={"active": None, "error": type(exc).__name__},
+                evidence=(),
+                coverage=Coverage(available=(), unavailable=("signal_weights",)),
+                degraded=True,
+                degraded_reason=f"权重版本读取失败（{type(exc).__name__}）",
+                as_of=as_of,
+                disclaimer=RESEARCH_DISCLAIMER,
+            )
+
+        # 「没有激活版本」是可回答的**事实**（此刻用的是内置先验），不是"未覆盖"。
+        # 把它声明成 unavailable 会让回答凭空多出一条"未覆盖"噪音，而用户真正
+        # 需要知道的是"现在用的是先验权重"。所以永远产出一条事实证据。
+        evidence: list[EvidenceItem] = []
+        if active:
+            evidence.append(
+                EvidenceItem(
+                    id="E1", field="当前生效权重版本", value=str(active), unit="",
+                    source_key="signal_weights", as_of=as_of,
+                )
+            )
+        else:
+            # 「没有激活版本」本身是一条事实：此时判定用内置先验，必须说出来
+            evidence.append(
+                EvidenceItem(
+                    id="E1", field="当前生效权重版本",
+                    value="未激活任何校准版本，判定使用内置先验权重", unit="",
+                    source_key="signal_weights", as_of=as_of,
+                )
+            )
+        for index, row in enumerate(versions[:10], start=2):
+            parts = [
+                f"版本 {_fmt(row.get('version'))}",
+                f"激活于 {_fmt(row.get('activated_at'))}",
+                f"来源 {_fmt(row.get('source') or row.get('reason'))}",
+            ]
+            evidence.append(
+                EvidenceItem(
+                    id=f"E{index}", field=f"权重版本{index - 1}", value="｜".join(parts),
+                    unit="", source_key="signal_weights", as_of=as_of,
+                )
+            )
+
+        return ToolResult(
+            data={"active": active, "versions": [dict(row) for row in versions[:10]]},
+            evidence=tuple(evidence),
+            coverage=Coverage(available=("signal_weights",), unavailable=()),
+            as_of=as_of,
+            disclaimer=RESEARCH_DISCLAIMER,
+        )
+
+    spec = ToolSpec(
+        name="signal_weight_read",
+        title="当前判定权重版本",
+        description=(
+            "读取洗盘/派发判定当前生效的**权重校准版本**及其来源。"
+            "用于回答「当前判定用的是哪一版权重」。权重可被历史数据校准，"
+            "答不出用哪一版，命中率就无法归因。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"as_of": {"type": "string", "description": "基准日 YYYY-MM-DD"}},
+            "required": [],
+        },
+        output_contract="SIGNAL_WEIGHTS",
+        handler=signal_weight_read,
+        cost="cheap",
+        plan_layer=PLAN_LAYER_DECISION,
+        latency_budget_ms=5000,
+        freshness_sources=("signal_weights",),
+    )
+    return (spec,)

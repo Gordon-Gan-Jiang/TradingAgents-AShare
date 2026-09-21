@@ -117,3 +117,71 @@ def test_tool_is_l1_and_registered_when_injected():
     )
     assert "verdict_history_read" in registry.names()
     assert "verdict_history_read" in registry.names_by_layer(PLAN_LAYER_DECISION)
+
+
+# ── 权重版本（L1）─────────────────────────────────────────────────────────
+
+
+class _FakeWeights:
+    def __init__(self, active=None, versions=None, *, error=None):
+        self._active = active
+        self._versions = versions or []
+        self._error = error
+
+    def active_version(self):
+        if self._error:
+            raise self._error
+        return self._active
+
+    def list_versions(self):
+        return self._versions
+
+
+def _weight_tool(port):
+    from tradingagents.tools.history import make_weight_tools
+
+    return {spec.name: spec for spec in make_weight_tools(port)}["signal_weight_read"]
+
+
+def test_active_weight_version_is_evidence():
+    spec = _weight_tool(
+        _FakeWeights(active="v3", versions=[{"version": "v3", "activated_at": "2026-09-01",
+                                             "source": "calibration"}])
+    )
+    result = spec.handler(as_of="2026-09-21")
+    joined = " ".join(f"{i.field}={i.value}" for i in result.evidence)
+    assert "v3" in joined
+
+
+def test_no_active_version_is_declared_as_prior_weights():
+    """「没有激活版本」本身是事实：此时用的是内置先验，必须说出来而不是留空。"""
+    spec = _weight_tool(_FakeWeights(active=None, versions=[]))
+    result = spec.handler(as_of="2026-09-21")
+
+    assert result.evidence, "不能空手而归——「没有激活版本」也要成为一条可引用事实"
+    assert "先验" in str(result.evidence[0].value)
+    assert result.coverage.unavailable == (), (
+        "「正在用先验权重」是可回答的事实，不是未覆盖——声明成未覆盖会多出一条噪音"
+    )
+
+
+def test_weight_read_failure_degrades():
+    spec = _weight_tool(_FakeWeights(error=RuntimeError("db down")))
+    result = spec.handler(as_of="2026-09-21")
+    assert result.degraded is True
+    assert result.coverage.unavailable == ("signal_weights",)
+    assert "db down" not in str(result.data)
+
+
+def test_weight_tool_is_l1_and_registered():
+    from tradingagents.tools import build_registry
+    from tradingagents.tools.spec import PLAN_LAYER_DECISION
+
+    spec = _weight_tool(_FakeWeights(active="v1"))
+    assert spec.plan_layer == PLAN_LAYER_DECISION
+
+    registry = build_registry(
+        ports_factory=lambda *a: object(), news_fetcher=lambda *a: [],
+        weight_port=_FakeWeights(active="v1"),
+    )
+    assert "signal_weight_read" in registry.names_by_layer(PLAN_LAYER_DECISION)

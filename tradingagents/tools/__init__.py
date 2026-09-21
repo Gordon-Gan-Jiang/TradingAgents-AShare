@@ -31,6 +31,7 @@ def build_registry(
     news_fetcher: Callable[..., object] | None = None,
     market_screener: object | None = None,
     history_port: object | None = None,
+    weight_port: object | None = None,
 ) -> ToolRegistry:
     """组装工具注册表。
 
@@ -41,7 +42,7 @@ def build_registry(
     就炸」的条目——那类条目会让 Agent 把预算浪费在必然失败的调用上。
     """
     from .data import make_data_tools
-    from .history import make_history_tools
+    from .history import make_history_tools, make_weight_tools
     from .news import make_news_tools
     from .screen import make_screen_tools
     from .signals import make_signal_tools
@@ -62,5 +63,8 @@ def build_registry(
             registry.register(spec)
     if history_port is not None:
         for spec in make_history_tools(history_port):
+            registry.register(spec)
+    if weight_port is not None:
+        for spec in make_weight_tools(weight_port):
             registry.register(spec)
     return registry

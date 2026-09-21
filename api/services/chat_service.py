@@ -122,6 +122,26 @@ def build_registry(user_id: str | None = None) -> Any:
 
         return _Port()
 
+    def _weight_port() -> Any:
+        """权重版本端口：只读，无用户维度（权重是全局的）。"""
+        from api.services import signal_weight_service
+
+        class _Port:
+            def active_version(self):
+                return signal_weight_service.active_version()
+
+            def list_versions(self):
+                rows = signal_weight_service.list_versions() or []
+                return [
+                    row if isinstance(row, dict)
+                    else {"version": getattr(row, "version", None),
+                          "activated_at": getattr(row, "activated_at", None),
+                          "source": getattr(row, "source", None) or getattr(row, "reason", None)}
+                    for row in rows
+                ]
+
+        return _Port()
+
     def lazy_screener() -> Any:
         from api.services.market_screen_ports import build_market_screener
 
@@ -135,6 +155,7 @@ def build_registry(user_id: str | None = None) -> Any:
         news_fetcher=lazy_news,
         market_screener=lazy_screener(),
         history_port=_history_port(),
+        weight_port=_weight_port(),
     )
 
 
