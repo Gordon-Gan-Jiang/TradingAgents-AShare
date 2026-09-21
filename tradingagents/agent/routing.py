@@ -67,7 +67,11 @@ TIER_BUDGETS: dict[str, TierBudget] = {
 # 落成规则：按问句语义挑**一个**便宜的取数工具，零 LLM、毫秒级、可穷举。
 
 FACTUAL_TOOL_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("净流入", "净流出", "主力", "资金流"), "get_individual_fund_flow"),
+    # 指向**能产出可引用证据**的工具：旧 `get_individual_fund_flow` 返回预格式化
+    # 文本、`evidence=()`，于是"主力净流入多少"即使取到数也无法被引用，回答只能
+    # 答"无可用证据"。`capital_flow_read` 给数值（单位元）+ 弃权声明。
+    # 这不是"新工具更好看"，而是**没有证据就没有回答**这条硬约束的直接后果。
+    (("净流入", "净流出", "主力", "资金流"), "capital_flow_read"),
     (("市盈率", "市净率", "估值", "基本面", "每股", "营收", "净利润"), "get_fundamentals"),
     (("资产负债", "负债率"), "get_balance_sheet"),
     (("现金流",), "get_cashflow"),

@@ -31,7 +31,10 @@ import pytest
     [
         ("600519 现在多少钱", "600519.SH", "get_realtime_quotes"),
         ("300750 今天换手率多少", "300750.SZ", "get_realtime_quotes"),
-        ("600519 的主力资金净流入多少", "600519.SH", "get_individual_fund_flow"),
+        # 期望值随"没有证据就没有回答"这条硬约束更新：旧 get_individual_fund_flow
+        # 返回预格式化文本、evidence=()，取到数也无法被引用；capital_flow_read
+        # 给数值（元）+ 弃权声明。
+        ("600519 的主力资金净流入多少", "600519.SH", "capital_flow_read"),
         ("贵州茅台市盈率多少", "600519.SH", "get_fundamentals"),
         ("600519 资产负债率是多少", "600519.SH", "get_balance_sheet"),
         ("600519 最近有什么新闻", "600519.SH", "data_symbol_news"),

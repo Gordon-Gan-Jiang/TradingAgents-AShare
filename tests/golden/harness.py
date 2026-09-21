@@ -163,10 +163,19 @@ def warm_registry() -> Any:
     if _REGISTRY is None:
         from tradingagents.tools import build_registry
 
+        # 证据类取数器**必须注入**，否则新增的 L2 工具不在册、规划只会回落到
+        # 旧工具——那时跑分测的就不是"新工具是否被选中"，而是"它们根本不可选"。
+        try:
+            from tradingagents.tools.evidence import default_market_fetchers
+
+            fetchers = default_market_fetchers()
+        except Exception:  # noqa: BLE001 — 取数器不可用时仍可跑分（只是少几个工具）
+            fetchers = None
         _REGISTRY = build_registry(
             ports_factory=lambda *a: object(),
             news_fetcher=lambda *a: [],
             market_screener=object(),
+            evidence_fetchers=fetchers,
         )
     return _REGISTRY
 

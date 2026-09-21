@@ -58,11 +58,14 @@ def test_required_tools_exist_in_the_registry():
 
     # 用哑依赖装配**完整**工具面：不带端口时注册表里没有信号/新闻/筛选工具，
     # 那样会把"工具存在"误判成"数据集写错"。
+    from tradingagents.tools.evidence import default_market_fetchers
+
     known = set(
         build_registry(
             ports_factory=lambda *a: object(),
             news_fetcher=lambda *a: [],
             market_screener=object(),
+            evidence_fetchers=default_market_fetchers(),
         ).names()
     )
     assert "signal_washout_probe" in known
