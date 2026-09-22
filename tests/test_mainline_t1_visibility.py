@@ -217,3 +217,40 @@ def test_refresh_is_quiet_when_there_are_no_reports():
     db = _mk_db()
     result = mainline_service.refresh_t1_outcomes(db, user_id="u1")
     assert result == {"evaluated_reports": 0, "skipped": []}
+
+
+# ------------------------------- 判据四：不传 as_of_date 时不能结构上永远为空
+
+def test_missing_as_of_date_does_not_make_evaluation_impossible():
+    """**核心回归**：`as_of_date=None` 时上界不能被算成报告日本身。
+
+    缺陷：`le = bench.index[bench.index <= (as_of_date or trade_date)]` ——
+    不给 as_of_date 时上界就是 trade_date，于是 `check_date <= trade_date`
+    **恒真**，无论基准多新鲜都返回 []。
+
+    实测（同一报告、同一基准，只差这一个参数）：
+        as_of_date=None      → 0 条
+        as_of_date=2026-09-20 → 1 条
+
+    而调度器调的正是 `refresh_t1_outcomes(db, user_id="system")`——**不传**
+    as_of_date。所以定时闭环在结构上永远算不出任何东西。
+    """
+    db = _mk_db()
+    bench = _bench([f"2026-09-{d:02d}" for d in range(1, 21)])
+
+    def fake_board_hist(ak, board_name, sector_type, trade_date, check_date):
+        return pd.Series({"2026-09-01": 100.0, "2026-09-03": 105.0})
+
+    run = _run(trade_date="2026-09-01")
+    with patch(
+        "tradingagents.dataflows.mainline_backtest.fetch_benchmark_close", return_value=bench
+    ), patch.object(mainline_service, "_board_hist_close", fake_board_hist):
+        implicit = mainline_service.evaluate_t1_for_report(db, run, ak_module=object())
+        explicit = mainline_service.evaluate_t1_for_report(
+            db, run, as_of_date="2026-09-20", ak_module=object()
+        )
+
+    assert explicit, "本用例前提：给 as_of_date 时能算出来"
+    assert implicit, (
+        "不传 as_of_date 就永远算不出来 → 定时调度路径（它不传）永远为空"
+    )

@@ -744,6 +744,17 @@ def evaluate_t1_for_report(
     if not trade_date or not mainlines or not report_id:
         return []
 
+    # `as_of_date` 缺省时取**今天**，不能取 trade_date。
+    #
+    # 缺陷（实测）：原来写的是 `bench.index <= (as_of_date or trade_date)`，
+    # 不给 as_of_date 时上界就是**报告日本身**，于是 `check_date <= trade_date`
+    # 恒真 → 无论基准多新鲜都返回 []。同一报告、同一基准，只差这一个参数：
+    #     as_of_date=None      → 0 条
+    #     as_of_date=2026-09-20 → 1 条
+    # 而调度器调的正是 `refresh_t1_outcomes(db, user_id="system")`——**不传**
+    # as_of_date。所以定时闭环在结构上永远算不出任何东西。
+    effective_as_of = as_of_date or datetime.now(_UTC).strftime("%Y-%m-%d")
+
     try:
         bench = fetch_benchmark_close(ak_module, cache=True)
         bench_last = str(bench.index[-1]) if len(bench) else None
@@ -763,10 +774,10 @@ def evaluate_t1_for_report(
             f"基准数据陈旧：末日 {bench_last} 早于报告日 {trade_date}，无法评估 T+1 兑现"
         )
 
-    le = bench.index[bench.index <= (as_of_date or trade_date)]
+    le = bench.index[bench.index <= effective_as_of]
     if len(le) == 0:
         raise MainlineDataUnavailable(
-            f"基准数据没有 <= {as_of_date or trade_date} 的日期（末日 {bench_last}）"
+            f"基准数据没有 <= {effective_as_of} 的日期（末日 {bench_last}）"
         )
     check_date = str(le[-1])
     if check_date <= trade_date:
