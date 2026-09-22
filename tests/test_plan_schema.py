@@ -111,10 +111,53 @@ def test_clarify_requires_a_question():
     assert ok is not None and ok.need_clarify is True
 
 
-def test_confidence_is_clamped_and_bad_values_rejected():
+def test_confidence_is_clamped_and_uninterpretable_values_rejected():
     plan = parse_plan(_payload(confidence=7), known_tools=KNOWN)
     assert plan is not None and plan.confidence == 1.0
-    assert parse_plan(_payload(confidence="high"), known_tools=KNOWN) is None
+    # 读不懂的值仍然整体拒绝（这是"违规就降级"的原文）。
+    assert parse_plan(_payload(confidence=[1, 2]), known_tools=KNOWN) is None
+    assert parse_plan(_payload(confidence="大概吧"), known_tools=KNOWN) is None
+
+
+def test_word_confidence_is_understood_not_fatal():
+    """`"high"` 这类**表述型**差异不该毁掉整个计划。
+
+    实测证据：黄金集里「这只票要不要止损」的规划**完全正确**（意图、追问文本都对），
+    却因为模型把 confidence 写成 `"high"` 而被整体拒绝 → 回落规则层 → 标的不存在
+    → 整轮不可服务。同一轮里 s07 也栽在同一个字上。
+
+    confidence 不改变答案的含义（它只进 `RouteDecision.confidence` 与 trace），
+    把它和"未知工具""步数超限"这类**语义**违规同等对待，是拿用户能得到的答案
+    去换一个字段的整洁。**不能信息丢失的归一化**与"修一修继续用"是两回事：
+    字符串步骤也被保留，未知工具仍然整体拒绝。
+    """
+    plan = parse_plan(_payload(confidence="high"), known_tools=KNOWN)
+    assert plan is not None, "表述型差异不该导致整计划被拒"
+    assert plan.confidence == 0.9
+
+    assert parse_plan(_payload(confidence="0.42"), known_tools=KNOWN).confidence == 0.42
+    assert parse_plan(_payload(confidence=""), known_tools=KNOWN).confidence == 0.0
+
+
+def test_bare_string_step_is_understood_not_fatal():
+    """`steps: ["watchlist_read", ...]` 也必须能用。
+
+    实测证据（同一轮跑分日志）：模型把步骤写成工具名数组而不是对象数组，
+    `parse_plan` 因 `isinstance(raw, Mapping)` 判否而**丢掉整个计划**——
+    用户得到的不是"少一个工具"，而是"这轮什么都没查"。归一化成
+    `{tool, arguments:{}}` 不丢任何信息：工具名留在计划里，缺参数由
+    `_plan_tools` 按 schema 回填（填不满就跳过并留痕）。
+    """
+    plan = parse_plan(
+        _payload(steps=["signal_washout_probe_batch", "get_realtime_quotes"]),
+        known_tools=KNOWN,
+    )
+    assert plan is not None
+    assert [s.tool for s in plan.steps] == ["signal_washout_probe_batch", "get_realtime_quotes"]
+    assert all(s.arguments == {} for s in plan.steps)
+
+    # 未知工具仍然整体拒绝——归一化不放松语义校验。
+    assert parse_plan(_payload(steps=["nope"]), known_tools=KNOWN) is None
 
 
 def test_symbols_are_deduplicated_and_trimmed():

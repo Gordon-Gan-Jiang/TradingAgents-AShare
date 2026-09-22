@@ -56,6 +56,75 @@ def test_symbolless_question_never_gets_a_symbol_requiring_tool():
     assert tool not in SYMBOL_REQUIRED_TOOLS, f"无标的却选了 {tool}"
 
 
+@pytest.mark.parametrize(
+    "text,symbol,expected",
+    [
+        # 本轮新增的四条真数据源此前**没有任何规则入口**：筹码/分时/公告/指数
+        # 的问句只能落回 `get_board_spot`，用户问筹码拿到板块快照。
+        ("600519 最近筹码集中度怎么样", "600519.SH", "chip_distribution_read"),
+        ("600519 今天分时承接怎么样", "600519.SH", "intraday_bars_read"),
+        ("600519 最近有什么公告", "600519.SH", "announcements_read"),
+        # 公告要盖过新闻（同一段里有"公告"）：公告是**权威披露**，新闻不是。
+        ("000001.SZ 最近有什么新闻", "000001.SZ", "data_symbol_news"),
+        ("今天上证指数多少点", None, "index_quote_read"),
+        ("我的自选股有哪些", None, "watchlist_read"),
+        ("你的数据是新的吗", None, "data_freshness_check"),
+    ],
+)
+def test_new_evidence_tools_are_reachable_by_rules(text, symbol, expected):
+    """新增的 L2 证据工具必须有**规则可达**的入口。
+
+    规划层只在"规则解析不出标的"时才跑（成本决定）。而带代码的问句一定能解析出
+    标的——于是这类问句**永远走不到规划层**，只能靠这张提示词表选工具。
+    表里没有的条目 = 那个工具对这类问句根本不可选，"封了但用不上"。
+    """
+    from tradingagents.agent.routing import plan_factual_tool
+
+    assert plan_factual_tool(text, has_symbol=bool(symbol)) == expected
+
+
+def test_symbol_requiring_new_tools_are_declared_as_such():
+    """需要代码的新工具必须登记，否则无标的问句会选中一次必然失败的调用。"""
+    from tradingagents.agent.routing import SYMBOL_REQUIRED_TOOLS
+
+    for name in ("chip_distribution_read", "intraday_bars_read", "announcements_read"):
+        assert name in SYMBOL_REQUIRED_TOOLS, f"{name} 需要代码却没登记"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "600519 最近筹码集中度怎么样",
+        "600519 今天分时承接怎么样",
+        "600519 最近有什么公告",
+        "今天上证指数多少点",
+    ],
+)
+def test_new_evidence_questions_route_to_the_light_tier(text):
+    """这些问句必须是**轻档**：中档会去跑判定探针，答的是另一个问题。
+
+    档位标记表决定了走哪条路：中档 → 洗盘探针（5× 成本、答非所问），
+    轻档 → 按语义选一个便宜的证据工具。实测「最近筹码集中度怎么样」落进中档，
+    于是用户问筹码集中度，拿到的是洗盘判定。
+    """
+    from tradingagents.agent.routing import TIER_LIGHT, RuleTierClassifier
+
+    class _Resolver:
+        def resolve(self, _text, symbol=None):
+            return type(
+                "R", (), {"symbol": "600519.SH", "symbols": (), "candidates": ()}
+            )()
+
+    assert RuleTierClassifier(_Resolver()).classify(text).tier == TIER_LIGHT
+
+
+def test_index_question_without_symbol_is_market_level():
+    """「今天上证指数多少点」不需要标的，不该被追问代码。"""
+    from tradingagents.agent.routing import looks_like_market_level_factual
+
+    assert looks_like_market_level_factual("今天上证指数多少点") is True
+
+
 def test_unknown_factual_question_falls_back_to_broadest_cheap_fact():
     from tradingagents.agent.routing import plan_factual_tool
 

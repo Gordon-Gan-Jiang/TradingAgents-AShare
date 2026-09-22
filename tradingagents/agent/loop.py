@@ -153,6 +153,13 @@ class TurnRequest:
     # 没有这个标记的话，澄清分支会把它当成"用户没给代码"而追问——那是把
     # 平台已有的市场级工具藏起来（实测踩到）。
     market_level: bool = False
+    # 规划层是否认为"这一轮该追问"。默认 True = 今天的规则行为（没标的就追问）。
+    #
+    # 为什么必须传下来：规划器产出的 `need_clarify` 此前**在边界被丢掉**，
+    # 于是「什么是洗盘」「帮我记一下这笔交易」这类根本不涉及标的的问句也会走进
+    # 澄清分支，回一句"请告诉我具体的股票代码"。用户问概念，平台问代码。
+    # 反过来，「它是不是在洗盘」这种真的缺标的的问句又必须继续追问。
+    plan_need_clarify: bool = True
 
 
 @dataclass(frozen=True)
@@ -217,6 +224,10 @@ def _prequel(
         # 却在执行前被这里拦下追问"请告诉我股票代码"——追问分支只看 symbol，
         # 把规划层的决定当成了"用户没说清楚"。
         and not request.planned_steps
+        # 规划层说了"这一轮不用追问"时不再追问。反过来的那半同样致命：问「什么是洗盘」
+        # 却被要一个股票代码，是本轮实测到的过度追问形态——追问条件只看"有没有标的"，
+        # 而概念问答、记账请求这类问句**本来就不该有标的**。
+        and request.plan_need_clarify
     ):
         if request.candidates:
             listed = "、".join(request.candidates)
@@ -383,8 +394,15 @@ def _missing_required_context(
     return tuple(missing)
 
 
+def _missing_required_arguments(spec: Any, arguments: Mapping[str, Any]) -> set[str]:
+    """按工具自己的 schema 找出**没填的必填参数**。"""
+    schema = getattr(spec, "input_schema", None) or {}
+    required = {str(key) for key in (schema.get("required") or ())}
+    return {key for key in required if arguments.get(key) in (None, "")}
+
+
 def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]:
-    """默认工具计划：按档位与标的机械决定。
+    """工具计划：**规划层优先**，规则兜底。
 
     轻档**不调用探针**——事实型问句付 5× 成本是纯浪费。
     重档在本循环内不执行（由既有深度分析管道负责），因此也不计划工具。
@@ -393,11 +411,26 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
         return []
     as_of = request.as_of or ""
 
+    if request.plan_source == "llm" and not request.planned_steps and not request.screen:
+        # 规划层跑过、且明确给了空步骤 = "这轮不需要取数"。
+        #
+        # 这不等同于"没有计划"。此前两者无法区分，于是空步骤落进轻档的机械兜底，
+        # 替用户调了一次 `get_board_spot`：问「什么是洗盘」去查板块行情，
+        # 「帮我记一下这笔交易」也去查板块行情。实测 50 条黄金集里 8 条中招，
+        # 全是纯噪声——工具精确率因此被压到 52%。
+        #
+        # 这是本仓库"算出来了却在边界丢掉"的镜像形态：**决定做出来了，却在边界
+        # 被推翻**。规划层的产出（包括"不需要工具"这个产出）必须被尊重。
+        return []
     if request.planned_steps:
         # 规划层给了步骤就以它为准：工具选择是规划层的核心产出，机械规则退居
         # 降级路径。未在册的工具**丢弃并留痕**（规划已通过 schema 校验，这里
         # 再挡一次是因为注册表可能按用户/环境不同而缺项）。
         planned: list[ToolCall] = []
+        # 因"这一轮缺这个工具要的数据"而被丢掉的步骤。它与"环境里没注册这个工具"
+        # 必须分开处理：后者是既有的确定性降级路径（注册表按用户/环境而异），
+        # 前者则是**信息不足**——此时替换成另一个工具就是在编。
+        dropped_for_missing_data = False
         for raw in request.planned_steps:
             if not isinstance(raw, Mapping):
                 continue
@@ -411,15 +444,70 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
                 )
                 continue
             arguments = raw.get("arguments") or {}
+            arguments = dict(arguments) if isinstance(arguments, Mapping) else {}
+            # 参数回填：规划层经常只给工具名（不确定参数名该叫什么）。缺必填项时
+            # 按**工具自己的 schema** 从回合上下文补（标的是解析出来的、基准日是
+            # 确定的），补不满就跳过并留痕。
+            #
+            # 不回填的后果不是"少一次调用"，而是**一次注定失败的调用**：注册表在
+            # handler 之前按 schema 校验，缺必填项直接抛错，用户看到的是"查过了但
+            # 没数据"。而"宁可发一次失败调用"正是本仓库反复踩的坑。
+            missing = _missing_required_arguments(spec, arguments)
+            if missing:
+                from .routing import build_factual_arguments
+
+                filled = build_factual_arguments(
+                    spec, symbol=request.symbol or (request.symbols[0] if request.symbols else None),
+                    as_of=as_of, text=request.text,
+                )
+                if filled is None:
+                    logging.getLogger(__name__).warning(
+                        "planned tool %r requires arguments %s and they cannot be "
+                        "derived from the turn; skipping step", name, sorted(missing),
+                    )
+                    dropped_for_missing_data = True
+                    continue
+                arguments = {**filled, **arguments}
             planned.append(
                 ToolCall(
                     tool=name,
-                    arguments=dict(arguments) if isinstance(arguments, Mapping) else {},
+                    arguments=arguments,
                     reason=str(raw.get("reason") or "planned"),
                 )
             )
-        if planned:
+        # 分两种情况（这个区分是实测逼出来的）：
+        #
+        # * **有步骤活下来**，或**有步骤因"这一轮缺数据"被丢掉** → 就在这里返回。
+        #   规划层表态过用哪些工具；数据不足时唯一诚实的做法是"没有工具可用"，
+        #   而不是往下走去调一个规划层从未选过的默认工具。实测：只含
+        #   `chip_distribution_read` 的计划因缺标而被跳过，流程随即落进轻档兜底
+        #   发了一次 `get_board_spot`——用户问筹码，平台答板块。
+        # * **全部因"环境里没注册"被丢掉** → 落到下面的规则路径。这是既有的
+        #   确定性降级语义（注册表按用户/环境而异），保留。
+        if planned or dropped_for_missing_data:
             return planned
+    if request.screen:
+        # 全市场筛选：无标的，候选与理由来自扫描器。参数由纯函数从问句解析。
+        #
+        # 这一支**必须排在轻档之前**：`screen=True` 是比"档位是轻档"更具体的信号，
+        # 而全市场筛选只有 `market_screen` 能做。实测一个 `screen=True, tier="light"`
+        # 的回合落进了轻档事实兜底，去查了一次 `get_board_spot`——用户要的是全市场
+        # 扫描，拿到的是一个板块快照。
+        from .routing import parse_screen_request
+
+        parsed = parse_screen_request(request.text)
+        return [
+            ToolCall(
+                tool="market_screen",
+                arguments={
+                    "top_k": parsed.top_k,
+                    "profile": parsed.profile,
+                    "min_change_pct": parsed.min_change_pct,
+                    "as_of": as_of,
+                },
+                reason="market-wide screening",
+            )
+        ]
     if request.tier == TIER_LIGHT:
         # 事实型问句：取**一个**便宜的数据工具。此前这里直接返回空计划，
         # 而档位表承诺的是"1 个数据工具"——承诺没落地，于是"现在多少钱"
@@ -448,23 +536,6 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
                 continue
             return [ToolCall(tool=name, arguments=arguments, reason="factual lookup")]
         return []
-    if request.screen:
-        # 全市场筛选：无标的，候选与理由来自扫描器。参数由纯函数从问句解析。
-        from .routing import parse_screen_request
-
-        parsed = parse_screen_request(request.text)
-        return [
-            ToolCall(
-                tool="market_screen",
-                arguments={
-                    "top_k": parsed.top_k,
-                    "profile": parsed.profile,
-                    "min_change_pct": parsed.min_change_pct,
-                    "as_of": as_of,
-                },
-                reason="market-wide screening",
-            )
-        ]
     if request.symbols:
         return [
             ToolCall(
@@ -962,6 +1033,10 @@ def run_turn(
                     "ok": True,
                     "elapsed_ms": elapsed_step_ms,
                     "evidence_count": len(result.evidence),
+                    # **证据编号**，不只是条数：只记条数回答不了"哪条证据是哪个工具
+                    # 给的"，于是"证据能否被引用"这条链在第一步就断了。留编号才能把
+                    # 工具 → 证据 → 回答里的 refs 连起来复核。
+                    "evidence_ids": [item.id for item in result.evidence],
                     "degraded": bool(getattr(result, "degraded", False)),
                 }
             )

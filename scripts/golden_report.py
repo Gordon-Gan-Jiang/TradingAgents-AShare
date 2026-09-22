@@ -60,6 +60,10 @@ def run(*, verbose: bool = False, with_planner: bool = False) -> dict:
         bucket["tools_ok"] += int(
             set(item.required_tools) <= set(probe_.tools)
         )
+        # 规划器选了、执行层却丢掉的步骤。正常情况下恒为 0；不为 0 说明两边的
+        # 工具面又不一致了——那会让"规划器多调了什么"这个结论失真。
+        bucket["dropped"] += int(bool(set(probe_.planned_steps) - set(probe_.tools)))
+        bucket["planned"] += int(bool(probe_.planned_steps))
 
     payload = {
         "name_map_size": name_map_size,
@@ -147,6 +151,14 @@ def main() -> int:
     print(f"  工具精确率    {_fmt(metrics['tool_precision'])}")
     print(f"  澄清正确率    {_fmt(metrics['clarify_accuracy'])}")
     print(f"  样本数        {metrics['total']}")
+
+    # 未登记的 capability 不参与任何指标，因此必须**单独喊出来**：
+    # 静默忽略等于把一条产品预期从账上抹掉（本轮 9 个新 L1 工具就这么被抹掉过）。
+    unmapped = metrics.get("unmapped_capabilities") or []
+    if unmapped:
+        print(f"  ⚠ 无法评分的能力 {len(unmapped)} 条（既不是工具也没登记为刻意不做成工具）")
+        for row in unmapped[:10]:
+            print(f"      {row['id']} → {row['capability']}")
 
     if not args.no_write:
         REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)

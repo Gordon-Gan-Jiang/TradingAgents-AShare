@@ -828,6 +828,63 @@ def build_registry(user_id: str | None = None) -> Any:
     )
 
 
+def build_tool_digest(registry: Any) -> str:
+    """把注册表渲染成规划器的工具摘要。
+
+    ## 为什么要单独一个函数（而不是在 `build_planner` 里拼字符串）
+
+    摘要是**规划层的全部世界观**：模型看不到工具 schema，只能看这段文本做选择。
+    它一旦失真（截断、缺分层、顺序随意），落点就不再是"模型判断力不够"，而是
+    "给它的清单不对"。单独成函数才能被度量与测试。
+
+    ## 三条渲染规则（都由实测踩坑得出）
+
+    1. **不许截断掉用法提示**。全部 50 个工具里有 25 个的 `description` 带
+       "用于回答「…」"，其中 14 个落在第 60 字之后。旧实现取"第一行前 60 字"，
+       恰好把这些唯一的区分信息全砍了——模型只能看着 23 条几乎同义的
+       "既有分析管道使用的数据工具 get_xxx"猜。
+    2. **必须标出分层**。L1 是"一个工具回答一个判断问题"，L2 只是取数原语。
+       不标分层，模型不知道 `signal_washout_probe` 与 `get_indicators` 不在一个
+       抽象层级上，于是同一个问题既调判定又调它底下的原始数据。
+    3. **判断类工具排在取数原语前面**。清单是有位置权重的：把"能直接回答"的
+       L1 放前面、把同义的 vendor 取数工具压到最后，选择明显更稳。
+    """
+    rows: list[str] = []
+    order = {"L1": 0, "L3": 1, "L2": 2}
+    names = list(registry.names())
+    names.sort(key=lambda name: (order.get(_spec_layer(registry, name), 3), name))
+    for name in names:
+        spec = registry.get(name)
+        layer = _spec_layer(registry, name) or "L2"
+        rows.append(f"- {name} [{layer}]：{_digest_text(spec)}")
+    return "\n".join(rows)
+
+
+def _spec_layer(registry: Any, name: str) -> str:
+    spec = registry.get(name)
+    return str(getattr(spec, "plan_layer", "") or "")
+
+
+def _digest_text(spec: Any) -> str:
+    """一条工具摘要的正文：短标题 + **完整保留**的用法提示。"""
+    description = str(getattr(spec, "description", "") or "")
+    head = (description.splitlines() or [""])[0]
+    marker = "用于回答"
+    if marker in head:
+        cut = head.index(marker)
+        # 标题只留到用法提示之前（更长的前半段是背景说明，对选择无贡献），
+        # 用法提示整段保留——那才是"该调哪个"的依据。
+        title = head[:cut].strip()
+        usage = head[cut : cut + _DIGEST_USAGE_CHARS]
+        return f"{title} {usage}".strip()
+    return head[:_DIGEST_TITLE_CHARS].strip()
+
+
+# 标题栏长度：只做"防止单行过长"，不承担信息取舍（取舍在用法提示上）。
+_DIGEST_TITLE_CHARS = 60
+_DIGEST_USAGE_CHARS = 90
+
+
 def build_planner(*, user_id: str | None = None) -> Callable[[str], Any] | None:
     """按灰度开关构造规划器；**未启用时返回 None**（= 今天的行为）。
 
@@ -849,12 +906,7 @@ def build_planner(*, user_id: str | None = None) -> Callable[[str], Any] | None:
         return None
 
     registry = build_registry(user_id)
-    digest_lines = []
-    for name in registry.names():
-        spec = registry.get(name)
-        description = str(getattr(spec, "description", "") or "").splitlines()
-        digest_lines.append(f"- {name}：{description[0][:60] if description else ''}")
-    digest = "\n".join(digest_lines)
+    digest = build_tool_digest(registry)
 
     planner = LlmPlanner(
         inner=RuleTierClassifier(_Resolver()),
@@ -1172,6 +1224,9 @@ def build_turn_request(
                 market_level=bool(plan.market_level),
                 plan_source="llm",
                 intent=plan.intent,
+                # 规划层的 `need_clarify` 必须传下去：丢掉它，执行层就只剩"有没有标的"
+                # 这一条判据，于是概念问答也会被要一个股票代码。
+                plan_need_clarify=bool(getattr(plan, "need_clarify", True)),
                 planned_steps=tuple(
                     {"tool": step.tool, "arguments": dict(step.arguments), "reason": step.reason}
                     for step in plan.steps

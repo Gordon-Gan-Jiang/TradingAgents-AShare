@@ -78,9 +78,27 @@ class Probe:
     servable: bool               # 是否构造出了回合（False = 400 追问）
     intent: str | None = None    # 观测到的意图（由档位/筛选/多标的等推导，未必精确）
     symbols: tuple[str, ...] = ()
-    tools: tuple[str, ...] = ()
+    tools: tuple[str, ...] = ()  # **实际进入执行计划**的工具
     clarifying: bool = False
     reason: str = ""
+    # ── 规划层的原始选择 ──────────────────────────────────────────────
+    # `tools` 是 `_plan_tools` 过滤后的结果（未在册的步骤会被丢掉）。只记它，
+    # 就等于把"规划器选了但执行层没有"的步骤从数据里抹掉——本轮排查发现跑分
+    # 注册表比生产少 24 个工具，正是因为没有这两个字段才没被立刻发现。
+    # 两者都留下，差异自己会说话。
+    plan_source: str = ""                    # "llm" / "rules"
+    planned_steps: tuple[str, ...] = ()      # 规划器给出的原始步骤
+    tier: str = ""                           # 档位（诊断用：空计划到底是哪条分支兜的底）
+
+
+# 刻意**不**做成工具的能力。`required_capabilities` 里出现别的名字就是数据集漂了：
+#   - 动作类（`watchlist_write` / `trade_ledger_write`）走"两步确认"的动作执行器，
+#     不进工具面——读工具面的模型不该能直接改用户资产状态。
+#   - `report_job_submit`：重档由既有深度分析管道负责，`_plan_tools` 在重档直接返回空
+#     计划，因此它不是"规划器该选的工具"。等 L3 任务面接通对话再迁移。
+NON_TOOL_CAPABILITIES: frozenset[str] = frozenset(
+    {"watchlist_write", "trade_ledger_write", "report_job_submit"}
+)
 
 
 @dataclass
@@ -92,6 +110,9 @@ class Metrics:
     tool_precision: float = 0.0
     clarify_accuracy: float = 0.0
     failures: list[dict[str, Any]] = field(default_factory=list)
+    # 既不是工具、也没登记为"刻意不做成工具"的 capability。它们不参与任何指标，
+    # 因此必须**单独列出来**——静默忽略等于把一条产品预期从账上抹掉。
+    unmapped_capabilities: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -102,6 +123,7 @@ class Metrics:
             "tool_precision": round(self.tool_precision, 4),
             "clarify_accuracy": round(self.clarify_accuracy, 4),
             "failures": self.failures,
+            "unmapped_capabilities": self.unmapped_capabilities,
         }
 
 
@@ -154,29 +176,26 @@ _REGISTRY: Any = None
 
 
 def warm_registry() -> Any:
-    """装配**完整**工具面的注册表并缓存。
+    """装配**与规划器同源**的工具面并缓存。
 
-    计划参数必须按工具 schema 生成，所以规划路径需要真实注册表；用哑依赖装配
-    是为了把"工具存在"与"依赖可用"分开——跑分测的是规划，不该被网络卡住。
+    ## 为什么必须同源（踩过）
+
+    这里曾经用哑依赖手工装配，得到 26 个工具；而 `build_planner()` 用生产注册表
+    （50 个）构造提示词。规划器选中一个只存在于生产注册表里的 L1 工具时，
+    `_plan_tools` 会因为"未在册"把它**丢掉**，于是跑分观测到的工具集合 ≠ 规划器
+    的真实选择，精度与召回都测在一个被截断的集合上。
+
+    同源还顺带解决"新工具不在册、规划只会回落旧工具"的老问题——那时跑分测的
+    不是"新工具是否被选中"，而是"它们根本不可选"。
+
+    `build_registry` 里的端口都是**惰性**闭包（取数只在真正调用时发生），装配
+    本身不触网，所以同源不牺牲跑分的离线可跑性。
     """
     global _REGISTRY
     if _REGISTRY is None:
-        from tradingagents.tools import build_registry
+        from api.services import chat_service
 
-        # 证据类取数器**必须注入**，否则新增的 L2 工具不在册、规划只会回落到
-        # 旧工具——那时跑分测的就不是"新工具是否被选中"，而是"它们根本不可选"。
-        try:
-            from tradingagents.tools.evidence import default_market_fetchers
-
-            fetchers = default_market_fetchers()
-        except Exception:  # noqa: BLE001 — 取数器不可用时仍可跑分（只是少几个工具）
-            fetchers = None
-        _REGISTRY = build_registry(
-            ports_factory=lambda *a: object(),
-            news_fetcher=lambda *a: [],
-            market_screener=object(),
-            evidence_fetchers=fetchers,
-        )
+        _REGISTRY = chat_service.build_registry("golden")
     return _REGISTRY
 
 
@@ -243,7 +262,23 @@ def probe(
     # `_plan_tools` 内部已经把因果问句要追加的新闻工具算进去了
     tools = tuple(call.tool for call in planned)
     symbols = tuple(request.symbols) or ((request.symbol,) if request.symbol else ())
-    clarifying = bool(request.candidates) and not symbols and not request.screen
+    # **追问口径必须与执行层同源**（`loop._prequel`）：没有标的、没有多标的、
+    # 不是筛选、不是市场级事实、没有规划步骤，且规划层没有表态"不用追问"时，
+    # 它一定会追问。旧口径只认"有候选"，于是「它是不是在洗盘」这种实际会追问的
+    # 问句被记成"没追问"，澄清正确率永远是错的。
+    clarifying = (
+        not symbols
+        and not request.screen
+        and not request.market_level
+        and not request.planned_steps
+        and bool(getattr(request, "plan_need_clarify", True))
+    )
+    # 规划层的原始选择：与 `tools` 的差集 = 被执行层丢掉的步骤（应为空）。
+    planned_steps = tuple(
+        str(raw.get("tool") or "")
+        for raw in (request.planned_steps or ())
+        if isinstance(raw, Mapping) and raw.get("tool")
+    )
     # 有显式意图（来自规划层）就直接用——否则量的是旧实现的推断值，
     # 规划层的增益永远看不出来。
     explicit_intent = str(getattr(request, "intent", "") or "")
@@ -256,6 +291,9 @@ def probe(
         symbols=symbols,
         tools=tools,
         clarifying=clarifying,
+        plan_source=str(getattr(request, "plan_source", "") or ""),
+        planned_steps=planned_steps,
+        tier=str(getattr(request, "tier", "") or ""),
     )
 
 
@@ -263,6 +301,14 @@ def score(items: Sequence[GoldenItem], probes: Mapping[str, Probe] | Sequence[Pr
     """纯函数打分。
 
     `probes` 可以是 {id: Probe} 或与 items 同序的序列。
+
+    ## `required_capabilities` 为什么必须被审计
+
+    这个字段只装"刻意不做成工具"的能力（见 `NON_TOOL_CAPABILITIES`）。能力一旦封成
+    工具，期望就必须迁到 `required_tools`——因为下面只读 required/optional 两个字段。
+    实测踩到：9 个新 L1 工具被写成 capability，于是"规划器选对了新工具"在跑分里
+    **根本不计分**，而它偶尔多调的一个工具却全额扣分，精确率被单向压到 52%。
+    所以未登记的 capability 一律进 `unmapped_capabilities` 显式暴露。
     """
     if isinstance(probes, Mapping):
         pairs = [(item, probes.get(item.id)) for item in items]
@@ -282,6 +328,12 @@ def score(items: Sequence[GoldenItem], probes: Mapping[str, Probe] | Sequence[Pr
         if probe_ is None:
             metrics.failures.append({"id": item.id, "why": "no probe"})
             continue
+
+        for capability in item.required_capabilities:
+            if capability not in NON_TOOL_CAPABILITIES:
+                metrics.unmapped_capabilities.append(
+                    {"id": item.id, "capability": capability}
+                )
 
         if probe_.servable:
             servable += 1

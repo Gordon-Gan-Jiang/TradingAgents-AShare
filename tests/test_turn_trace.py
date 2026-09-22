@@ -219,6 +219,21 @@ def test_turn_result_carries_execution_steps(monkeypatch):
     assert "ok" in step and "elapsed_ms" in step and "evidence_count" in step
 
 
+def test_execution_steps_carry_evidence_ids(monkeypatch):
+    """每步要记下**证据编号**，不能只记条数。
+
+    只记 `evidence_count=11` 能说明"取到东西了"，但回答不了"哪条证据是哪个工具给的"。
+    验证"证据能否被引用"（① 的核心问法之一）必须能从观测里连起来：工具 → 证据编号
+    → 回答里的 refs。编号缺失时这条链在第一步就断了，只能靠再跑一次去猜。
+    """
+    result = _run_simple_turn(monkeypatch)
+    step = result.steps[0]
+
+    assert step["evidence_count"] > 0, "样本回合本身要产出证据，否则这条断言没有意义"
+    assert step.get("evidence_ids"), "步骤里必须带证据编号"
+    assert len(step["evidence_ids"]) == step["evidence_count"]
+
+
 def test_plan_records_multi_symbol_and_screen_turns(monkeypatch):
     """多标的与筛选回合的计划形状也要正确（它们是本轮新增的两条路径）。"""
     from tradingagents.agent.loop import TurnRequest, _plan_tools

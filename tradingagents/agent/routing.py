@@ -71,6 +71,21 @@ FACTUAL_TOOL_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     # 文本、`evidence=()`，于是"主力净流入多少"即使取到数也无法被引用，回答只能
     # 答"无可用证据"。`capital_flow_read` 给数值（单位元）+ 弃权声明。
     # 这不是"新工具更好看"，而是**没有证据就没有回答**这条硬约束的直接后果。
+    #
+    # 顺序 = 优先级。更具体的语义必须排在更泛的前面，否则会被泛化的条目抢走。
+    #
+    # 本轮补齐的四条（筹码/分时/公告/指数）：它们此前**没有任何规则入口**。
+    # 这一层不是可选的——带代码的问句一定能解析出标的，于是永远走不到规划层
+    # （规则优先的代价），只能靠这张表选工具。表里没有 = 那个工具对这类问句
+    # 根本不可选，"封了但用不上"。
+    (("筹码", "集中度", "获利比例", "平均成本"), "chip_distribution_read"),
+    (("分时", "承接", "尾盘", "盘口"), "intraday_bars_read"),
+    # 公告要盖过新闻（新闻那段也含"公告"二字）：公告是**权威披露**，新闻不是。
+    # 把两者混在一起会让"最近有什么公告"拿到一堆媒体稿。
+    (("公告", "披露", "年报预约", "问询函"), "announcements_read"),
+    (("指数", "上证", "深证", "创业板指", "沪深300", "大盘", "点位"), "index_quote_read"),
+    (("自选股", "自选"), "watchlist_read"),
+    (("数据是新的", "数据时效", "数据新鲜", "更新到几号", "数据准不准"), "data_freshness_check"),
     (("净流入", "净流出", "主力", "资金流"), "capital_flow_read"),
     (("市盈率", "市净率", "估值", "基本面", "每股", "营收", "净利润"), "get_fundamentals"),
     (("资产负债", "负债率"), "get_balance_sheet"),
@@ -96,11 +111,27 @@ SYMBOL_REQUIRED_TOOLS: frozenset[str] = frozenset(
         "get_individual_fund_flow",
         "data_symbol_news",
         "get_hot_stocks_xq",
+        # 本轮新增的三条按标的取数的证据工具。**必须登记**：漏登记的后果不是
+        # "选不出来"，而是无标的的问句也能选中它，然后必然失败——用户看到的是
+        # "查过了但没数据"，比不查更误导。
+        "chip_distribution_read",
+        "intraday_bars_read",
+        "announcements_read",
     }
 )
 
 # 无标的时可用的**市场级**工具，以及默认选谁
-MARKET_LEVEL_TOOLS: tuple[str, ...] = ("get_zt_pool", "get_lhb_detail", "get_board_spot", "get_global_news")
+#
+# `index_quote_read` 只需要 `as_of`（不需要代码），所以它在无标的时是合法落点。
+# 不登记它的后果是「今天上证指数多少点」被判成"用户没说清楚"而追问代码——
+# 平台明明查得到指数点位。
+MARKET_LEVEL_TOOLS: tuple[str, ...] = (
+    "get_zt_pool",
+    "get_lhb_detail",
+    "get_board_spot",
+    "get_global_news",
+    "index_quote_read",
+)
 DEFAULT_MARKET_TOOL = "get_board_spot"
 DEFAULT_FACTUAL_TOOL = "get_realtime_quotes"
 
@@ -409,6 +440,16 @@ _LIGHT_MARKERS = (
     "新闻",
     "公告",
     "消息面",
+    # 本轮新增的证据工具对应的问法。缺了它们，「最近筹码集中度怎么样」会落进中档
+    # 去跑洗盘探针——用户问筹码集中度，拿到的是洗盘判定。**档位标记表就是路由**：
+    # 不在表里的问法不是"分类不准"，而是根本走不到那个工具。
+    "筹码",
+    "集中度",
+    "获利比例",
+    "分时",
+    "承接",
+    "指数",
+    "点位",
 )
 
 # 研判型：需要把多维证据合成一个判断。这是本变更的核心新增能力。
@@ -643,17 +684,57 @@ class Plan:
         }
 
 
+# 模型偶尔用词而不是数字表达置信度。理解它们不是"放水"：`confidence` 只进
+# `RouteDecision.confidence` 与 trace，不改变答案的含义，而为了它丢掉一个正确的
+# 计划，用户拿到的是"这轮什么都没查"。（实测：「这只票要不要止损」的计划意图、
+# 追问文本全对，只因写了 `"high"` 被整体拒绝。）
+_CONFIDENCE_WORDS: Mapping[str, float] = {
+    "high": 0.9, "高": 0.9,
+    "medium": 0.6, "mid": 0.6, "中": 0.6,
+    "low": 0.3, "低": 0.3,
+}
+
+
+def _coerce_confidence(raw: Any) -> float | None:
+    """置信度 → [0,1]。**读不懂返回 None**（调用方整体拒绝）。"""
+    if raw is None or raw == "":
+        return 0.0
+    if isinstance(raw, bool):  # bool 是 int 的子类，先挡掉
+        return None
+    if isinstance(raw, (int, float)):
+        return min(max(float(raw), 0.0), 1.0)
+    if isinstance(raw, str):
+        text = raw.strip()
+        word = _CONFIDENCE_WORDS.get(text.lower())
+        if word is not None:
+            return word
+        try:
+            return min(max(float(text), 0.0), 1.0)
+        except ValueError:
+            return None
+    return None
+
+
 def parse_plan(
     payload: Mapping[str, Any] | None,
     *,
     known_tools: Iterable[str],
     max_steps: int = MAX_PLAN_STEPS,
 ) -> Plan | None:
-    """把 LLM 的结构化输出解析成 `Plan`；**任何违规都返回 None**（由调用方降级）。
+    """把 LLM 的结构化输出解析成 `Plan`；**语义违规一律返回 None**（由调用方降级）。
 
     为什么整体拒绝而不是"修一修"：计划的每一步都改变答案的含义。悄悄丢掉一个
     未知工具步骤，会让回答看起来"查过了"，而实际上少了一大块证据——那正是
     本平台最不能接受的失败形态。宁可降级到规则层 + 追问。
+
+    **"归一化"与"修一修"的分界**：只接受**不丢失信息**的形状转换——把模型显然
+    想表达的东西读对。以下两类属于归一化，实测都真实发生过，代价是整轮不可用：
+
+      * `steps: ["watchlist_read"]`（工具名数组）→ `{tool, arguments:{}}`
+      * `confidence: "high"`（表述型）→ 0.9
+
+    而"未知工具""意图不在枚举""步数超限"这类**语义**违规仍然整体拒绝：它们各自
+    都改变了答案的含义，猜测只会让回答骗取信任。
     """
     if not isinstance(payload, Mapping):
         return None
@@ -676,6 +757,9 @@ def parse_plan(
     steps: list[PlanStep] = []
     seen_steps: set[tuple[str, str]] = set()
     for raw in raw_steps:
+        if isinstance(raw, str):
+            # 工具名数组：模型显然想调这个工具，信息一点没丢。
+            raw = {"tool": raw}
         if not isinstance(raw, Mapping):
             return None
         tool = str(raw.get("tool") or "").strip()
@@ -716,11 +800,9 @@ def parse_plan(
         # 追问却没有问题文本 = 用户只会看到空白
         return None
 
-    try:
-        confidence = float(payload.get("confidence") or 0.0)
-    except (TypeError, ValueError):
+    confidence = _coerce_confidence(payload.get("confidence"))
+    if confidence is None:
         return None
-    confidence = min(max(confidence, 0.0), 1.0)
 
     source = str(payload.get("source") or "llm").strip()
     if source not in PLAN_SOURCES:
@@ -839,6 +921,14 @@ class LlmPlanner:
 
         工具摘要由调用方注入（`tool_digest`）：规划层不该自己去翻注册表——
         它只该看到一个名字与一句话说明的清单，避免把整个工具 schema 塞进上下文。
+
+        ## 为什么要写"选择纪律"而不只是给清单
+
+        实测规划器在"这只票要不要止损"上给出了判定工具**加**一个板块取数工具；
+        "600519 和 300750 哪个好"同理多带了 `get_board_spot`。这些多出来的工具
+        既不是必需、也不产生可引用证据，只增加成本与噪声（工具精确率因此被压到
+        60.9%）。清单只解决"看不看得清"，"该不该多选"必须写成明文约束——指望
+        模型从描述里自己悟出来是不现实的。
         """
         return (
             "你是投研对话的规划器。根据用户问句产出一个 JSON 计划，只输出 JSON。\n"
@@ -846,8 +936,30 @@ class LlmPlanner:
             f"意图取值：{'/'.join(PLAN_INTENTS)}\n"
             f"档位取值：{'/'.join(TIERS)}\n"
             f"最多 {self._max_steps} 个工具步骤；不需要工具时 steps 为空数组。\n"
+            "选择纪律（务必遵守）：\n"
+            "1. 只选**回答这一句问句必需**的工具，宁少勿多；能用 1 个就不用 2 个。\n"
+            "2. 工具面分三层：L1 是判断类（一个工具直接给出结论与依据），"
+            "L2 是取数类（只给事实），L3 是分钟级任务（异步）。\n"
+            "3. **不要**为同一个问题既选 L1 判断工具、又选它底下的 L2 取数工具"
+            "——判断工具的结果里已经包含那些事实；禁止重复取同一份数据。\n"
+            "4. 只有问句明确要求原始事实（例如「主力净流入多少」）时才选 L2。\n"
+            "5. 用户没有指定标的、且问题是组合级（我的持仓/我的账户/我的仓位/我的计划/"
+            "模拟盘/我的台账/我的自选/跟踪池）时，"
+            "选 L1 里对应的「读取当前用户…」工具，并把 symbol 留空。\n"
             '必须输出这些键：intent, tier, symbol, symbols, screen, market_level, '
             'steps, need_clarify, clarify_question, confidence。\n'
+            # 形状必须写出来：只列键名时模型会把 steps 写成工具名数组、把 confidence
+            # 写成 "high"。虽然解析层现在能读懂这两种写法，但每读懂一次都是一次
+            # 侥幸——把样例摆在眼前更省事，也更容易被审计。
+            "steps 是**对象数组**，每项形如 "
+            '{"tool": "工具名", "arguments": {}, "reason": "为什么选它"}，'
+            "arguments 必须是对象（不是数组、不是字符串）。\n"
+            "confidence 是 0 到 1 之间的**数字**。\n"
+            '例如：{"intent": "single_symbol_judgement", "tier": "medium", '
+            '"symbol": "600519.SH", "symbols": [], "screen": false, "market_level": false, '
+            '"steps": [{"tool": "signal_washout_probe", "arguments": {"symbol": "600519.SH"}, '
+            '"reason": "需要判定"}], "need_clarify": false, "clarify_question": "", '
+            '"confidence": 0.8}\n'
             f"用户问句：{text}"
         )
 

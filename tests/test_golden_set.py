@@ -53,36 +53,52 @@ def test_golden_covers_the_measured_failure_classes():
 
 
 def test_required_tools_exist_in_the_registry():
-    """数据集里写的工具必须真实存在，否则"漏工具"这类失败无法归因。"""
-    from tradingagents.tools import build_registry
+    """数据集里写的工具必须真实存在，否则"漏工具"这类失败无法归因。
 
-    # 用哑依赖装配**完整**工具面：不带端口时注册表里没有信号/新闻/筛选工具，
-    # 那样会把"工具存在"误判成"数据集写错"。
-    from tradingagents.tools.evidence import default_market_fetchers
-
-    known = set(
-        build_registry(
-            ports_factory=lambda *a: object(),
-            news_fetcher=lambda *a: [],
-            market_screener=object(),
-            evidence_fetchers=default_market_fetchers(),
-        ).names()
-    )
+    用 `warm_registry()`（= 规划器看到的**同一份**工具面）。此前这里手工用哑依赖
+    装配，只得到 26 个工具，于是"数据集写错"与"跑分看不到这个工具"分不开——
+    本轮排查正是被这一点误导过。
+    """
+    known = _registry_names()
     assert "signal_washout_probe" in known
     for item in GOLDEN:
-        for tool in item.required_tools:
-            assert tool in known, f"{item.id} 要求的工具 {tool!r} 不在工具面里"
+        for tool in item.required_tools + item.optional_tools:
+            assert tool in known, f"{item.id} 引用的工具 {tool!r} 不在工具面里"
 
 
 def test_declared_capabilities_are_not_silently_expected_as_tools():
-    """尚不存在的能力必须写在 required_capabilities，不能混进 required_tools。
+    """`required_capabilities` 只装**工具面里确实没有**的东西。
 
-    混进去会让"工具召回率"永远虚低，且掩盖"这个能力根本还没做"这一事实。
+    这个字段的原始语义是"待建能力"：能力建好、封成工具之后就必须迁到
+    `required_tools`，否则那条期望**永远不被评分**（`score()` 只读
+    required/optional_tools）。实测正是如此：18 个新 L1 工具里有 9 个被写成了
+    capability，于是"规划器选对了新工具"这件事在跑分里根本不计分，而它偶尔多调的
+    一个工具却全额扣分——精确率被单向压到 52%。
+
+    这条断言以前只能靠人工比对；现在工具面在册可查，就可以写成硬约束。
     """
+    known = _registry_names()
     for item in GOLDEN:
-        if item.required_capabilities:
-            assert not set(item.required_capabilities) & set(item.required_tools), (
-                f"{item.id} 把待建能力写进了 required_tools"
+        for capability in item.required_capabilities:
+            assert capability not in known, (
+                f"{item.id} 的能力 {capability!r} 已经是真实工具了，"
+                "必须迁到 required_tools，否则这条期望不会被评分"
+            )
+
+
+def test_every_declared_capability_is_a_known_non_tool():
+    """capability 名字必须落在**明确的非工具清单**里，不能是随手写的词。
+
+    否则数据集会悄悄积累"谁都满足不了"的期望：它不参与评分，看起来无害，
+    实际上是把一条产品预期从账上抹掉了。
+    """
+    from tests.golden.harness import NON_TOOL_CAPABILITIES
+
+    for item in GOLDEN:
+        for capability in item.required_capabilities:
+            assert capability in NON_TOOL_CAPABILITIES, (
+                f"{item.id} 的 capability {capability!r} 既不是工具也没登记为"
+                "「刻意不做成工具的能力」"
             )
 
 
@@ -92,6 +108,24 @@ def test_concept_questions_require_no_tools():
         if item.intent == "concept_qa":
             assert item.required_tools == ()
             assert item.required_capabilities == ()
+
+
+def test_scoring_reports_capabilities_nobody_can_satisfy():
+    """评分必须**报告**未登记的 capability，而不是静默忽略。
+
+    "静默"是本仓库最贵的失败形态：它让一条永远失败的期望看起来像不存在。
+    """
+    from tests.golden.harness import Metrics, score
+
+    item = _item(required_capabilities=("nobody_built_this",))
+    m = score([item], [Probe(servable=True, intent=item.intent)])
+    assert m.unmapped_capabilities == [{"id": "x", "capability": "nobody_built_this"}]
+
+
+def _registry_names() -> set[str]:
+    from tests.golden.harness import warm_registry
+
+    return set(warm_registry().names())
 
 
 # ── 评分口径 ──────────────────────────────────────────────────────────────
