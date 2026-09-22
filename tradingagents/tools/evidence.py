@@ -87,7 +87,9 @@ UNAVAILABLE_CHIP = f"{SOURCE_CHIP}（筹码分布）"
 UNAVAILABLE_INTRADAY = f"{SOURCE_INTRADAY}（分时）"
 UNAVAILABLE_FLOW = f"{SOURCE_FLOW}（资金流）"
 UNAVAILABLE_WATCHLIST = f"{SOURCE_WATCHLIST}（自选清单）"
-UNAVAILABLE_ANNOUNCEMENTS = f"{SOURCE_ANNOUNCEMENTS}（公告）"
+# 注：公告维度**没有**裸形式（如 `data_announcements（公告）`）。它有两种情形——
+# 「窗口内未取到」（不等于没有公告）与「接口失败」——而两者混用同一个名字会让
+# 模型对用户说错原因。所以名字在 `_announcements_tool` 里按情形现拼，且必须不同。
 UNAVAILABLE_INDEX = f"{SOURCE_INDEX}（指数行情）"
 UNAVAILABLE_FRESHNESS = "data_freshness（时效查询）"
 
@@ -1002,7 +1004,15 @@ def _announcements_tool(port: AnnouncementsPort) -> ToolSpec:
             return _unavailable_result(
                 data={"symbol": symbol, "items": [], "count": 0, "error": type(exc).__name__},
                 source_key=SOURCE_ANNOUNCEMENTS,
-                unavailable_name=UNAVAILABLE_ANNOUNCEMENTS,
+                # 区分必须写进 `unavailable` 本身，不能只写在 `reason` 里：
+                # `degraded_reason` 目前**只有 MCP 那个消费者**，对话路径读不到它，
+                # 于是"接口失败"与"确实没拉到公告"会给模型同一个未覆盖条目，
+                # 模型也无从分辨——两种情形的措辞就还是一样。
+                # 范式照 `ledger.py` / `outcomes.py`：解释写在括号里。
+                unavailable_name=(
+                    f"{SOURCE_ANNOUNCEMENTS}（公告取数失败：{type(exc).__name__}，"
+                    "该维度未覆盖）"
+                ),
                 reason=f"公告取数失败（{type(exc).__name__}）",
                 as_of=as_of,
             )
@@ -1012,7 +1022,13 @@ def _announcements_tool(port: AnnouncementsPort) -> ToolSpec:
             return _unavailable_result(
                 data={"symbol": symbol, "items": [], "count": 0, "start": start, "as_of": as_of},
                 source_key=SOURCE_ANNOUNCEMENTS,
-                unavailable_name=UNAVAILABLE_ANNOUNCEMENTS,
+                # 与上面那条**措辞必须不同**：「没拉到」不等于「没有公告」，
+                # 而接口失败更不等于没有公告。两者混为一谈会让模型对用户
+                # 说错原因（"该股近期无公告"是断言，"这次没拉到"才是事实）。
+                unavailable_name=(
+                    f"{SOURCE_ANNOUNCEMENTS}（窗口 {start or '不限'} ~ {as_of or '不限'} "
+                    "内未取到公告，「没拉到」不等于「没有公告」）"
+                ),
                 reason=(
                     f"窗口 {start or '不限'} ~ {as_of or '不限'} 内未取到公告，该维度未覆盖"
                     "（「没拉到」不等于「没有公告」）"

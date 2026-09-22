@@ -32,7 +32,6 @@ import pytest
 
 from tradingagents.tools.evidence import (
     ESTIMATE_NOTE,
-    UNAVAILABLE_ANNOUNCEMENTS,
     UNAVAILABLE_CHIP,
     UNAVAILABLE_FLOW,
     UNAVAILABLE_INTRADAY,
@@ -505,10 +504,15 @@ def test_empty_announcements_are_declared_uncovered_not_no_news():
     )
 
     assert result.evidence == ()
-    assert result.coverage.unavailable == (UNAVAILABLE_ANNOUNCEMENTS,)
     assert result.degraded is True
     assert "不等于" in (result.degraded_reason or "")
-    assert "公告" in UNAVAILABLE_ANNOUNCEMENTS
+    # **区分必须写在 `unavailable` 里**，不能只写在 `degraded_reason` 里：
+    # `degraded_reason` 目前只有 MCP 那个消费者，对话路径读不到，于是模型会把
+    # "这次没拉到"说成"该股无公告"——一个凭空制造的断言。
+    assert len(result.coverage.unavailable) == 1
+    declared = result.coverage.unavailable[0]
+    assert "未取到公告" in declared
+    assert "不等于" in declared, "空结果要说明「没拉到」不等于「没有公告」"
 
 
 def test_announcements_failure_degrades_without_upstream_text():
@@ -521,7 +525,11 @@ def test_announcements_failure_degrades_without_upstream_text():
 
     assert result.degraded is True
     assert "abc123" not in str(result.data)
-    assert result.coverage.unavailable == (UNAVAILABLE_ANNOUNCEMENTS,)
+    # 接口失败与"没拉到"**措辞必须不同**：前者是故障，后者是不确定。
+    declared = result.coverage.unavailable[0]
+    assert "公告取数失败" in declared
+    assert "ValueError" in declared, "失败原因要点到异常类型"
+    assert "不等于" not in declared, "故障不该被说成「没拉到」"
 
 
 def test_announcements_is_l2_and_registered_only_when_injected():
@@ -676,3 +684,38 @@ def test_all_six_tools_land_in_the_evidence_layer():
     assert expected <= names, f"缺工具：{sorted(expected - names)}"
     for name in expected:
         assert registry.get(name).plan_layer == PLAN_LAYER_EVIDENCE
+
+
+def test_empty_and_failed_announcement_fetches_are_worded_differently():
+    """Phase 4.2：**「窗口内没取到」与「接口失败」必须措辞不同。**
+
+    `degraded_reason` 里本来就写得不同，但它**只有 MCP 那个消费者**——对话路径
+    读不到它（`grep -rn degraded_reason` 只命中 `api/mcp_server.py`）。而对话路径
+    给模型的是 `coverage.unavailable`，所以两种情形若共用同一个名字，模型拿到的
+    信息完全一样，也就只能对用户说同一句话。
+
+    后果不是"措辞不够好"，而是**说错原因**：
+      * 确实没取到 → 正确说法是"这次没拉到，不能据此说该股没有公告"；
+      * 接口失败   → 正确说法是"公告接口坏了"。
+    把前者说成"该股无公告"是一个凭空制造的断言；把后者说成"没公告"则掩盖了故障。
+    """
+    empty = _announcements(_FakeAnnouncements([])).handler(
+        symbol="600519.SH", as_of="2026-09-21", lookback_days=7, limit=10
+    )
+
+    class _Boom:
+        def list_announcements(self, **kw):
+            raise RuntimeError("cninfo token=abc123 rejected")
+
+    failed = _announcements(_Boom()).handler(
+        symbol="600519.SH", as_of="2026-09-21", lookback_days=7, limit=10
+    )
+
+    assert empty.coverage.unavailable != failed.coverage.unavailable, (
+        "两种情形给了同一个未覆盖条目，对话路径无从分辨"
+    )
+    assert "未取到公告" in empty.coverage.unavailable[0]
+    assert "公告取数失败" in failed.coverage.unavailable[0]
+    # 两条都必须点明是"公告"这个维度，否则模型不知道缺的是什么
+    assert all("announcements" in item for item in empty.coverage.unavailable)
+    assert all("announcements" in item for item in failed.coverage.unavailable)

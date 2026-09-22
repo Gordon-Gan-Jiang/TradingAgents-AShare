@@ -32,7 +32,6 @@ import pytest
 
 from tradingagents.dataflows.providers import cn_announcement_index_data as cna
 from tradingagents.tools.evidence import (
-    UNAVAILABLE_ANNOUNCEMENTS,
     UNAVAILABLE_INDEX,
     make_evidence_tools,
 )
@@ -461,9 +460,9 @@ def test_announcements_tool_declares_uncovered_when_source_is_empty(monkeypatch)
     result = spec.handler(symbol="600519.SH", as_of="2026-09-21", lookback_days=7, limit=10)
 
     assert result.evidence == ()
-    assert result.coverage.unavailable == (UNAVAILABLE_ANNOUNCEMENTS,)
     assert result.degraded is True
     assert "abc123" not in str(result.data)
+    assert "未取到公告" in result.coverage.unavailable[0]
 
 
 def test_announcements_port_lets_fetch_failure_reach_the_decay_path(monkeypatch):
@@ -479,7 +478,7 @@ def test_announcements_port_lets_fetch_failure_reach_the_decay_path(monkeypatch)
 
     assert result.degraded is True
     assert "abc123" not in str(result.data)
-    assert result.coverage.unavailable == (UNAVAILABLE_ANNOUNCEMENTS,)
+    assert "公告取数失败" in result.coverage.unavailable[0]
 
 
 # ══ 6. 工具层：指数行情 ═══════════════════════════════════════════════════

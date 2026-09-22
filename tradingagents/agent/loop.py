@@ -1046,6 +1046,9 @@ def run_turn(
 
     tool_calls: list[str] = []
     tool_results: list[ToolResult] = []
+    # (工具名, 结果) 配对：合并后的 `merged` 会丢掉"哪个结果来自哪个工具"，
+    # 而后面要把降级诊断补进覆盖声明时必须知道工具名。
+    degraded_pairs: list[tuple[str, ToolResult]] = []
     # 在 try 之前初始化：异常路径要判断"扫描是否已经完成"，从而决定能不能
     # 把候选清单交付出去。
     merged: ToolResult | None = None
@@ -1147,6 +1150,8 @@ def run_turn(
 
             result = _apply_after_tool(chain, ctx, call, result)
             tool_results.append(result)
+            if getattr(result, "degraded", False):
+                degraded_pairs.append((call.tool, result))
             # 异步任务号记进会话状态：下一轮「刚才那个任务跑完了吗」需要它。
             # 只从结构化 data 里取（`submit_*` 的契约就是返回 job_id），
             # **不解析回答文本**——从散文里抠任务号是最容易错配的一类实现。
@@ -1212,6 +1217,38 @@ def run_turn(
                 # 结果是同一个函数里更早的引用变成 UnboundLocalError（本地名遮蔽）——
                 # 一个只在"上一轮有未覆盖项"时才触发的隐性崩溃。
                 coverage_list.append(Coverage(available=(), unavailable=("position",)))
+
+        # 降级诊断必须进入**提示词看得见的那个通道**。
+        #
+        # 50 处工具代码在 `ToolResult.degraded_reason` 里写了人话诊断，但它的消费者
+        # **只有 `api/mcp_server.py`**——对话路径读不到。提示词里关于工具状态的唯一
+        # 通道是 `coverage.unavailable`（见 `_build_prompt` 的 `must_declare`），
+        # 而 `ToolResult.data` / `rendered` / `degraded_reason` 都不在提示词里。
+        #
+        # 后果分两种，都真实存在：
+        #   * 工具把诊断**同时**写进了 `unavailable`（`ledger.py` / `outcomes.py` /
+        #     `announcements_read` 的范式）→ 没问题，这里识别为"已声明"，不重复；
+        #   * 工具只写了 `degraded_reason`（`degraded_tool_result` 的缺省行为是
+        #     `unavailable=(tool_name,)`）→ 模型只拿到一个工具名，**知道"没覆盖"
+        #     却不知道"为什么"**，于是只能说"本轮无可用证据"。
+        #
+        # 修在合并点而不是逐个改 50 处调用：单点生效，且新工具自动受保护。
+        already_declared = " ".join(coverage_unavailable_of(coverage_list))
+        for tool_name, result in degraded_pairs:
+            reason = str(getattr(result, "degraded_reason", "") or "").strip()
+            if not reason:
+                continue
+            declared_names = tuple(
+                str(name) for name in (getattr(result.coverage, "unavailable", ()) or ())
+            )
+            # 已经有实质声明（不是裸工具名）就不重复
+            if any(name and name != tool_name and name in already_declared for name in declared_names):
+                continue
+            declaration = f"{tool_name}（{reason}）"
+            if declaration in already_declared:
+                continue
+            coverage_list.append(Coverage(available=(), unavailable=(declaration,)))
+            already_declared += " " + declaration
 
         coverage_unavailable = coverage_unavailable_of(coverage_list)
         # 把本轮的证据与覆盖声明放到 ctx 上：会话状态在 `_finish` 里统一累积
