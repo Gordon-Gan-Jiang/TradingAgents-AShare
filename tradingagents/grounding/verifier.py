@@ -49,7 +49,14 @@ REASON_COVERAGE = "coverage_unavailable_not_disclosed"
 REASON_UNSOURCED_INSTRUMENT = "unsourced_instrument"
 
 # 6 位代码（可带交易所后缀）。刻意不匹配更长数字串里的片段。
-_INSTRUMENT_RE = re.compile(r"(?<!\d)(\d{6})(?:\.(?:SH|SZ|SS))?(?!\d)", re.IGNORECASE)
+#
+# `(?<![\d.])` 里的 `.` 是必需的：只要前一个字符是小数点，这 6 位就**不是代码，
+# 而是小数部分**。实测（2026-09-22）`3.203957e+09` 的 `203957` 被读成了股票代码，
+# 于是模型写一个 6 位小数的数就被判 `unsourced_instrument`——而证据里那个数是
+# 3203957000.0，`_instruments` 从它里面抽不出任何 6 位串，于是必然对不上。
+# 这与「把引用机制读成数据」「把字段名里的日期词读成日期断言」是同一类假阳性：
+# **校验器把无关的东西读成了断言**。
+_INSTRUMENT_RE = re.compile(r"(?<![\d.])(\d{6})(?:\.(?:SH|SZ|SS))?(?!\d)", re.IGNORECASE)
 
 
 def _instruments(text: str) -> set[str]:

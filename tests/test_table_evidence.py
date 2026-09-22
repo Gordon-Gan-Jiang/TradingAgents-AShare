@@ -323,3 +323,146 @@ def test_table_blocks_rejects_ragged_and_separatorless_tables():
     ok = _table_blocks("| a | b |\n|---|---|\n| 1 | 2 |\n")
     assert len(ok) == 1, "规整表格应被接受"
     assert ok[0] == [["a", "b"], ["---", "---"], ["1", "2"]]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 3 —— 非表格文本：两条路，各自的"结构自证"不同
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_zt_pool_fixed_format_is_parsed_by_its_literal_anchor():
+    """`get_zt_pool` 的 anchor 是**我们自己写的字面量**，可以安全解析。
+
+    anchor 逐字来自 `dataflows/providers/cn_akshare_provider.py`：
+        result = f"{date} 涨停家数：{count}\\n"
+        result += f"连板分布：\\n{lianban.head(10).to_string()}"
+    """
+    from tradingagents.tools.data import _evidence_items_from_text
+
+    real = "2026-09-21 涨停家数：103\n连板分布：\n连板数\n1    82\n2    13\n3     5\n"
+    got = {item.field: item.value for item in _evidence_items_from_text(real, source_key="x")}
+
+    assert got["涨停家数（2026-09-21）"] == 103.0
+    assert got["1连板家数"] == 82.0
+    assert got["3连板家数"] == 5.0
+    # `as_of` 取文本里数据自身的日期，不是查询日
+    assert {item.as_of for item in _evidence_items_from_text(real, source_key="x")} == {
+        "2026-09-21"
+    }
+
+
+def test_zt_pool_unavailable_and_failure_texts_produce_nothing():
+    """失败/不可用文案即使含数字也不得产出证据。"""
+    from tradingagents.tools.data import _evidence_items_from_text
+
+    for text in (
+        "2026-09-21 涨停板情绪池数据暂不可用。",
+        "涨停板情绪池数据获取失败：ConnectionError: x",
+        "一些无关散文 103 家涨停",
+        "",
+    ):
+        assert _evidence_items_from_text(text, source_key="x") == (), f"{text[:24]!r}"
+
+
+def test_ranked_whitespace_parses_the_real_board_fund_flow_text():
+    """真实榜单文本（实抓）→ 用**表头里的真列名**做字段名。"""
+    from tradingagents.tools.data import _evidence_items_from_ranked_whitespace
+
+    real = (
+        "板块资金流向排名（数据截止 2026-09-22，共48个板块，前10名）：\n"
+        " 排名   名称     今日涨跌幅   今日主力净流入-净额  今日主力净流入-净占比\n"
+        "  1  房地产  0.005472 3.203957e+09     0.100913\n"
+        "  2 生物制药 -0.001041 1.942324e+09     0.045254\n"
+    )
+    got = {
+        item.field: item.value
+        for item in _evidence_items_from_ranked_whitespace(real, source_key="x")
+    }
+    assert got["房地产 今日涨跌幅（2026-09-22）"] == 0.005472
+    assert got["房地产 今日主力净流入-净额（2026-09-22）"] == 3.203957e9
+    assert got["生物制药 今日主力净流入-净占比（2026-09-22）"] == 0.045254
+
+
+def test_ranked_whitespace_abandons_the_whole_block_when_column_count_varies():
+    """字段数不一致 ⇒ 有单元格内含空格 ⇒ 列边界不可信 ⇒ **整块放弃**。
+
+    这是与 G1 同源的一条：错位后每个数字都还在文本里，**校验器拦不住**。
+    """
+    from tradingagents.tools.data import _evidence_items_from_ranked_whitespace
+
+    ragged = (
+        "榜单（数据截止 2026-09-22）：\n"
+        " 排名   名称     涨跌幅   净额\n"
+        "  1  房地产  0.005472 3.203957e+09\n"
+        "  2 生物 制药 -0.001041 1.942324e+09\n"  # ← 名称里有空格，多一个字段
+    )
+    assert _evidence_items_from_ranked_whitespace(ragged, source_key="x") == ()
+
+
+def test_ranked_whitespace_abandons_the_block_when_ranks_are_not_continuous():
+    """排名必须 1,2,3…连续。这是这套护栏的核心自证：错位必然破坏它。"""
+    from tradingagents.tools.data import _evidence_items_from_ranked_whitespace
+
+    broken = (
+        "榜单（数据截止 2026-09-22）：\n"
+        " 排名   名称     涨跌幅   净额\n"
+        "  1  房地产  0.005472 3.203957e+09\n"
+        "  3 生物制药 -0.001041 1.942324e+09\n"  # ← 跳过了 2
+    )
+    assert _evidence_items_from_ranked_whitespace(broken, source_key="x") == ()
+
+
+def test_ranked_whitespace_requires_the_anchor_date():
+    """`as_of` 取不到就不产出——宁可少一条证据，不要一个猜出来的时点。"""
+    from tradingagents.tools.data import _evidence_items_from_ranked_whitespace
+
+    no_anchor = (
+        "板块资金流向排名：\n"
+        " 排名   名称     涨跌幅   净额\n"
+        "  1  房地产  0.005472 3.203957e+09\n"
+    )
+    assert _evidence_items_from_ranked_whitespace(no_anchor, source_key="x") == ()
+
+
+def test_ranked_whitespace_requires_the_header_width_to_match_data_width():
+    """表头字段数必须等于数据行字段数（第二道自证）。"""
+    from tradingagents.tools.data import _evidence_items_from_ranked_whitespace
+
+    mismatch = (
+        "榜单（数据截止 2026-09-22）：\n"
+        " 排名   名称   涨跌幅   净额   占比\n"  # 表头 5 列
+        "  1  房地产  0.005472 3.203957e+09\n"  # 数据 4 列
+    )
+    assert _evidence_items_from_ranked_whitespace(mismatch, source_key="x") == ()
+
+
+def test_title_line_containing_the_word_ranking_is_not_mistaken_for_the_header():
+    """标题行 `板块资金流向排名（…）` **也含「排名」二字**，不得被当表头。
+
+    实测踩到过：宽松匹配 `"排名" in line` 会命中标题行，于是表头判据
+    `header_fields[0] != '排名'` 直接放弃，**整个解析器静默失效**（返回 0 条而不报错）。
+    """
+    from tradingagents.tools.data import _evidence_items_from_ranked_whitespace
+
+    real = (
+        "板块资金流向排名（数据截止 2026-09-22，共48个板块，前10名）：\n"
+        " 排名   名称     今日涨跌幅   今日主力净流入-净额\n"
+        "  1  房地产  0.005472 3.203957e+09\n"
+    )
+    items = _evidence_items_from_ranked_whitespace(real, source_key="x")
+    assert items, "标题行的「排名」抢占了表头判定，解析器静默失效"
+    assert items[0].field.startswith("房地产")
+
+
+def test_board_spot_with_a_name_column_in_the_middle_is_left_unparsed():
+    """`get_board_spot` / `get_board_rank` 的列里**夹着 `leader`（股票名）**这类
+    非数字中间列，无法用"名称之后全是数字"验证列对齐，按 Phase 3.2 的裁定
+    **保持空证据**——宁可少证据，不要错位证据。"""
+    from tradingagents.tools.data import _evidence_items_from_ranked_whitespace
+
+    spot_like = (
+        "行业板块涨幅榜 Top20（数据截止 2026-09-22，共48个板块）：\n"
+        " 排名   名称   chg_1d   turnover  up_count  leader  leader_chg\n"
+        "  1 房地产 0.005472 1.2e+09 30 万科A 0.031\n"
+    )
+    assert _evidence_items_from_ranked_whitespace(spot_like, source_key="x") == ()

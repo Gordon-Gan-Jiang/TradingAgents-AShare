@@ -596,3 +596,69 @@ def test_production_turn_deps_supply_the_reference_dates():
     source = inspect.getsource(chat_service.run_turn_streaming)
     assert "reference_date=" in source, "生产 _TurnDeps 未传 reference_date，相对日词会恒失败"
     assert "previous_trading_day=" in source, "生产 _TurnDeps 未传 previous_trading_day"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 小数部分不是股票代码
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `_INSTRUMENT_RE` 原本是 `(?<!\d)(\d{6})(?!\d)`。实测（2026-09-22）模型写
+# `3.203957e+09` 时，`203957` 被读成了股票代码 —— 因为小数点不是数字，
+# 前视断言放它过去了。于是**模型写一个 6 位小数的数就被判 `unsourced_instrument`**，
+# 而证据里那个数是 3203957000.0，`_instruments` 从它里抽不出任何 6 位串，
+# 所以必然对不上。
+#
+# 这与「把引用机制读成数据」「把字段名里的日期词读成日期断言」是同一类假阳性：
+# **校验器把无关的东西读成了断言**。而这类假阳性最难发现，因为它只在模型
+# "恰好写了 6 位小数"时出现。
+
+
+def test_decimal_fraction_is_not_read_as_a_stock_code():
+    from tradingagents.grounding.verifier import _instruments
+
+    for text in ("3.203957e+09", "0.123456", "涨跌幅 0.005472", "净额 3.203957e+09 元"):
+        assert _instruments(text) == set(), f"{text!r} 的小数部分被读成了股票代码"
+
+
+def test_real_codes_are_still_recognized_in_every_common_position():
+    """反向：真实的 6 位代码在各种写法下都必须仍被识别。
+
+    放宽 lookbehind 的风险是"把真代码也放过"，所以每种常见写法都要钉住。
+    """
+    from tradingagents.grounding.verifier import _instruments
+
+    for text, expected in (
+        ("600519", {"600519"}),
+        ("600519.SH", {"600519"}),
+        ("000001.SZ", {"000001"}),
+        ("代码：600519", {"600519"}),
+        ("[600519]", {"600519"}),
+        ("（600519）", {"600519"}),
+        ("600519 的市盈率", {"600519"}),
+    ):
+        assert _instruments(text) == expected, f"{text!r} 的真实代码没被识别"
+
+
+def test_claim_writing_a_six_decimal_number_passes_when_evidence_holds_it():
+    """端到端：证据里存的是原始值，模型写 6 位小数不该被判无源代码。"""
+    from tradingagents.grounding.types import Claim, EvidenceItem, EvidenceSet, StructuredAnswer
+    from tradingagents.grounding.verifier import verify
+
+    evidence = EvidenceSet(
+        items=(
+            EvidenceItem(
+                id="E1",
+                field="房地产 今日主力净流入-净额（2026-09-22）",
+                value=3203957000.0,
+                unit="",
+                source_key="fundamental_data",
+                as_of="2026-09-22",
+            ),
+        )
+    )
+    answer = StructuredAnswer(
+        summary="",
+        claims=(Claim(text="房地产主力净流入 3.203957e+09 元 [E1]。", refs=("E1",)),),
+    )
+    result = verify(answer, evidence, reference_date="2026-09-22")
+    assert result.ok, f"6 位小数被误判：{result.reason}"

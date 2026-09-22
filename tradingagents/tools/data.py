@@ -622,6 +622,185 @@ def _evidence_items_from_table(
     return tuple(items)
 
 
+_ZT_POOL_COUNT_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*涨停家数：\s*(\d+)\s*$")
+_ZT_POOL_ROW_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s*$")
+
+
+def _evidence_items_from_text(
+    rendered: str, *, source_key: str, as_of: str = ""
+) -> tuple[EvidenceItem, ...]:
+    """解析**我们自己渲染的**固定格式半结构化文本（Phase 3）。
+
+    与表格那条路的关键区别：这里**没有**"列数一致"这类结构性自证，所以安全性
+    完全依赖 **anchor 是字面量且由我们自己的代码产出**。当前只有一个工具走这条
+    路，anchor 逐字来自 `dataflows/providers/cn_akshare_provider.py:1728`：
+
+        result = f"{date} 涨停家数：{count}\\n"
+        result += f"连板分布：\\n{lianban.head(10).to_string()}"
+
+    为什么敢解析它：anchor `涨停家数：` 是我们自己写的常量，不是从 vendor 散文里
+    猜的标签；命中的行还要同时满足"首列是日期、末列是整数"才会产出证据。
+    **anchor 不出现就一条都不产出**——换成链路里其它 provider 时自然会走这条路。
+
+    与表格那条路的共同点：`as_of` 取**数据自身的时点**（文本里的日期），不是查询日。
+    """
+    text = str(rendered or "")
+    if "涨停家数：" not in text:
+        return ()
+
+    items: list[EvidenceItem] = []
+    in_lianban = False
+    for line in text.splitlines():
+        if "连板分布" in line:
+            in_lianban = True
+            continue
+        match = _ZT_POOL_COUNT_RE.match(line)
+        if match:
+            period, count = match.group(1), match.group(2)
+            items.append(
+                EvidenceItem(
+                    id=f"E{len(items) + 1}",
+                    field=f"涨停家数（{period}）",
+                    value=float(count),
+                    unit="count",
+                    source_key=source_key,
+                    as_of=period,  # 数据自身的日期
+                )
+            )
+            continue
+        if in_lianban:
+            row = _ZT_POOL_ROW_RE.match(line)
+            if row and len(items) < _MAX_EVIDENCE_ITEMS:
+                # pandas Series `to_string()` 的输出：`连板数 <空格> 家数`
+                items.append(
+                    EvidenceItem(
+                        id=f"E{len(items) + 1}",
+                        field=f"{row.group(1)}连板家数",
+                        value=float(row.group(2)),
+                        unit="count",
+                        source_key=source_key,
+                        as_of=items[0].as_of if items else as_of,
+                    )
+                )
+    return tuple(items)
+
+
+_ANCHOR_DATE_RE = re.compile(r"数据截止\s*(\d{4}-\d{2}-\d{2})")
+_RANKED_HEADER_HINT = "排名"
+
+
+def _evidence_items_from_ranked_whitespace(
+    rendered: str, *, source_key: str, as_of: str = ""
+) -> tuple[EvidenceItem, ...]:
+    """解析「排名 + 定宽空白分隔」的榜单文本（Phase 3）。
+
+    这条路的**风险形状与表格那次不同**：pandas 的 `to_string()` 用空白对齐，
+    **列边界是靠空白数量隐含的**，没有分隔行、没有管道符。一旦某个单元格
+    内部含空格，整行的字段数就会与表头不符——**而错位后每个数字都还在文本里，
+    校验器拦不住**（与表格那次是同一个隐蔽漏洞）。
+
+    所以判据做成"结构自证"，四条**全部**满足才产出，任一条不满足就整块放弃：
+
+    1. anchor：出现 `数据截止 YYYY-MM-DD`，`as_of` 取它（数据自身时点）；
+    2. 出现含 `排名` 的表头行；
+    3. 每行的字段数**完全一致**；
+    4. **排名列必须是 1,2,3,…N 连续递增**，且除排名与名称外**每个字段都是数字**。
+
+    第 4 条是这套护栏的核心：`排名` 是单调连续的小整数，只有列对齐正确时才成立；
+    任何一处错位都会破坏它。这也是**为什么本函数只覆盖一种形态**——
+    `get_board_spot` / `get_board_rank` 的列里夹着 `leader`（股票名）等**非数字
+    中间列**，无法用"除名称外全是数字"来验证，于是按 Phase 3.2 的裁定
+    **保持空证据**（宁可少证据，不要错位证据）。
+
+    `get_zt_pool` 走的是另一条路（`_evidence_items_from_text`）——它的 anchor 是
+    我们自己的字面量，不需要这里的排名自证。
+    """
+    text = str(rendered or "")
+    anchor = _ANCHOR_DATE_RE.search(text)
+    if not anchor:
+        return ()
+
+    lines = [line for line in text.splitlines() if line.strip()]
+    # 表头判据必须收严到"**第一个字段恰好是** `排名`"：实测量化文案的标题行是
+    # `板块资金流向排名（数据截止 …）`，它**也含「排名」二字**，宽松匹配会把它
+    # 当成表头，于是 `header_fields[0] != '排名'` 直接放弃——整个解析器静默失效。
+    header_index = next(
+        (i for i, line in enumerate(lines) if line.split()[:1] == [_RANKED_HEADER_HINT]),
+        None,
+    )
+    if header_index is None:
+        return ()
+
+    header_fields = lines[header_index].split()
+    if header_fields[0] != _RANKED_HEADER_HINT:
+        return ()
+    data_rows = lines[header_index + 1 :]
+
+    rows: list[list[str]] = []
+    for line in data_rows:
+        fields = line.split()
+        if not fields:
+            continue
+        if not fields[0].isdigit():
+            break  # 榜单块结束（后续是别的段）
+        rows.append(fields)
+    if not rows:
+        return ()
+
+    widths = {len(row) for row in rows}
+    if len(widths) != 1:
+        # 字段数不一致 ⇒ 某个单元格内部含空格，列边界已不可信 ⇒ 整块放弃
+        return ()
+    width = widths.pop()
+    # 表头字段数必须与数据行一致：这是第二道自证——表头列名自己也可能含空格，
+    # 一旦两者不等，说明"按空白切分"这个前提在这份文本上不成立。
+    if len(header_fields) != width or width < 3:
+        return ()
+
+    ranks = [int(row[0]) for row in rows]
+    if ranks != list(range(1, len(rows) + 1)):
+        # 排名不连续 ⇒ 列对齐已被破坏
+        return ()
+
+    names = [row[1] for row in rows]
+    if any(name.replace(".", "").replace("-", "").isdigit() for name in names):
+        # `名称` 列本身是数字 ⇒ 说明列切分错位（名称位其实是排名/数值）
+        return ()
+
+    numeric_rows: list[list[float]] = []
+    for row in rows:
+        try:
+            numeric_rows.append([float(cell) for cell in row[2:]])
+        except ValueError:
+            # 名称之后出现非数字 ⇒ 该形态不是"名称 + 纯数值"，放弃
+            return ()
+
+    # 列名**取自表头**，不硬编——表头就是 `今日涨跌幅` / `今日主力净流入-净额` /
+    # `今日主力净流入-净占比` 这些真名。硬编会随 provider 改列而悄悄错位。
+    column_names = header_fields[2:]
+    period = anchor.group(1) or as_of
+    items: list[EvidenceItem] = []
+    for name, numbers in zip(names, numeric_rows):
+        for column, value in zip(column_names, numbers):
+            if len(items) >= _MAX_EVIDENCE_ITEMS:
+                break
+            items.append(
+                EvidenceItem(
+                    id=f"E{len(items) + 1}",
+                    field=f"{name} {column}（{period}）",
+                    value=value,
+                    # 单位留空：`今日涨跌幅` 是 0.005472（小数）还是 0.55（百分数）
+                    # 取决于 provider 的表示，**猜错单位比没有单位更糟**
+                    # （会让校验器的换算判断出错）。留空时数值仍可被引用
+                    # ——`textual_values` 会把非数值单位项的值一并纳入。
+                    unit="",
+                    source_key=source_key,
+                    as_of=period,
+                )
+            )
+    return tuple(items)
+
+
 def make_data_tools() -> tuple[ToolSpec, ...]:
     """构造**工具面**上的 11 个数据工具 ToolSpec（19 减掉退役的 8 个）。
 
@@ -680,6 +859,19 @@ def make_data_tools() -> tuple[ToolSpec, ...]:
                         # 表格里每条证据的 as_of 由**报告期**决定（G4），
                         # 这里的入参只是兜底：取不到报告期就不产出该行。
                         as_of=as_of,
+                    )
+                if not evidence:
+                    # 最后一步：我们自己渲染的固定格式文本（`get_zt_pool` 的
+                    # 「涨停家数：N」+ 连板分布）。安全性依赖 anchor 是字面量，
+                    # 见该函数的说明。
+                    evidence = _evidence_items_from_text(
+                        rendered, source_key=_decl.category, as_of=as_of
+                    )
+                if not evidence:
+                    # 再退一步：排名榜单的定宽空白文本（`get_board_fund_flow`）。
+                    # 这条路靠"排名连续 + 表头宽度等于数据行宽度"自证，见说明。
+                    evidence = _evidence_items_from_ranked_whitespace(
+                        rendered, source_key=_decl.category, as_of=as_of
                     )
             return ToolResult(
                 data={
