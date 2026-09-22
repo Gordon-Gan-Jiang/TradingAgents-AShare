@@ -246,3 +246,41 @@ def test_without_tool_text_the_abstention_instruction_is_unchanged():
     prompt = model._build_prompt("任务", EvidenceSet(items=()), None)
     assert "本轮无可用证据" in prompt
     assert "不得编造" in prompt
+
+
+# ── 同一维度不要说两遍 ────────────────────────────────────────────────
+
+
+def test_a_dimension_is_declared_once_even_when_the_model_paraphrases_it():
+    """模型对 `must_declare` 的缩写复述不该与代码并入的权威版本并列。
+
+    实测用户看到的是同一维度说两遍，第二次还带着完整原因——像系统出了故障：
+
+        trade_ledger、trade_ledger（没有已录入的交易流水）
+        board_data（数据源故障：板块涨幅榜获取失败）、
+        board_data（数据源故障：板块涨幅榜获取失败：ConnectionError: …）
+    """
+    from tradingagents.agent.loop import _merge_dimensions
+
+    merged = _merge_dimensions(
+        (
+            "trade_ledger",
+            "trade_ledger（没有已录入的交易流水）",
+            "position",
+        )
+    )
+    assert merged == ("trade_ledger（没有已录入的交易流水）", "position"), (
+        "同一维度仍在回答里出现两次"
+    )
+
+
+def test_genuinely_different_dimensions_are_not_collapsed():
+    """去重不能把**真正不同**的维度合并掉。
+
+    `个股资金流` 与 `个股资金流明细` 在括号前就不同，是两个维度。
+    按括号前的名字分组正是为了保住这条——按前缀匹配就会错杀。
+    """
+    from tradingagents.agent.loop import _merge_dimensions
+
+    merged = _merge_dimensions(("个股资金流", "个股资金流明细", "position"))
+    assert set(merged) == {"个股资金流", "个股资金流明细", "position"}
