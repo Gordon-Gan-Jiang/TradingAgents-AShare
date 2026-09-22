@@ -363,6 +363,16 @@ def looks_like_market_screen(text: str) -> bool:
     # 平台有现成的涨停池工具，去跑一遍全市场扫描既慢又答非所问。
     if any(marker in t for marker in _COUNT_QUESTION_MARKERS):
         return False
+    # 账户类问句优先，**除非**同时明确要了数量。
+    #
+    # 实测：「我的自选股有哪些」被判成全市场筛选——子串「自**选股**」里含强名词
+    # 「选股」。而平台本来有 `watchlist_read` 能直接回答，结果却去跑了一遍扫描
+    # （还因参数错误失败），回答成了"本轮无可用证据"。
+    #
+    # 判据只有一条（数量词），不用逐个往例外表里加词：要了数量就是想要一份名单，
+    # 没有数量就是在问自己的账户。
+    if any(marker in t for marker in _PORTFOLIO_MARKERS) and not _quantity_requested(t):
+        return False
     if any(noun in t for noun in _SCREEN_NOUNS):
         return True
     return any(action in t for action in _SCREEN_ACTIONS) and _quantity_requested(t)

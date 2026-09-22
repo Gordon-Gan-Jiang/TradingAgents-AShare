@@ -231,3 +231,64 @@ def test_http_chat_honours_the_selected_profile(monkeypatch):
         "那样用户会以为换了模型而其实没换"
     )
     assert calls[0].get("api_key") == "sk-second"
+
+
+def test_turn_records_the_selected_model_as_its_label(monkeypatch):
+    """落库的 `model` 标签必须是**实际使用**的那个模型。
+
+    ## 这条为什么重要
+
+    这个标签是"哪个模型更准"的唯一归属依据：模型榜单、T+1 质量按模型拆分、A/B
+    对比都读它。标签错了，两个模型的样本会被混在一起，结论全废——而它错起来
+    完全无声（页面上显示一个名字、实际用另一个）。
+
+    ## 实测到的缺陷
+
+    `build_llm_completer` 里已经修过一次"算出的 profile_id 被丢掉"
+    （见该函数文档里的两条事故记录），但同一个错误留在了 `_resolve_model_label`：
+    它解析出 profile_id 后又调 `_build_runtime_config({}, user_id=..., db=None)`，
+    于是**标签永远反映默认配置**而非用户选中的档案。实测：请求里指定
+    deepseek-v4-flash 档案，trace 里落的是 `openai:doubao-1-5-lite-32k-250115`。
+    """
+    from api.database import get_db_ctx
+    from api.services import chat_service, model_profile_service
+
+    user_id = _user()
+    with get_db_ctx() as db:
+        model_profile_service.create_model_profile(
+            db, user_id=user_id, name="默认档", llm_provider="openai",
+            deep_think_llm="model-default", api_key="sk-default", is_default=True,
+        )
+        picked = model_profile_service.create_model_profile(
+            db, user_id=user_id, name="被选中的档", llm_provider="openai",
+            deep_think_llm="model-picked", api_key="sk-picked",
+        )
+
+    body = chat_service.ChatRequest(
+        messages=[{"role": "user", "content": "600519 是不是在洗盘"}],
+        model_profile_id=str(picked["id"]),
+    )
+    label = chat_service._resolve_model_label(user_id=user_id, body=body)
+
+    assert label == "openai:model-picked", (
+        f"标签应为实际选中的档案，实际 {label!r}——"
+        "说明档案解析结果在这里又被丢掉了（模型归因会串样本）"
+    )
+
+
+def test_turn_label_follows_the_default_profile_when_nothing_is_selected(monkeypatch):
+    """没有显式选择时，标签跟随**用户默认档案**（而不是环境默认）。"""
+    from api.database import get_db_ctx
+    from api.services import chat_service, model_profile_service
+
+    user_id = _user()
+    with get_db_ctx() as db:
+        model_profile_service.create_model_profile(
+            db, user_id=user_id, name="用户默认档", llm_provider="openai",
+            deep_think_llm="user-default-model", api_key="sk-user", is_default=True,
+        )
+
+    body = chat_service.ChatRequest(messages=[{"role": "user", "content": "你好"}])
+    label = chat_service._resolve_model_label(user_id=user_id, body=body)
+
+    assert label == "openai:user-default-model", label

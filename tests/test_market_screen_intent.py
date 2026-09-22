@@ -601,3 +601,83 @@ def test_screen_prompt_shows_evidence_values():
         ctx,
     )
     assert "4247.71" not in plain, "判定回合不应把数值喂给模型（原设计保持不变）"
+
+
+def test_screen_plan_arguments_pass_registry_validation():
+    """筛选回合计划出来的参数必须能通过注册表的**类型**校验。
+
+    ## 实测（真实对话才抓到）
+
+    「我的自选股有哪些」被路由成全市场筛选后，`market_screen` 的执行观测是：
+
+        ok: false, detail: "ValueError: argument 'profile' for market_screen
+                             must be string, got NoneType"
+
+    `parse_screen_request` 在问句里没有档案关键词时返回 `profile=None`，而这个
+    参数在 schema 里声明为 `"type": "string"`（`null` 不属于 string）——于是
+    **每一次没有档案关键词的筛选都是必然失败的调用**。这类"发一次注定失败的
+    调用"是本仓库反复踩的形态，而单测看不见它：既有用例只检查参数**名字**是否
+    合法，从不检查**取值**是否合法。
+    """
+    from tradingagents.agent.loop import TurnRequest, _plan_tools
+    from tradingagents.tools import build_registry
+
+    registry = build_registry(
+        ports_factory=lambda *a: object(),
+        news_fetcher=lambda *a: [],
+        market_screener=object(),
+    )
+    # 没有档案关键词 → parse_screen_request 的 profile 为 None
+    planned = _plan_tools(
+        TurnRequest(text="帮我选股", user_id="u1", screen=True, tier="medium",
+                    as_of="2026-09-21"),
+        registry=registry,
+    )
+    assert planned and planned[0].tool == "market_screen"
+
+    spec = registry.get("market_screen")
+    # 不真的执行 handler（那要连网），只跑参数校验这一段
+    registry.validate("market_screen", planned[0].arguments)
+
+    properties = set((spec.input_schema.get("properties") or {}).keys())
+    assert set(planned[0].arguments) <= properties
+
+
+def test_screen_with_a_named_profile_keeps_it():
+    """有档案关键词时参数要保留——修 None 不能顺手把真值也丢掉。"""
+    from tradingagents.agent.loop import TurnRequest, _plan_tools
+    from tradingagents.tools import build_registry
+
+    registry = build_registry(
+        ports_factory=lambda *a: object(),
+        news_fetcher=lambda *a: [],
+        market_screener=object(),
+    )
+    planned = _plan_tools(
+        TurnRequest(text="找20只回调低吸的票", user_id="u1", screen=True, tier="medium",
+                    as_of="2026-09-21"),
+        registry=registry,
+    )
+    assert planned[0].arguments["profile"] == "reversal"
+
+
+def test_user_portfolio_questions_are_not_market_screens():
+    """问"我的自选/持仓"不是在要一份全市场名单。
+
+    ## 实测（真实对话才抓到）
+
+    「我的自选股有哪些」被判成全市场筛选，`market_screen` 随即以参数错误失败，
+    回答成了"本轮无可用证据"——而平台本来有 `watchlist_read` 能直接回答。
+    根因是子串：「自**选股**」里含强名词「选股」，于是账户类问句被当成筛选需求。
+
+    ## 判据为什么是"数量词"而不是"再补一个例外词"
+
+    账户类措辞优先，**除非**问句同时明确要了数量（「我持仓里的放量票找十个」）——
+    那时用户确实在要一份名单。这样规则只有一条，不用逐个往例外表里加词。
+    """
+    assert looks_like_market_screen("我的自选股有哪些") is False
+    assert looks_like_market_screen("我持仓里哪只最危险") is False
+    assert looks_like_market_screen("我的跟踪池现在怎么样") is False
+    # 明确要名单时仍然是筛选
+    assert looks_like_market_screen("我持仓里的放量票找十个") is True
+    assert looks_like_market_screen("帮我找十只放量票") is True

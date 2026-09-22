@@ -1026,16 +1026,40 @@ def _resolve_model_label(*, user_id: str, body: ChatRequest) -> str:
 
     取不到时返回空串——**不猜**：填一个错误的模型名比留空更糟，
     因为它会让「哪个模型更准」的统计把两个模型混在一起。
+
+    ## 与 `build_llm_completer` 用**同一套装配**（事故记录）
+
+    这里曾经是「解析出 profile_id，然后 `_build_runtime_config({}, user_id=..., db=None)`」
+    ——和 `build_llm_completer` 修过的那次一模一样的错误：**刚解析出的档案被丢掉**，
+    于是标签永远反映环境默认配置，而不是用户选中的档案与用户默认档案。
+
+    危害不比模型选错小：这个标签是"哪个模型更准"的唯一归属依据（模型榜单、
+    T+1 质量按模型拆分、A/B 对比都读它）。实测：请求里指定 deepseek-v4-flash 档案，
+    trace 里落的是 `openai:doubao-1-5-lite-32k-250115`——两个模型的样本被混在一起，
+    而且错起来完全无声（页面上显示一个名字、实际用另一个）。
     """
     try:
-        from api.main import _build_runtime_config, _resolve_effective_model_profile_id
+        from api.main import (
+            _build_runtime_config,
+            _merge_model_profile_overrides,
+            _resolve_effective_model_profile_id,
+        )
         from api.database import get_db_ctx
 
         with get_db_ctx() as db:
             profile_id = _resolve_effective_model_profile_id(
                 db, user_id=user_id, model_profile_id=body.model_profile_id
             )
-        config = _build_runtime_config({}, user_id=user_id, db=None)
+            overrides = _merge_model_profile_overrides(
+                db, user_id=user_id, model_profile_id=profile_id, request_overrides={}
+            )
+        config = _build_runtime_config(
+            overrides,
+            user_id=user_id,
+            db=None,
+            trusted_overrides=True,
+            strategy="profile_selected" if profile_id else "default",
+        )
         provider = config.get("llm_provider", "")
         model = config.get("deep_think_llm") or config.get("quick_think_llm") or ""
         return f"{provider}:{model}" if model else ""

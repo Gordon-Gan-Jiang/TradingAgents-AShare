@@ -222,6 +222,11 @@ def main() -> int:
     parser.add_argument("--json", type=Path, default=None)
     parser.add_argument("--user-id", default=DEFAULT_USER_ID)
     parser.add_argument("--profile-id", default=DEFAULT_PROFILE_ID)
+    parser.add_argument(
+        "--allow-rules-only",
+        action="store_true",
+        help="规划器未启用时也继续（默认中止：那量的是规则路径，不是对话能力）",
+    )
     args = parser.parse_args()
 
     cases = [c for c in CASES if not args.only or c.tool in args.only]
@@ -229,10 +234,31 @@ def main() -> int:
         print("没有匹配的用例", file=sys.stderr)
         return 2
 
+    from api.database import init_db
     from api.services import chat_service
+
+    # 建表：服务进程在 lifespan 里做这件事，脚本不走 lifespan。缺表的后果不是报错，
+    # 而是**跨轮状态写不进去**（服务层会记一条 warning 然后继续），于是"多轮"这条
+    # 能力在脚本里静默失效——验证出来的结论会与生产不一致。
+    init_db()
+
+    # `.env` 必须显式装载：服务进程由 `api.main` 装载它，脚本里没人做这件事。
+    # 不装载的后果是 `TA_LLM_PLANNER` 读不到 → 规划器静默关闭 → 整套验证量的是
+    # **规则路径**，而报告上写的是"对话能力"。第一次跑就踩到了：23 条里 17 条
+    # 因为"没标的只能追问"失败，看起来像工具全废，实际是规划器没开。
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
 
     planner = chat_service.build_planner(user_id=args.user_id)
     print(f"规划器：{'已启用' if planner else '未启用（走规则层）'}")
+    if planner is None and not args.allow_rules_only:
+        print(
+            "\n[中止] 规划器未启用，量出来的是规则路径而不是对话能力。\n"
+            "       确认 .env 里 TA_LLM_PLANNER=1（或加 --allow-rules-only 明确只量规则路径）。",
+            file=sys.stderr,
+        )
+        return 2
     print(f"用户：{args.user_id}｜模型档案：{args.profile_id}")
     print(f"用例：{len(cases)} 条\n")
 

@@ -394,6 +394,21 @@ def _missing_required_context(
     return tuple(missing)
 
 
+def _clean_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """丢掉取值为 None 的参数。
+
+    计划里的 None 不是"显式要求空值"，而是"这一项没定"——注册表按声明类型校验，
+    而 `null` 不属于 `"type": "string"`，于是参数里带 None 就是**一次必然失败的
+    调用**。实测：「帮我选股」没有档案关键词 → `profile=None` → `market_screen`
+    每次都以 `argument 'profile' must be string, got NoneType` 失败，而回答只显示
+    "本轮无可用证据"——原因只在 trace 里才看得到。
+
+    只在 **key 存在且值为 None** 时丢弃：显式传 `0`/`""`/`False` 是用户的取值，
+    不能顺手抹掉（本仓库踩过 `x or default` 把 0 当缺省的坑）。
+    """
+    return {key: value for key, value in arguments.items() if value is not None}
+
+
 def _missing_required_arguments(spec: Any, arguments: Mapping[str, Any]) -> set[str]:
     """按工具自己的 schema 找出**没填的必填参数**。"""
     schema = getattr(spec, "input_schema", None) or {}
@@ -471,7 +486,7 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
             planned.append(
                 ToolCall(
                     tool=name,
-                    arguments=arguments,
+                    arguments=_clean_arguments(arguments),
                     reason=str(raw.get("reason") or "planned"),
                 )
             )
@@ -499,12 +514,12 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
         return [
             ToolCall(
                 tool="market_screen",
-                arguments={
+                arguments=_clean_arguments({
                     "top_k": parsed.top_k,
                     "profile": parsed.profile,
                     "min_change_pct": parsed.min_change_pct,
                     "as_of": as_of,
-                },
+                }),
                 reason="market-wide screening",
             )
         ]
