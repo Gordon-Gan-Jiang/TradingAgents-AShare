@@ -1005,6 +1005,45 @@ async def _run_scheduled_job(task: dict, trade_date: str):
         _job_events.pop(job_id, None)
 
 
+def _refresh_mainline_t1_and_report() -> Optional[dict]:
+    """评估既往主线报告的 T+1 兑现，并**把结果记进日志**。
+
+    抽成独立函数有两个原因：
+
+    1. **修缺陷**：原调用点写的是 `mainline_service.refresh_t1_outcomes(db, ...)`，
+       返回值直接丢弃。而返回值里 `skipped[].reason` 正是"为什么这份报告没算出来"
+       的答案——算出来了又被扔掉，于是基准缓存坏了两周多而运维一个字都看不到。
+       这与工具层已确立的原则不一致（那边要求降级必须显式可见）。
+    2. **可测试**：原调用点在 `while True` 的异步循环体里，无法单测；
+       "测不了的代码"正是这个洞能长期存在的原因之一。
+
+    异常在此吞掉（记日志后返回 None）：调度循环必须活着，
+    一次刷新失败不能让后续的周期分析/自动深挖都不跑。
+    """
+    try:
+        with get_db_ctx() as db:
+            result = mainline_service.refresh_t1_outcomes(db, user_id="system")
+    except Exception as exc:  # noqa: BLE001 — 调度循环不能因单步失败而退出
+        _log(f"[Mainline Scheduler] T+1 refresh failed: {type(exc).__name__}: {exc}")
+        return None
+
+    evaluated = int(result.get("evaluated_reports") or 0)
+    skipped = result.get("skipped") or []
+    if not skipped:
+        _log(f"[Mainline Scheduler] T+1 refresh: 已评估 {evaluated} 份，无跳过。")
+        return result
+
+    # 原因只摘前 3 条：一次可能跳过几十份，全打出来会刷爆日志。
+    # 但**总数**必须报，否则"跳过 50 份"会被误读成"跳过 3 份"。
+    preview = "；".join(str(s.get("reason") or "")[:120] for s in skipped[:3])
+    more = f"（另有 {len(skipped) - 3} 条未列出）" if len(skipped) > 3 else ""
+    _log(
+        f"[Mainline Scheduler] T+1 refresh: 已评估 {evaluated} 份，"
+        f"跳过 {len(skipped)} 份。原因示例：{preview}{more}"
+    )
+    return result
+
+
 async def _mainline_scheduler_loop() -> None:
     """每日收盘后自动生成市场主线报告（默认 15:35，交易日触发，可用 MAINLINE_SCHEDULE_HHMM 覆盖）。"""
     from tradingagents.dataflows.trade_calendar import is_cn_trading_day
@@ -1056,11 +1095,8 @@ async def _mainline_scheduler_loop() -> None:
             label=f"mainline scheduled {job_id}",
         )
         # 闭环：顺带评估既往主线报告的 T+1 兑现（昨日主线今日是否兑现）
-        try:
-            with get_db_ctx() as db:
-                mainline_service.refresh_t1_outcomes(db, user_id="system")
-        except Exception as exc:
-            _log(f"[Mainline Scheduler] T+1 refresh failed: {type(exc).__name__}: {exc}")
+        # 走带日志的封装——返回值里的 skipped 原因是"闭环为什么没动"的唯一线索。
+        _refresh_mainline_t1_and_report()
 
         # 周期分析 + 自动深挖（识别 → 周期 → 决策 → 可买入筛选 → 自动创建个股深度分析任务）
         try:
