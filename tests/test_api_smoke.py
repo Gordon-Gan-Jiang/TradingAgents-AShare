@@ -1259,8 +1259,14 @@ class TestRecommendationEndpoint:
                 "volume": 2200000,
             },
         }
+        # 封住扫描器的两个**隐蔽依赖**（与 test_recommendation_service 同一事故）：
+        # ① `_try_load_full_spot_data()` 读本地全市场现货缓存——本机跑过全市场扫描后
+        #    缓存已落盘，缓存命中就不会再调用被打桩的 route_to_vendor，用例会拿到
+        #    **真实行情**、断言失败；② `_load_sector_context()` 会去联网取板块数据。
         with patch("api.services.market_scanner_service._load_cn_universe", return_value=universe), \
-             patch("api.services.market_scanner_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')):
+             patch("api.services.market_scanner_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')), \
+             patch("api.services.market_scanner_service._try_load_full_spot_data", return_value={}), \
+             patch("api.services.market_scanner_service._load_sector_context", return_value=({}, {})):
             r = self.client.post(
                 "/v1/recommendations",
                 headers=self.headers,
@@ -1626,8 +1632,14 @@ class TestDailyProductBatchEndpoint:
             "000001.SZ": {"price": 12.3, "change_pct": 2.1, "high": 12.35, "amount": 300000000, "volume": 1000000},
             "600519.SH": {"price": 1720, "change_pct": 6.0, "high": 1724, "amount": 1800000000, "volume": 2200000},
         }
+        # 封住扫描器的两个**隐蔽依赖**（与 test_recommendation_service 同一事故）：
+        # ① `_try_load_full_spot_data()` 读本地全市场现货缓存——本机跑过全市场扫描后
+        #    缓存已落盘，缓存命中就不会再调用被打桩的 route_to_vendor，用例会拿到
+        #    **真实行情**、断言失败；② `_load_sector_context()` 会去联网取板块数据。
         with patch("api.services.market_scanner_service._load_cn_universe", return_value=universe), \
-             patch("api.services.market_scanner_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')):
+             patch("api.services.market_scanner_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')), \
+             patch("api.services.market_scanner_service._try_load_full_spot_data", return_value={}), \
+             patch("api.services.market_scanner_service._load_sector_context", return_value=({}, {})):
             created = self.client.post(
                 "/v1/daily-product/run",
                 headers=self.headers,
@@ -1658,8 +1670,14 @@ class TestDailyProductBatchEndpoint:
         fake_quotes = {
             "600519.SH": {"price": 1720, "change_pct": 6.0, "high": 1724, "amount": 1800000000, "volume": 2200000},
         }
+        # 封住扫描器的两个**隐蔽依赖**（与 test_recommendation_service 同一事故）：
+        # ① `_try_load_full_spot_data()` 读本地全市场现货缓存——本机跑过全市场扫描后
+        #    缓存已落盘，缓存命中就不会再调用被打桩的 route_to_vendor，用例会拿到
+        #    **真实行情**、断言失败；② `_load_sector_context()` 会去联网取板块数据。
         with patch("api.services.market_scanner_service._load_cn_universe", return_value=universe), \
-             patch("api.services.market_scanner_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')):
+             patch("api.services.market_scanner_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')), \
+             patch("api.services.market_scanner_service._try_load_full_spot_data", return_value={}), \
+             patch("api.services.market_scanner_service._load_sector_context", return_value=({}, {})):
             created = self.client.post(
                 "/v1/daily-product/run",
                 headers=self.headers,

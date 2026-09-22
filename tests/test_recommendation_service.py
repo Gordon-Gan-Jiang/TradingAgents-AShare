@@ -42,8 +42,8 @@ def test_recommend_for_user_from_tracking_and_watchlist():
     db.commit()
 
     fake_quotes = {
-        "600519.SH": {"price": 1720, "change_pct": 2.5, "high": 1725, "amount": 2_000_000_000, "volume": 3_000_000},
-        "300750.SZ": {"price": 201, "change_pct": 1.2, "high": 202, "amount": 800_000_000, "volume": 2_500_000},
+        "600519.SH": {"price": 1720, "change_pct": 2.5, "high": 1725, "amount": 2_000_000_000, "volume": 3_000_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
+        "300750.SZ": {"price": 201, "change_pct": 1.2, "high": 202, "amount": 800_000_000, "volume": 2_500_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
     }
     with patch("api.services.daily_stock_analysis_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')):
         out = recommend_for_user(
@@ -66,7 +66,7 @@ def test_recommend_for_user_from_tracking_and_watchlist():
 def test_recommend_for_user_supports_seed_symbols():
     db = _mk_db()
     fake_quotes = {
-        "000001.SZ": {"price": 12.3, "change_pct": 0.8, "high": 12.4, "amount": 300_000_000, "volume": 1_000_000},
+        "000001.SZ": {"price": 12.3, "change_pct": 0.8, "high": 12.4, "amount": 300_000_000, "volume": 1_000_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
     }
     with patch("api.services.daily_stock_analysis_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')):
         out = recommend_for_user(
@@ -85,8 +85,8 @@ def test_recommend_for_user_supports_seed_symbols():
 def test_recommend_for_user_supports_custom_weights():
     db = _mk_db()
     fake_quotes = {
-        "000001.SZ": {"price": 12.3, "change_pct": 5.2, "high": 12.4, "amount": 300_000_000, "volume": 1_000_000},
-        "600519.SH": {"price": 1720, "change_pct": 1.0, "high": 1800, "amount": 2_000_000_000, "volume": 2_000_000},
+        "000001.SZ": {"price": 12.3, "change_pct": 5.2, "high": 12.4, "amount": 300_000_000, "volume": 1_000_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
+        "600519.SH": {"price": 1720, "change_pct": 1.0, "high": 1800, "amount": 2_000_000_000, "volume": 2_000_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
     }
     with patch("api.services.daily_stock_analysis_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')):
         out = recommend_for_user(
@@ -107,6 +107,27 @@ def test_recommend_for_user_supports_custom_weights():
     assert out["items"][0]["symbol"] == "000001.SZ"
 
 
+
+def _seal_scanner_env():
+    """封住扫描器的两个**隐蔽依赖**，让用例只吃本测试给的数据。
+
+    实测踩到（两个都不是"打桩名字写错"）：
+    1. `_fetch_enhanced_spot_data` 会先读 `_try_load_full_spot_data()`——**本地
+       全市场现货缓存**。本机跑过全市场扫描后缓存已落盘，于是缓存命中、根本不再
+       调用被打桩的 `route_to_vendor`，用例拿到的是**真实行情**，断言随之失败。
+    2. `_load_sector_context()` 会去取板块数据（数十秒），这是 145s 耗时的来源。
+
+    两处都封成空：测试要验的是"市场扫描源是否被正确接线与消费"，
+    而缓存在不在、板块源通不通，都不该影响这个结论。
+    """
+    from unittest.mock import patch as _patch
+
+    return [
+        _patch("api.services.market_scanner_service._try_load_full_spot_data", return_value={}),
+        _patch("api.services.market_scanner_service._load_sector_context",
+               return_value=({}, {})),
+    ]
+
 def test_recommend_for_user_supports_market_scan_source():
     db = _mk_db()
     universe = {
@@ -115,12 +136,14 @@ def test_recommend_for_user_supports_market_scan_source():
         "300750.SZ": "宁德时代",
     }
     fake_quotes = {
-        "000001.SZ": {"price": 12.3, "change_pct": 2.1, "high": 12.35, "amount": 300_000_000, "volume": 1_000_000},
-        "600519.SH": {"price": 1720, "change_pct": 6.2, "high": 1723, "amount": 2_000_000_000, "volume": 2_000_000},
-        "300750.SZ": {"price": 220, "change_pct": 1.3, "high": 223, "amount": 600_000_000, "volume": 1_500_000},
+        "000001.SZ": {"price": 12.3, "change_pct": 2.1, "high": 12.35, "amount": 300_000_000, "volume": 1_000_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
+        "600519.SH": {"price": 1720, "change_pct": 6.2, "high": 1723, "amount": 2_000_000_000, "volume": 2_000_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
+        "300750.SZ": {"price": 220, "change_pct": 1.3, "high": 223, "amount": 600_000_000, "volume": 1_500_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
     }
     with patch("api.services.market_scanner_service._load_cn_universe", return_value=universe), \
-         patch("api.services.market_scanner_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')):
+         patch("api.services.market_scanner_service.route_to_vendor",
+               return_value=str(fake_quotes).replace("'", '"')), \
+         _seal_scanner_env()[0], _seal_scanner_env()[1]:
         out = recommend_for_user(
             db,
             user_id="u1",
@@ -146,11 +169,13 @@ def test_recommend_for_user_market_scan_filters_near_limit_up():
         "600519.SH": "贵州茅台",
     }
     fake_quotes = {
-        "000001.SZ": {"price": 12.3, "change_pct": 9.9, "high": 12.35, "amount": 900_000_000, "volume": 1_000_000},
-        "600519.SH": {"price": 1720, "change_pct": 4.2, "high": 1723, "amount": 2_000_000_000, "volume": 2_000_000},
+        "000001.SZ": {"price": 12.3, "change_pct": 9.9, "high": 12.35, "amount": 900_000_000, "volume": 1_000_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
+        "600519.SH": {"price": 1720, "change_pct": 4.2, "high": 1723, "amount": 2_000_000_000, "volume": 2_000_000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0},
     }
     with patch("api.services.market_scanner_service._load_cn_universe", return_value=universe), \
-         patch("api.services.market_scanner_service.route_to_vendor", return_value=str(fake_quotes).replace("'", '"')):
+         patch("api.services.market_scanner_service.route_to_vendor",
+               return_value=str(fake_quotes).replace("'", '"')), \
+         _seal_scanner_env()[0], _seal_scanner_env()[1]:
         out = recommend_for_user(
             db,
             user_id="u1",
@@ -198,7 +223,7 @@ def test_run_scheduled_recommendation_pushes_send_wecom_and_wps():
     db.commit()
 
     fake_quotes = {
-        "600519.SH": {"price": 1720, "change_pct": 1.8, "high": 1725, "amount": 1200000000, "volume": 1800000}
+        "600519.SH": {"price": 1720, "change_pct": 1.8, "high": 1725, "amount": 1200000000, "volume": 1800000, "turnover_rate": 3.0, "volume_ratio": 1.5, "amplitude": 3.2, "open": 0, "low": 0}
     }
     with patch("api.services.recommendation_service.cn_today_str", return_value="2026-04-10"), \
          patch("api.services.recommendation_service.is_cn_trading_day", return_value=True), \
