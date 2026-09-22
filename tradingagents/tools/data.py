@@ -801,6 +801,49 @@ def _evidence_items_from_ranked_whitespace(
     return tuple(items)
 
 
+def evidence_from_rendered(rendered: str, *, source_key: str, as_of: str = "") -> tuple[EvidenceItem, ...]:
+    """从 vendor 渲染文本里抽取可引用证据（**整条解析链的唯一入口**）。
+
+    按 **JSON → Markdown 表格 → 固定格式文本 → 排名榜单** 依次尝试，全部不匹配
+    就返回空。每一步都比上一步更"敢"：
+
+    * JSON 有明确结构；
+    * Markdown 表格有分隔行与逐行一致的列数（G1 保证不错位）；
+    * 固定格式文本的 anchor 是**我们自己写的字面量**（`get_zt_pool`）；
+    * 排名榜单靠"排名连续 + 表头宽度等于数据行宽度"自证。
+
+    **为什么抽成独立函数**：解析链的顺序本身是一条不变量（"JSON 优先"意味着
+    JSON 能解析时不该走表格那条更宽松的路），而顺序散落在 handler 里的 if 里
+    就无法被单独测。护栏测试（`tests/test_tool_evidence_guardrail.py`）直接用
+    实抓文案调它，覆盖的就是生产路径，而不是测试自己复刻的一份链序。
+    """
+    # 失败文案一律不产出证据（里面即使有数字也不是事实）——判据在调用方，
+    # 因为 `_looks_like_vendor_failure` 需要 `failed` 参与 freshness 计算。
+    evidence = _evidence_items_from_json(
+        rendered,
+        source_key=source_key,
+        # 实时类工具没有日期参数，但数据自带时点（`quote_time`）。
+        # 空 as_of 会让证据无法通过日期校验，也会让"这是什么时候的价格"
+        # 无从回答——用数据自己的时点比用"今天"更诚实。
+        as_of=as_of or _as_of_from_payload(rendered),
+    )
+    if not evidence:
+        evidence = _evidence_items_from_table(
+            rendered,
+            source_key=source_key,
+            # 表格里每条证据的 as_of 由**报告期**决定（G4），
+            # 这里的入参只是兜底：取不到报告期就不产出该行。
+            as_of=as_of,
+        )
+    if not evidence:
+        evidence = _evidence_items_from_text(rendered, source_key=source_key, as_of=as_of)
+    if not evidence:
+        evidence = _evidence_items_from_ranked_whitespace(
+            rendered, source_key=source_key, as_of=as_of
+        )
+    return evidence
+
+
 def make_data_tools() -> tuple[ToolSpec, ...]:
     """构造**工具面**上的 11 个数据工具 ToolSpec（19 减掉退役的 8 个）。
 
@@ -844,35 +887,9 @@ def make_data_tools() -> tuple[ToolSpec, ...]:
             if failed:
                 evidence = ()
             else:
-                evidence = _evidence_items_from_json(
-                    rendered,
-                    source_key=_decl.category,
-                    # 实时类工具没有日期参数，但数据自带时点（`quote_time`）。
-                    # 空 as_of 会让证据无法通过日期校验，也会让"这是什么时候的价格"
-                    # 无从回答——用数据自己的时点比用"今天"更诚实。
-                    as_of=as_of or _as_of_from_payload(rendered),
+                evidence = evidence_from_rendered(
+                    rendered, source_key=_decl.category, as_of=as_of
                 )
-                if not evidence:
-                    evidence = _evidence_items_from_table(
-                        rendered,
-                        source_key=_decl.category,
-                        # 表格里每条证据的 as_of 由**报告期**决定（G4），
-                        # 这里的入参只是兜底：取不到报告期就不产出该行。
-                        as_of=as_of,
-                    )
-                if not evidence:
-                    # 最后一步：我们自己渲染的固定格式文本（`get_zt_pool` 的
-                    # 「涨停家数：N」+ 连板分布）。安全性依赖 anchor 是字面量，
-                    # 见该函数的说明。
-                    evidence = _evidence_items_from_text(
-                        rendered, source_key=_decl.category, as_of=as_of
-                    )
-                if not evidence:
-                    # 再退一步：排名榜单的定宽空白文本（`get_board_fund_flow`）。
-                    # 这条路靠"排名连续 + 表头宽度等于数据行宽度"自证，见说明。
-                    evidence = _evidence_items_from_ranked_whitespace(
-                        rendered, source_key=_decl.category, as_of=as_of
-                    )
             return ToolResult(
                 data={
                     "rendered": rendered,

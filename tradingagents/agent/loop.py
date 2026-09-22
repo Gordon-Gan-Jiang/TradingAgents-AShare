@@ -1233,16 +1233,39 @@ def run_turn(
         #     却不知道"为什么"**，于是只能说"本轮无可用证据"。
         #
         # 修在合并点而不是逐个改 50 处调用：单点生效，且新工具自动受保护。
+        #
+        # 判据是「**维度名后面有没有跟着解释**」：
+        #   * 纯子串判据不行。`announcements_read` 的 `unavailable` 与
+        #     `degraded_reason` 是**同义但不同字**的两句
+        #     （前者多「该维度未覆盖」，前缀也不同），子串匹配会判成"没传达"
+        #     而重复声明一遍。
+        #   * 第一版用的「声明了任何非裸名就跳过」又太松，漏掉这种情形：
+        #     `capital_flow_read` 声明 `individual_fund_flow（资金流）`——
+        #     它说清了"哪个维度没覆盖"，却没说"为什么"
+        #     （真实原因：`东财通道封锁且无可用 Tushare 凭证`）。
+        #
+        # 所以按**括号里的长度**区分「标签」与「解释」：`（资金流）` 是维度别名，
+        # `（窗口 … 内未取到公告，「没拉到」不等于「没有公告」）` 才是解释。
+        # 这个阈值不完美，但方向正确：**宁可多说一句"为什么"，也不要让模型
+        # 只看到一个维度名就去猜原因**。
+        _EXPLANATION_MIN_CHARS = 12
+
+        def _explains(name: str) -> bool:
+            start = name.find("（")
+            end = name.rfind("）")
+            if start < 0 or end <= start:
+                return False
+            return (end - start - 1) >= _EXPLANATION_MIN_CHARS
+
         already_declared = " ".join(coverage_unavailable_of(coverage_list))
         for tool_name, result in degraded_pairs:
             reason = str(getattr(result, "degraded_reason", "") or "").strip()
-            if not reason:
+            if not reason or reason in already_declared:
                 continue
-            declared_names = tuple(
+            declared = tuple(
                 str(name) for name in (getattr(result.coverage, "unavailable", ()) or ())
             )
-            # 已经有实质声明（不是裸工具名）就不重复
-            if any(name and name != tool_name and name in already_declared for name in declared_names):
+            if any(name in already_declared and _explains(name) for name in declared):
                 continue
             declaration = f"{tool_name}（{reason}）"
             if declaration in already_declared:
