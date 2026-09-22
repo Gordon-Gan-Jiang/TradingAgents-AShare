@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Sequence
 
+from tradingagents.measurement import summarize_samples
+
 # 单条 trace 的 JSON 字段上限：防止一个异常巨大的计划把行写爆
 _MAX_JSON_CHARS = 20_000
 
@@ -262,6 +264,10 @@ def _summarize_rows(rows: Sequence[Any]) -> dict[str, Any]:
                 "延迟方差极大（实测同一配置重复三次可差 2.4 倍）。"
                 "样本量小的结论不可信；比较改动前后必须多次重复取中位。"
             ),
+            # 上面那句是**文案**，人可能不读。这里给出**结构化**判定：
+            # 延迟这一组到底稳不稳、够不够拿来下方向性结论。
+            # 「单次采样不可信」因此变成 API 层面做不出来的事，而不是纪律问题。
+            "latency_sufficiency": summarize_samples(turn_latencies, drop_non_positive=True),
         },
         "overall_latency_ms": _stats(turn_latencies),
         "by_tier": {tier: _tier_view(b) for tier, b in sorted(by_tier.items())},
