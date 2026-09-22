@@ -122,7 +122,7 @@ def test_turn_is_not_degraded_when_the_model_omits_declarations(monkeypatch):
     factory = _ports_factory()
 
     class _Model:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             ref = evidence.items[0].id if evidence.items else None
             return _answer(
                 summary="缩量下杀后出现承接。",

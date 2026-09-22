@@ -203,7 +203,7 @@ def test_http_multi_symbol_turn_calls_batch_probe(monkeypatch):
     )
 
     class _Model:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             from tradingagents.grounding.types import StructuredAnswer
 
             return StructuredAnswer(

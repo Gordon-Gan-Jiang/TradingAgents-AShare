@@ -80,7 +80,7 @@ class _CountingModel:
         self.propose_calls = 0
         self.repair_calls = 0
 
-    def propose(self, *, prompt, evidence, verdict):
+    def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
         self.propose_calls += 1
         unavailable = list(verdict.unavailable) if verdict else []
         # 与真实模型同一依据：提示里列出了「必须声明的未覆盖维度」。
@@ -348,7 +348,7 @@ def test_acceptance_model_cannot_override_the_verdict(monkeypatch, wired):
     from tradingagents.grounding.types import Claim, StructuredAnswer
 
     class _LyingModel:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             ref = evidence.items[0].id if evidence.items else "E1"
             return StructuredAnswer(
                 summary="这明显是派发出货，不是洗盘。",

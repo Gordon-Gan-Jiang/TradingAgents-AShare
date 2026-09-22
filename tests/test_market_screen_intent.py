@@ -317,7 +317,7 @@ def test_screen_turn_is_announced_before_the_slow_call():
             return self.t
 
     class _Model:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             from tradingagents.grounding.types import StructuredAnswer
 
             ref = evidence.items[0].id if evidence.items else None
@@ -362,7 +362,7 @@ def test_fabricated_candidate_is_rejected_by_the_verifier():
             return self.t
 
     class _LyingModel:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             ref = evidence.items[0].id if evidence.items else None
             return StructuredAnswer(
                 summary="推荐 999999.SZ 天地板科技。",
@@ -456,7 +456,7 @@ def _http_client_with_fake_screener(monkeypatch, *, declaring_model: bool):
     )
 
     class _Model:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             from tradingagents.grounding.types import Claim, StructuredAnswer
 
             # 从提示词里读出"必须声明"的未覆盖维度：真实模型就是这么做的

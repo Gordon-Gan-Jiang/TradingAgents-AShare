@@ -96,7 +96,7 @@ def test_loop_accumulates_tokens_into_the_result():
         total_tokens = 0
         last_usage = None
 
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             self.total_tokens += 137
             self.last_usage = Completion(text="", input_tokens=100, output_tokens=37)
             ref = evidence.items[0].id if evidence.items else None

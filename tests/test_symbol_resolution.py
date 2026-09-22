@@ -173,7 +173,7 @@ def test_http_chat_without_symbol_never_returns_500(monkeypatch):
     from tradingagents.grounding.types import Claim, StructuredAnswer
 
     class _Model:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             ref = evidence.items[0].id if evidence.items else None
             unavailable = list(verdict.unavailable) if verdict else []
             if "position" in prompt and "position" not in unavailable:

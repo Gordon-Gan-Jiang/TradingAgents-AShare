@@ -70,7 +70,7 @@ class QueueModel:
         self.propose_calls = 0
         self.repair_calls = 0
 
-    def propose(self, *, prompt, evidence, verdict):
+    def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
         self.propose_calls += 1
         if not self._answers:
             return StructuredAnswer(summary="（无预设回答）")
@@ -491,7 +491,7 @@ def test_latency_uses_injected_clock_not_wall_clock():
     clock = FrozenClock()
 
     class _Advancing:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             clock.advance(2.5)
             return _grounded_answer(evidence, verdict)
 

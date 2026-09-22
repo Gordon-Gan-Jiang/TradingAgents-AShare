@@ -1005,13 +1005,27 @@ def _vendor_failure_note(rendered: Any) -> str:
 
     只取一行、限长，避免把整段供应商错误（可能几百字、含内部堆栈）塞进提示词
     和用户面前的声明里。
+
+    **截断要看得出来**：原先直接 `text[:80]`，于是用户看到的是
+    `数据源故障：板块涨幅榜获取失败：ConnectionError: ('Connection aborted.',
+    RemoteDisconnected('Remote en）`——切在词中间，读起来像乱码，还会让人以为
+    诊断本身就是坏的。现在切在**词边界**并补一个省略号：同样是 80 字上限，
+    但一眼就知道"后面还有"。
     """
     text = " ".join(str(rendered or "").split())
     # 空 JSON 的原文是 `{}` / `[]`，直接摆到用户面前等于没说。
     # 换成一句人话——这里的语义确实是"这次没取到数据"。
     if text and _looks_like_vendor_failure(text) and text.strip("{}[] \t") == "":
         return "返回空数据"
-    return text[:80]
+    limit = 80
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    # 退到最近的空格：英文错误串靠空格分词，中文没有空格则原样硬切。
+    boundary = cut.rfind(" ")
+    if boundary >= limit // 2:
+        cut = cut[:boundary]
+    return cut + "…"
 
 
 def _coverage_for(

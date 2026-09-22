@@ -176,7 +176,7 @@ def _run_simple_turn(monkeypatch, text: str = "600519 是不是在洗盘"):
             return self.t
 
     class _Model:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             from tradingagents.grounding.types import StructuredAnswer
 
             return StructuredAnswer(
@@ -267,7 +267,7 @@ def test_http_turn_is_traceable(monkeypatch):
     )
 
     class _Model:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             from tradingagents.grounding.types import StructuredAnswer
 
             return StructuredAnswer(

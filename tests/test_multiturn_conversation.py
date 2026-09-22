@@ -113,7 +113,7 @@ def test_history_is_injected_into_the_prompt():
     seen: list[str] = []
 
     class _Recorder(QueueModel):
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             seen.append(prompt)
             return super().propose(prompt=prompt, evidence=evidence, verdict=verdict)
 
@@ -205,7 +205,7 @@ def test_second_turn_can_refer_to_the_first_turn_symbol():
     seen: list[str] = []
 
     class _Recorder(QueueModel):
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             seen.append(prompt)
             return super().propose(prompt=prompt, evidence=evidence, verdict=verdict)
 
@@ -314,7 +314,7 @@ def test_http_two_turns_share_one_conversation_and_inject_history(monkeypatch):
     prompts: list[str] = []
 
     class _RecordingModel:
-        def propose(self, *, prompt, evidence, verdict):
+        def propose(self, *, prompt, evidence, verdict, has_tool_text=False):
             prompts.append(prompt)
             from tradingagents.grounding.types import Claim, StructuredAnswer
 

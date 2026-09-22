@@ -72,6 +72,10 @@ _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 _SYSTEM_RULES = """你是一名 A 股投研助手。你必须遵守以下规则，违反会导致回答被系统拒绝：
 
 1. 每条结论都必须携带证据编号引用（形如 [E1]），不得引用不存在的编号。
+   **例外**：若本轮没有给出任何 E 编号（无可用证据），则不得编造引用——
+   此时 `claims` 必须为空数组 `[]`，把**定性**结论写进 `summary`，
+   且 `summary` 里不得出现任何具体数值或日期（写数字会被判无出处）。
+   这是唯一允许的无引用形态，它只适用于"没有结构化证据、但有工具正文"的回合。
 2. 不得编造任何数值或日期：只能用「可用证据」里出现过的数值。
 3. 已由探针给出的判定（状态与置信度）**不得改写**，你只能解释它。
 4. 数据未覆盖的维度必须列入 unavailable，不得描述为「无影响」。
@@ -152,7 +156,14 @@ class LlmAnswerModel:
 
     # ── 提示构造 ──────────────────────────────────────────────────────────
 
-    def _build_prompt(self, prompt: str, evidence: EvidenceSet, verdict: TurnVerdict | None) -> str:
+    def _build_prompt(
+        self,
+        prompt: str,
+        evidence: EvidenceSet,
+        verdict: TurnVerdict | None,
+        *,
+        has_tool_text: bool = False,
+    ) -> str:
         lines = [
             _SYSTEM_RULES,
             "",
@@ -164,6 +175,26 @@ class LlmAnswerModel:
         if evidence.items:
             for item in evidence.items:
                 lines.append(f"[{item.id}] {item.field} = {item.value} ({item.unit}, 截至 {item.as_of})")
+        elif has_tool_text:
+            # Phase 6.1：有工具正文可用时**不能**再命令弃权。
+            #
+            # 这里原本只有 `else: 你必须说明无法给出有依据的判断`，而那会把工具正文
+            # 通道整个抵消掉——实测就是如此：正文明明进了提示词，模型仍然回答
+            # 「本轮无可用证据」，因为它在这条**硬性指令**下照办。
+            #
+            # 无结构化证据 ≠ 无信息，但**形态受限**：系统规则 1 要求每条结论带引用，
+            # 而 `_check_claim` 会拒掉无引用的断言（`REASON_NO_CITATION`），
+            # 所以定性内容只能放 `summary`、`claims` 留空（空 claims + 非空 summary
+            # 走 `_is_text_mode` 的弱校验路径）。
+            # 弱校验照旧核对数值与日期，而本轮证据为空——所以**一个数字都不能写**。
+            # 安全边界不变，只是把"能说的话"从"什么都不能说"放宽到"可以定性描述"。
+            lines.append(
+                "（本轮没有可引用的**结构化**证据，但「工具正文」段里有同源的原始文本。"
+                "此时 `claims` 必须为空数组，把**定性**结论写进 `summary`："
+                "讲了什么事、涉及哪些主题，都可以说；"
+                "但 `summary` 里**不得出现任何数值或日期**（本轮证据为空，写了就是无出处）。"
+                "若正文与问题无关，就按无证据处理并在 unavailable 里声明未覆盖。）"
+            )
         else:
             lines.append("（本轮无可用证据——你必须说明无法给出有依据的判断，不得编造）")
 
@@ -237,9 +268,12 @@ class LlmAnswerModel:
         prompt: str,
         evidence: EvidenceSet,
         verdict: TurnVerdict | None,
+        has_tool_text: bool = False,
     ) -> StructuredAnswer:
         self.calls += 1
-        raw = self._run(self._build_prompt(prompt, evidence, verdict))
+        raw = self._run(
+            self._build_prompt(prompt, evidence, verdict, has_tool_text=has_tool_text)
+        )
         return self._parse(raw)
 
     def repair(
