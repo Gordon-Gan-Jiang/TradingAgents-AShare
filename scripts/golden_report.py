@@ -3,7 +3,14 @@
 
 用法：
 
-    .venv/bin/python scripts/golden_report.py                 # 打印 + 写 docs/golden-baseline.md
+    .venv/bin/python scripts/golden_report.py                 # 规则路径 → docs/golden-baseline.md
+
+    跑**生产口径**（规划层）必须给用户：模型档案是按用户存的，不给就取不到 key，
+    会回落到环境默认模型并 401，然后**静默退回规则层**——数字是规则路径的，
+    却会被当成规划层的。
+
+    TA_PLANNER_USER_ID=<uuid> .venv/bin/python scripts/golden_report.py --with-planner
+                                                              # → docs/golden-with-planner.md
     .venv/bin/python scripts/golden_report.py --json out.json # 只写 JSON（供 CI 比对）
     .venv/bin/python scripts/golden_report.py --compare old.json
 
@@ -37,6 +44,7 @@ def run(*, verbose: bool = False, with_planner: bool = False) -> dict:
     name_map_size = warm_name_map()
     items = load_golden()
     planner = None
+    planner_model = ""
     if with_planner:
         from api.services import chat_service
         from tradingagents.agent.planner_config import describe_planner
@@ -46,7 +54,15 @@ def run(*, verbose: bool = False, with_planner: bool = False) -> dict:
         import os as _os
 
         planner = chat_service.build_planner(user_id=_os.getenv("TA_PLANNER_USER_ID") or None)
-        print("规划器配置:", describe_planner(), "| 构造成功:", planner is not None)
+        _cfg = describe_planner()
+        print("规划器配置:", _cfg, "| 构造成功:", planner is not None)
+        planner_model = str(_cfg.get("model") or _cfg.get("profile_id") or "（跟随回答模型）")
+        if planner is None:
+            raise SystemExit(
+                "规划层被要求启用但构造失败（十有八九是没给 TA_PLANNER_USER_ID）。\n"
+                "此时若继续跑，数字是**规则路径**的却会被写进'规划层'口径，\n"
+                "比直接失败更危险——所以这里拒绝出报告。"
+            )
     probes = {item.id: probe(item.text, planner=planner) for item in items}
     metrics = score(items, probes)
 
@@ -70,6 +86,17 @@ def run(*, verbose: bool = False, with_planner: bool = False) -> dict:
         "metrics": metrics.as_dict(),
         "by_intent": {k: dict(v) for k, v in sorted(by_intent.items())},
         "probes": {k: p.__dict__ for k, p in probes.items()},
+        # **口径必须随报告落盘**。此前不落盘，于是同一份 `golden-baseline.md`
+        # 既可能是"规则路径"也可能是"规划层启用"的数字，而标题永远写着
+        # "Phase 0"——读者无从分辨，对照就失去意义。
+        # 实测踩到：同一文件先被规则路径写（规划准确率 48%），
+        # 又被规划层写（88%），两次都没有任何一行说明口径变了。
+        "with_planner": bool(with_planner),
+        # 规划器是否**真的**介入：`with_planner=True` 但档案解析不到时，
+        # 会回落到环境默认模型并 401，然后**静默退回规则层**（见上面 run() 的注释）。
+        # 那种情况下数字是规则路径的，却会被当成规划层的——所以要把
+        # "模型真的跑起来了"与"只是要求跑"分开记。
+        "planner_model": planner_model,
     }
     if verbose:
         for item in items:
@@ -81,11 +108,20 @@ def run(*, verbose: bool = False, with_planner: bool = False) -> dict:
 
 def render(payload: dict) -> str:
     m = payload["metrics"]
+    # 标题必须写出口径。此前固定写 "Phase 0"，于是规则路径与规划层的数字
+    # 落在同一个标题下——读者无法分辨，对照失去意义。
+    mode = "规划层启用（生产口径）" if payload.get("with_planner") else "规则路径（离线）"
     lines = [
-        "# 黄金集基线报告（Phase 0）",
+        f"# 黄金集报告 · {mode}",
         "",
         "> 由 `scripts/golden_report.py` 生成，**不要手工编辑**。",
         "> 这份报告是后续所有改动的对照基线：没有它就说不清\"更好了\"。",
+        "",
+        "| 口径 | 值 |",
+        "|---|---|",
+        f"| 规划层 | {'启用' if payload.get('with_planner') else '未启用（规则路径）'} |",
+        f"| 规划器模型 | {payload.get('planner_model') or '（未启用）'} |",
+        f"| 黄金集 | {m['total']} 条 |",
         "",
         "## 总体",
         "",
@@ -166,9 +202,17 @@ def main() -> int:
             print(f"      {row['id']} → {row['capability']}")
 
     if not args.no_write:
-        REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        REPORT_PATH.write_text(render(payload), encoding="utf-8")
-        print(f"报告已写入 {REPORT_PATH.relative_to(ROOT)}")
+        # **两种口径写两个文件**。写死同一个路径的后果实测过：跑一次规划层
+        # 就把规则路径的基线覆盖了，而"改前 vs 改后"的比较锚点正是那个文件——
+        # 测量动作本身把测量基准毁掉。
+        target = (
+            ROOT / "docs" / "golden-with-planner.md"
+            if args.with_planner
+            else REPORT_PATH
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(render(payload), encoding="utf-8")
+        print(f"报告已写入 {target.relative_to(ROOT)}")
 
     if args.json:
         # **保留 probes**：它是"多调了哪些工具/精度损失来自哪里"的唯一原始依据。
