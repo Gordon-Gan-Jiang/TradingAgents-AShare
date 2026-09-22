@@ -151,6 +151,25 @@ def list_chat_traces(
     }
 
 
+@router.get("/chat/traces/summary")
+def summarize_chat_traces(
+    limit: int = Query(500, ge=1, le=2000),
+    user=Depends(current_user),
+):
+    """按档位与工具归因延迟、token 与失败率（只读）。
+
+    **必须声明在 `/chat/traces/{trace_id}` 之前**：FastAPI 按声明顺序匹配，
+    放在后面的话 `summary` 会被当成某个 trace 的 id 吃掉，端点永远 404。
+
+    存在的理由：本轮的延迟实验证明这条路径**方差大到单次采样没有意义**
+    （同一问题同一配置重复三次 = 8.4 s / 13.2 s / 19.8 s）。要判断一次改动
+    有没有用，就必须有"按档位取中位与 P90"的地方，否则只会在噪声里下结论。
+    """
+    from api.services import trace_service
+
+    return trace_service.summarize_turn_traces(user_id=user.id, limit=limit)
+
+
 @router.get("/chat/traces/{trace_id}")
 def get_chat_trace(trace_id: str, user=Depends(current_user)):
     from api.services import trace_service
