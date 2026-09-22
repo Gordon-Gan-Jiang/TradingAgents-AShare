@@ -88,6 +88,35 @@ def build_news_fetcher():
     return akshare_news_fetcher
 
 
+def build_announcements_port():
+    """个股公告端口（L2 证据工具 `announcements_read` 的取数口）。
+
+    指向 `cn_announcement_index_data`：东财按个股公告（带公告类型）→ 巨潮资讯
+    兜底，实测两条通道都可用（1–3s/标的）。**不拿新闻冒充公告**：新闻是别人的
+    解读，公告是标的自己的披露。
+
+    惰性 import：注册表可能在 import 期（MCP 挂载）构建，那时不该触网。
+    """
+    from tradingagents.dataflows.providers.cn_announcement_index_data import (
+        SymbolAnnouncementsPort,
+    )
+
+    return SymbolAnnouncementsPort()
+
+
+def build_index_fetcher():
+    """指数行情取数器（L2 证据工具 `index_quote_read` 的取数口）。
+
+    指向 `cn_announcement_index_data.fetch_index_quotes`：新浪直连行情 → 新浪
+    akshare 快照 → 东财 akshare 快照。取不到返回 None，由工具声明未覆盖。
+    """
+    from tradingagents.dataflows.providers.cn_announcement_index_data import (
+        fetch_index_quotes,
+    )
+
+    return fetch_index_quotes
+
+
 def build_action_executor(user_id: str | None = None) -> Callable[[Any, str], str]:
     """动作执行器：用户**确认**提议之后，走既有服务执行状态变更。
 
@@ -185,6 +214,10 @@ def build_registry(user_id: str | None = None) -> Any:
     def lazy_news(symbol: str, start: str, end: str) -> Any:
         return build_news_fetcher()(symbol, start, end)
 
+    def lazy_index_quotes(codes: Any) -> Any:
+        """指数取数器同样惰性解析：注册表可能在 import 期构建，那时不该触网。"""
+        return build_index_fetcher()(codes)
+
     def _history_port() -> Any:
         """判定历史端口：**user_id 在闭包里绑定**，不经过模型参数。"""
         from api.services import signal_service
@@ -275,8 +308,49 @@ def build_registry(user_id: str | None = None) -> Any:
         return _Port()
 
     def _task_port() -> Any:
-        """异步任务端口：**user_id 在闭包里绑定**；只暴露提交与查询。"""
-        from api.services import backtest_service
+        """异步任务端口：**user_id 在闭包里绑定**；只暴露提交与查询。
+
+        这里**没有**任何提交逻辑——三个分钟级能力（研报生成 / 每日复盘 / 模型对比）
+        与回测一样，走服务层的可复用入口（`analysis_job_service`）。端口只做两件事：
+        把 `user_id` 绑进去、把结果形状收敛成工具层要的 Mapping。
+
+        之所以坚持这一点：提交链路（建任务记录 → 推 `job.created` → 投递后台任务）
+        在路由里也有一份调用者；端口里再写一遍，等于把"任务到底有没有真的排上队"
+        这件事变成两份实现，迟早漂移。
+        """
+        from api.services import analysis_job_service, backtest_service
+
+        def _require_user(port_name: str) -> str:
+            if not user_id:
+                raise LookupError(f"{port_name} port requires a bound user")
+            return user_id
+
+        def _find_job(job_id: str) -> Any:
+            """在三张任务表里找任务：回测 / 深度分析与模型对比 / 每日批跑。
+
+            新提交出来的任务注册在应用层任务表（`api.main._jobs`）与批跑表
+            （`api.main._daily_product_runs`）里；只查回测表的话，工具会拿不到
+            自己刚提交的任务，模型看到的就是"查无此任务"。
+            """
+            row = backtest_service.get_job(job_id)
+            if row:
+                return row
+            from api.main import _get_daily_product_run, _get_job
+
+            row = _get_job(job_id)
+            if row:
+                return row
+            run = _get_daily_product_run(job_id)
+            if run:
+                return {
+                    "status": run.get("status"),
+                    "progress": None,
+                    "message": f"每日批跑：{len(run.get('jobs') or [])} 个标的",
+                    "result": run.get("summary"),
+                    "started_at": run.get("created_at"),
+                    "finished_at": run.get("finished_at"),
+                }
+            return None
 
         class _Port:
             def submit_backtest(self, *, symbol, start_date, end_date, hold_days, sample_interval):
@@ -294,7 +368,52 @@ def build_registry(user_id: str | None = None) -> Any:
                 )
 
             def job_status(self, *, job_id):
-                return backtest_service.get_job(job_id)
+                return _find_job(job_id)
+
+            def submit_deep_analysis(self, *, symbol, trade_date, horizons, selected_analysts, query):
+                submitted = analysis_job_service.submit_deep_analysis_task(
+                    user_id=_require_user("deep_analysis"),
+                    symbol=symbol,
+                    trade_date=trade_date,
+                    horizons=horizons,
+                    selected_analysts=selected_analysts,
+                    query=query,
+                )
+                return {"job_id": submitted.job_id, "status": submitted.status}
+
+            def submit_daily_review(self, *, mode, top_k, market, horizons, selected_analysts):
+                submitted = analysis_job_service.submit_daily_review_task(
+                    user_id=_require_user("daily_review"),
+                    mode=mode,
+                    top_k=top_k,
+                    market=market,
+                    horizons=horizons,
+                    selected_analysts=selected_analysts,
+                )
+                return {
+                    "run_id": submitted.run_id,
+                    "status": submitted.status,
+                    "queued_jobs": len(submitted.jobs),
+                    "job_ids": [str(job.job_id) for job in submitted.jobs],
+                }
+
+            def submit_model_arena(
+                self, *, symbol, trade_date, horizons, selected_analysts, model_profile_ids, query
+            ):
+                submitted = analysis_job_service.submit_model_arena_task(
+                    user_id=_require_user("model_arena"),
+                    symbol=symbol,
+                    trade_date=trade_date,
+                    horizons=horizons,
+                    selected_analysts=selected_analysts,
+                    model_profile_ids=model_profile_ids,
+                    query=query,
+                )
+                return {
+                    "experiment_id": submitted.experiment_id,
+                    "input_snapshot_hash": submitted.input_snapshot_hash,
+                    "job_ids": [str(job.job_id) for job in submitted.jobs],
+                }
 
         return _Port()
 
@@ -701,9 +820,11 @@ def build_registry(user_id: str | None = None) -> Any:
         evidence_fetchers=default_market_fetchers(),
         watchlist_port=_watchlist_port(),
         freshness_port=_freshness_port(),
-        # announcements_port 刻意不传：仓库当前**没有**个股公告的取数实现
-        # （news_service 只有 akshare 新闻；main.py 的 announcements.json 是应用
-        # 发布说明，不是标的公告）。缺实现就不注册——不拿新闻冒充公告。
+        # 公告与指数行情：数据源已补齐（见 `cn_announcement_index_data` 的实测表），
+        # 因此这两条现在是**真的在册**，而不是「端口声明着但没人实现」。
+        # 惰性包装同样刻意：取数只在真正调用工具时发生。
+        announcements_port=build_announcements_port(),
+        index_fetcher=lazy_index_quotes,
     )
 
 

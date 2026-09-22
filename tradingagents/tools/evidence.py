@@ -25,10 +25,13 @@ L1 工具回答「是什么判断」（洗盘/派发、判定历史、平台推�
 
 ## 取数为什么经端口注入（而不是本模块直接持有）
 
-取数实现是**既有**的 `tradingagents/dataflows/providers/cn_research_data.py`
-（`fetch_chip_frame` / `fetch_intraday_frame` / `fetch_flow_frame`），本模块
-**不重写**任何一条取数路径，只做「帧 → 可引用证据」的转换。但工具层不直接
-持有它们，而由组合根显式注入（`make_evidence_tools(...)`）：
+取数实现是**既有**的
+`tradingagents/dataflows/providers/cn_research_data.py`
+（`fetch_chip_frame` / `fetch_intraday_frame` / `fetch_flow_frame`）与
+`tradingagents/dataflows/providers/cn_announcement_index_data.py`
+（`fetch_symbol_announcements` / `fetch_index_quotes`），本模块**不重写**任何一条
+取数路径，只做「帧 → 可引用证据」的转换。但工具层不直接持有它们，而由组合根显式
+注入（`make_evidence_tools(...)`）：
 
 * 测试可以注入假帧：不联网、不依赖 akshare 的可用性；
 * **未注入 → 不注册**，不留「在册但一调就炸」的条目；
@@ -40,9 +43,9 @@ L1 工具回答「是什么判断」（洗盘/派发、判定历史、平台推�
 
 ## 纯函数与 IO 分离
 
-`chip_facts` / `intraday_facts` / `flow_facts` 是**纯函数**（映射进、映射出，
-不取数、不着网），取数只发生在 handler 里那一行 `fetcher(...)`。这样统计口径
-可以被逐条单测穷举边界，而不必构造网络环境。
+`chip_facts` / `intraday_facts` / `flow_facts` / `index_quote_facts` 是**纯函数**
+（映射进、映射出，不取数、不着网），取数只发生在 handler 里那一行 `fetcher(...)`。
+这样统计口径可以被逐条单测穷举边界，而不必构造网络环境。
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ INTRADAY_CONTRACT = "INTRADAY_BARS"
 FLOW_CONTRACT = "CAPITAL_FLOW"
 WATCHLIST_CONTRACT = "WATCHLIST"
 ANNOUNCEMENTS_CONTRACT = "ANNOUNCEMENTS"
+INDEX_CONTRACT = "INDEX_QUOTES"
 FRESHNESS_CONTRACT = "DATA_FRESHNESS"
 
 SOURCE_CHIP = "chip_distribution"
@@ -74,6 +78,7 @@ SOURCE_INTRADAY = "intraday_bars"
 SOURCE_FLOW = "individual_fund_flow"
 SOURCE_WATCHLIST = "watchlist"
 SOURCE_ANNOUNCEMENTS = "symbol_announcements"
+SOURCE_INDEX = "index_quotes"
 
 # 未覆盖维度的**对外可读名**。校验器按**逐字相等**比对 `declared_unavailable`
 # （不过模型这一关：编排层会把它们并进声明），但用户会读到这行字，所以仍然
@@ -83,6 +88,7 @@ UNAVAILABLE_INTRADAY = f"{SOURCE_INTRADAY}（分时）"
 UNAVAILABLE_FLOW = f"{SOURCE_FLOW}（资金流）"
 UNAVAILABLE_WATCHLIST = f"{SOURCE_WATCHLIST}（自选清单）"
 UNAVAILABLE_ANNOUNCEMENTS = f"{SOURCE_ANNOUNCEMENTS}（公告）"
+UNAVAILABLE_INDEX = f"{SOURCE_INDEX}（指数行情）"
 UNAVAILABLE_FRESHNESS = "data_freshness（时效查询）"
 
 # 估算口径的固定文案。写成常量而不是各处拼字符串：这句话是**契约**，
@@ -103,7 +109,14 @@ MAX_WATCHLIST_ITEMS = 50
 DEFAULT_WATCHLIST_ITEMS = 20
 MAX_ANNOUNCEMENTS = 30
 DEFAULT_ANNOUNCEMENTS = 10
+MAX_INDEX_CODES = 12
 MAX_FRESHNESS_SOURCES = 12
+
+# 省略 `codes` 时查哪些指数：至少覆盖沪深两个市场与创业板（用户问「今天大盘」
+# 时默认就是这三个）。这里**独立**持有一份（工具契约的一部分：schema 描述要
+# 写明默认值），并由测试断言与取数层的 `DEFAULT_INDEX_CODES` 逐字一致——
+# 两处各写一份会漂移，漂移的表现是「模型以为查了创业板，其实没查」。
+DEFAULT_INDEX_CODES: tuple[str, ...] = ("sh000001", "sz399001", "sz399006")
 
 # 留空时查哪些源：取**对话判定真正依赖**的那几个，而不是契约里的全部 20 个
 # （全量会把证据刷成一堵墙，也让「这数据什么时候的」这个问题失去焦点）。
@@ -135,6 +148,8 @@ ChipFetcher = Callable[[str, str], Any]
 # (symbol, day, freq) -> 帧
 IntradayFetcher = Callable[[str, str, str], Any]
 FlowFetcher = Callable[[str, str], Any]
+# (指数代码序列) -> 帧；取不到返回 None
+IndexFetcher = Callable[[Sequence[str]], Any]
 
 
 class WatchlistPort(Protocol):
@@ -440,8 +455,53 @@ def flow_facts(frame: Any) -> dict[str, Any] | None:
     }
 
 
-# ── 证据与结果的公共构造 ──────────────────────────────────────────────────
+def _bare_code(value: Any) -> str:
+    """任意代码表示 → 6 位裸码。
 
+    跨源匹配**只能**用裸码：新浪给 `sh000001`、东财给 `000001`，按字面比会把
+    「取到了」判成「没取到」——最隐蔽的一类静默失败。
+    """
+    return "".join(ch for ch in str(value or "") if ch.isdigit())[:6]
+
+
+def index_quote_facts(
+    frame: Any, *, requested: Sequence[str], as_of: str
+) -> dict[str, Any] | None:
+    """指数行情帧 → 事实字典（纯函数）。
+
+    没有点位（`price` 缺失/非数）的行直接丢掉：指数点位是这条证据的全部内容，
+    缺了它剩下的涨跌幅无处依附。一行都没有 → None（**不返回空帧**）。
+    """
+    items: list[dict[str, Any]] = []
+    for row in _rows_of(frame):
+        price = _to_float(row.get("price", row.get("最新价")))
+        if price is None:
+            continue
+        items.append(
+            {
+                "code": str(row.get("code", row.get("代码")) or ""),
+                "name": str(row.get("name", row.get("名称")) or ""),
+                "price": price,
+                "change_pct": _to_float(row.get("change_pct", row.get("涨跌幅"))),
+                "prev_close": _to_float(row.get("prev_close", row.get("昨收"))),
+                "quote_date": str(row.get("quote_date") or "")[:10],
+                "source": str(row.get("source") or ""),
+            }
+        )
+    if not items:
+        return None
+
+    seen = {_bare_code(item["code"]) for item in items}
+    missing = [str(code) for code in requested if _bare_code(code) not in seen]
+    return {
+        "items": items,
+        "missing": missing,
+        "quote_dates": sorted({item["quote_date"] for item in items if item["quote_date"]}),
+        "as_of": as_of,
+    }
+
+
+# ── 证据与结果的公共构造 ──────────────────────────────────────────────────
 
 def _evidence(
     items: Sequence[tuple[str, Any, str]],
@@ -1025,12 +1085,189 @@ def _announcements_tool(port: AnnouncementsPort) -> ToolSpec:
         handler=announcements_read,
         cost="cheap",
         plan_layer=PLAN_LAYER_EVIDENCE,
-        latency_budget_ms=8000,
+        # 实测：东财 1.1–3.4s、巨潮 0.4–3.2s（首次还要拉一次 orgId 表约 1s）。
+        # 最坏路径 = 东财超时后巨潮接手 ≈ 8s，早先的 8000ms 预算会把这条**正常**
+        # 的兜底路径判成超时降级——预算必须覆盖兜底，而不是只覆盖最快的源。
+        latency_budget_ms=20000,
         freshness_sources=(SOURCE_ANNOUNCEMENTS,),
     )
 
 
-# ── 6. 数据时效 ───────────────────────────────────────────────────────────
+# ── 6. 指数行情 ───────────────────────────────────────────────────────────
+
+
+def _index_tool(fetcher: IndexFetcher) -> ToolSpec:
+    def index_quote_read(as_of: str = "", codes: Sequence[str] | None = None) -> ToolResult:
+        # `codes is None` 才用默认集：**不写 `codes or DEFAULT`**——显式传空列表
+        # 是「什么都不查」，被 falsy 换成默认集就会去查用户没问的三个指数。
+        raw = DEFAULT_INDEX_CODES if codes is None else tuple(codes)
+        requested: list[str] = []
+        for item in raw:
+            text = str(item).strip()
+            if text and text not in requested:
+                requested.append(text)
+        requested = requested[:MAX_INDEX_CODES]
+
+        if not requested:
+            return _unavailable_result(
+                data={"as_of": as_of, "codes": [], "count": 0, "found": False},
+                source_key=SOURCE_INDEX,
+                unavailable_name=UNAVAILABLE_INDEX,
+                reason="未指定要查询的指数代码，本次未查询任何指数的行情",
+                as_of=as_of,
+            )
+
+        try:
+            frame = fetcher(tuple(requested))
+        except Exception as exc:  # noqa: BLE001 — 失败降级，不抛给模型
+            return _unavailable_result(
+                data={"as_of": as_of, "codes": requested, "found": False, "error": type(exc).__name__},
+                source_key=SOURCE_INDEX,
+                unavailable_name=UNAVAILABLE_INDEX,
+                reason=f"指数行情取数失败（{type(exc).__name__}）",
+                as_of=as_of,
+            )
+
+        facts = index_quote_facts(frame, requested=requested, as_of=as_of)
+        if facts is None:
+            return _unavailable_result(
+                data={"as_of": as_of, "codes": requested, "count": 0, "found": False},
+                source_key=SOURCE_INDEX,
+                unavailable_name=UNAVAILABLE_INDEX,
+                reason="未取到所请求指数的行情（数据源不覆盖该代码，或快照本轮不可用）",
+                as_of=as_of,
+            )
+
+        items = facts["items"]
+        quote_dates = facts["quote_dates"]
+        # 快照日期唯一时，**所有**证据都以它为准：连「指数数量」这条聚合事实也
+        # 不该挂着一个数据并不属于的日期（否则引用它就能给历史断言背书）。
+        single_date = quote_dates[0] if len(quote_dates) == 1 else ""
+        snapshot_as_of = single_date or as_of
+        evidence = _evidence(
+            (("指数数量", len(items), "count"),),
+            source_key=SOURCE_INDEX,
+            as_of=snapshot_as_of,
+        )
+        for item in items:
+            # 名称写进 field：点位与涨跌幅各自成一条**数值**证据才有量纲可校验
+            # （合成一条文本会让校验器失去标量，涨跌幅的对错就无从核对）。
+            label = f"{item['name'] or item['code']}（{item['code']}）"
+            item_as_of = item["quote_date"] or as_of
+            evidence = evidence + (
+                EvidenceItem(
+                    id=f"E{len(evidence) + 1}",
+                    field=f"{label}点位",
+                    value=float(item["price"]),
+                    unit="",  # 指数点位无量纲：写 yuan 会把「3962 点」读成 3962 元
+                    source_key=SOURCE_INDEX,
+                    as_of=item_as_of,
+                ),
+            )
+            if item["change_pct"] is not None:
+                evidence = evidence + (
+                    EvidenceItem(
+                        id=f"E{len(evidence) + 1}",
+                        field=f"{label}涨跌幅",
+                        value=float(item["change_pct"]),
+                        unit="pct",
+                        source_key=SOURCE_INDEX,
+                        as_of=item_as_of,
+                    ),
+                )
+
+        quote_dates = facts["quote_dates"]
+        sources = sorted({item["source"] for item in items if item["source"]})
+        evidence = _text_evidence(
+            evidence,
+            field="数据时点与来源",
+            value=(
+                f"快照日期 {'、'.join(quote_dates) if quote_dates else '源未提供'}"
+                f"｜来源 {'、'.join(sources) if sources else '未提供'}"
+                "｜涨跌幅单位 %（正数为涨）"
+            ),
+            source_key=SOURCE_INDEX,
+            as_of=quote_dates[-1] if quote_dates else as_of,
+        )
+
+        # 请求了却没回来的代码逐条声明未覆盖：「没取到」不能读成「这个指数没动」。
+        unavailable = tuple(f"{SOURCE_INDEX}（{code} 未返回）" for code in facts["missing"])
+        # 基准日与快照日期不一致时写明白：本工具给的是**实时快照**，历史上某一天的
+        # 收盘点位它拿不到。证据的 as_of 已经记的是快照日期（校验器据此拦住把今天
+        # 的数字安到历史日期上的断言），这里再给一句人类可读的说明。
+        stale_reference_note = (
+            f"本次为实时快照（{single_date}），不含基准日 {as_of} 当日的收盘数据"
+            if single_date and as_of and single_date != as_of
+            else ""
+        )
+        return ToolResult(
+            data={
+                "as_of": as_of,
+                "requested": requested,
+                "count": len(items),
+                "items": items,
+                "missing": facts["missing"],
+                "quote_date": single_date or None,
+                "quote_date_matches_as_of": (single_date == as_of) if single_date else None,
+                "source": "、".join(sources),
+                **({"note": stale_reference_note} if stale_reference_note else {}),
+            },
+            evidence=evidence,
+            coverage=Coverage(available=(SOURCE_INDEX,), unavailable=unavailable),
+            degraded=bool(unavailable),
+            degraded_reason=(
+                f"请求的指数中有 {len(unavailable)} 个未返回（{'、'.join(facts['missing'])}），"
+                "这些指数本维度未覆盖"
+                if unavailable
+                else None
+            ),
+            as_of=as_of,
+            # 快照日期不明时**不传 cutoff** → `unknown`，绝不默认 fresh：
+            # 把「不知道是哪天的报价」标成「最新」，正是本平台要消灭的伪造新鲜度。
+            freshness=(
+                _freshness(SOURCE_INDEX, as_of=as_of, cutoff=single_date)
+                if single_date
+                else _freshness(SOURCE_INDEX, as_of=as_of)
+            ),
+        )
+
+    return ToolSpec(
+        name="index_quote_read",
+        title="指数行情（点位与涨跌幅）",
+        description=(
+            "读取主要指数（默认上证指数/深证成指/创业板指）的**点位**与**涨跌幅**"
+            "（百分数，正数为涨），并声明快照日期与来源。用于回答「今天大盘怎么样」"
+            "「创业板跌了多少」「指数在什么位置」。"
+            "指数点位无量纲、涨跌幅单位为 pct；取不到时声明未覆盖，"
+            "请求了但未返回的指数逐条列出，不返回 0 点冒充「没动」。"
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "as_of": {"type": "string", "description": "基准日 YYYY-MM-DD"},
+                "codes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "指数代码，形如 sh000001 / sz399001 / sz399006；"
+                        f"留空则查默认 {'、'.join(DEFAULT_INDEX_CODES)}"
+                    ),
+                },
+            },
+            "required": ["as_of"],
+        },
+        output_contract=INDEX_CONTRACT,
+        handler=index_quote_read,
+        cost="cheap",
+        plan_layer=PLAN_LAYER_EVIDENCE,
+        # 直连通道实测 0.6s，但兜底要经 akshare 的两个快照接口（实测 7.8s / 38.8s），
+        # 预算必须覆盖兜底路径，否则正常的换源会被自己的超时保护判成失败。
+        latency_budget_ms=30000,
+        freshness_sources=(SOURCE_INDEX,),
+    )
+
+
+# ── 7. 数据时效 ───────────────────────────────────────────────────────────
 
 
 def _freshness_tool(probe: FreshnessProbePort) -> ToolSpec:
@@ -1233,17 +1470,21 @@ def make_evidence_tools(
     watchlist_port: WatchlistPort | None = None,
     announcements_port: AnnouncementsPort | None = None,
     freshness_port: FreshnessProbePort | None = None,
+    index_fetcher: IndexFetcher | None = None,
 ) -> tuple[ToolSpec, ...]:
     """按**已注入的依赖**逐个装配；没注入的工具**不返回**（= 不注册）。
 
     这条纪律的意义不是「测试方便」，而是不留「在册但一调就炸」的条目：
     Agent 会把预算花在必然失败的调用上，而用户看到的是一次"完整的"取数过程。
 
-    关于 5 号工具（公告）的如实说明：仓库当前**没有**个股公告的取数实现——
-    `api/services/news_service.py` 只有 `akshare_news_fetcher`（走 `get_symbol_news`
-    → 东财个股**新闻**），`api/main.py` 的 `announcements.json` 是**应用发布说明**，
-    不是标的公告。因此本工具在现有装配下不会被注册：端口在这里声明，等真实的
-    披露源接进来（组合根传 `announcements_port=` 即可生效），而不是拿新闻冒充公告。
+    关于 5 号工具（公告）的如实说明：取数实现在
+    `tradingagents/dataflows/providers/cn_announcement_index_data.py`
+    （东财按个股公告 → 巨潮兜底，实测可用），组合根传入
+    `announcements_port=SymbolAnnouncementsPort()` 后它才在册。**不用新闻冒充公告**：
+    新闻是别人的解读，公告是标的自己的披露，两者不能互相替代。
+
+    6 号工具（指数行情）同理：取数实现是同一个 provider 的 `fetch_index_quotes`
+    （新浪直连 → 新浪 akshare → 东财 akshare），组合根传入 `index_fetcher=` 才在册。
     """
     specs: list[ToolSpec] = []
 
@@ -1258,6 +1499,8 @@ def make_evidence_tools(
         specs.append(_watchlist_tool(watchlist_port))
     if announcements_port is not None:
         specs.append(_announcements_tool(announcements_port))
+    if index_fetcher is not None:
+        specs.append(_index_tool(index_fetcher))
     if freshness_port is not None:
         specs.append(_freshness_tool(freshness_port))
 
@@ -1271,8 +1514,14 @@ __all__ = [
     "chip_facts",
     "intraday_facts",
     "flow_facts",
+    "index_quote_facts",
+    "DEFAULT_INDEX_CODES",
+    "MAX_INDEX_CODES",
+    "SOURCE_INDEX",
+    "UNAVAILABLE_INDEX",
     "WatchlistPort",
     "AnnouncementsPort",
+    "IndexFetcher",
     "FreshnessProbePort",
     "ESTIMATE_NOTE",
 ]

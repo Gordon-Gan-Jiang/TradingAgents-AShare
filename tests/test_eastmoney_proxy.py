@@ -131,16 +131,25 @@ def test_fund_flow_direct_returns_none_on_empty(monkeypatch):
 
 
 def test_fund_flow_direct_returns_none_on_error(monkeypatch):
+    """取数失败必须返回 None（而不是抛错、也不是返回半成品）。
+
+    注意打桩方式：`_http_utils` 在**模块级**就 `import requests`，只替换
+    `sys.modules["requests"]` 对已绑定的引用**无效** → 会真的发网络请求 →
+    东财可用时返回真实数据、断言失败（实测踩到：本机东财并非全面封禁）。
+    因此必须直接替换 `_http_utils` 里那个名字。
+    """
+    from tradingagents.dataflows.providers import _http_utils
     from tradingagents.dataflows.providers import cn_eastmoney_direct as mod
 
-    class _Requests:
-        @staticmethod
-        def get(*a, **kw):
-            raise ConnectionError("Remote end closed connection")
+    def _boom(*a, **kw):
+        raise ConnectionError("Remote end closed connection")
 
-    import sys
-
-    monkeypatch.setitem(sys.modules, "requests", _Requests)
+    # 打桩必须落在**被测模块自己的命名空间**上：它是
+    # `from ._http_utils import http_get_json`（模块级绑定），
+    # 改 `_http_utils.http_get_json` 对它无效——这个坑在本文件出现两次，
+    # 两次都是"以为打了桩其实真的发了网络请求"。
+    monkeypatch.setattr(mod, "http_get_json", _boom)
+    monkeypatch.setattr(_http_utils, "http_get_json", _boom, raising=False)
     assert mod.fetch_em_individual_fund_flow_direct("600519.SH") is None
 
 

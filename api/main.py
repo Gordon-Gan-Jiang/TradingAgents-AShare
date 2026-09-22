@@ -50,6 +50,7 @@ import pandas as pd
 
 from api.database import UserDB, UserLLMConfigDB, ScheduledAnalysisDB, VersionStatsDB, ReportDB, ImportedPortfolioPositionDB, WatchlistItemDB, FeedbackDB, DailyProductRunDB, DailyReviewDB, PaperPortfolioDB, init_db, get_db, get_db_ctx
 from api.services import (
+    analysis_job_service,
     auth_service,
     consensus_service,
     feedback_service,
@@ -76,6 +77,14 @@ from api.services import (
     trade_plan_service,
     watchlist_service,
 )
+
+# 用户上下文的组装与提示词模板套用属于"提交深度分析"的一部分，已迁到
+# `api.services.analysis_job_service`（HTTP 路由与对话工具共用一份实现）。
+# 这里保留原有私有名，既有调用点一行都不用改，也不会出现第二份实现。
+_compose_analysis_user_context = analysis_job_service.compose_analysis_user_context
+_apply_user_context_to_request = analysis_job_service.apply_user_context_to_request
+_extract_request_user_context = analysis_job_service.extract_request_user_context
+_merge_user_context_payload = analysis_job_service.merge_user_context_payload
 from api.services.wecom_notification_service import send_message
 from api.services.wps_notification_service import send_markdown_message
 
@@ -431,7 +440,8 @@ def _auto_daily_product_tick() -> None:
                 horizons=["short"],
                 ensure_scheduled=False,
             )
-            _start_daily_product_run(request=request, user_id=user.id, db=db)
+            # 与手动入口同一份提交实现（原本直调路由内的私有函数）
+            analysis_job_service.submit_daily_review(request=request, user_id=user.id, db=db)
             _auto_daily_product_sent[run_key] = time.monotonic()
 
 
@@ -1123,6 +1133,8 @@ async def lifespan(app: FastAPI):
         _jobs.clear()
         _job_events.clear()
     _background_tasks.clear()
+    global _MAIN_EVENT_LOOP
+    _MAIN_EVENT_LOOP = asyncio.get_running_loop()
     _scheduled_analysis_semaphore = asyncio.Semaphore(_scheduled_analysis_max_concurrency)
     _scheduled_analysis_queue_lock = asyncio.Lock()
     _scheduled_analysis_waiting_job_ids.clear()
@@ -1388,6 +1400,41 @@ def _create_tracked_task(coro, *, label: str = "Background task") -> asyncio.Tas
 
     task.add_done_callback(_on_done)
     return task
+
+
+# 应用主事件循环：在 lifespan 启动时记录。
+# 为什么需要它：对话工具的 handler 跑在注册表的线程池里（`ToolRegistry.invoke`），
+# 那个线程**没有**运行中的事件循环。分钟级任务必须在应用主循环上跑（SSE 事件队列
+# 的消费者在那里），因此"提交"这一侧需要一个把协程投回主循环的入口。
+_MAIN_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+async def _spawn_tracked_task(coro, *, label: str = "Background task") -> Any:
+    """在主循环内部把协程挂成受保活的 task（`run_coroutine_threadsafe` 的载荷）。"""
+    return _create_tracked_task(coro, label=label)
+
+
+def _submit_background_task(coro, *, label: str = "Background task") -> Any:
+    """投递后台任务（供 L3 提交入口使用）。
+
+    * 在事件循环线程里（HTTP 路由）→ 与 `_create_tracked_task` 完全一致；
+    * 在没有事件循环的线程里（对话工具 handler、`asyncio.to_thread` 的批跑）
+      → 转投**应用主循环**。
+
+    第二步不是可选的：`asyncio.create_task` 在没有循环的线程里直接抛
+    `RuntimeError`，而"抛错"在这里是最坏的失败形态——任务号已经发出去、任务记录
+    已经落库，但没有任何东西真的会跑，用户会以为分析在做。
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = _MAIN_EVENT_LOOP
+        if loop is None or loop.is_closed():
+            raise RuntimeError(
+                "后台任务投递失败：当前线程没有事件循环，应用主循环也尚未就绪"
+            ) from None
+        return asyncio.run_coroutine_threadsafe(_spawn_tracked_task(coro, label=label), loop)
+    return _create_tracked_task(coro, label=label)
 
 
 def _log(msg: str):
@@ -3249,106 +3296,6 @@ def _fill_missing_model_profile_names(db: Session, *, user_id: str, reports: lis
         pid = str(getattr(report, "model_profile_id", "") or "").strip()
         if pid and not str(getattr(report, "model_profile_name", "") or "").strip():
             setattr(report, "model_profile_name", name_map.get(pid))
-
-
-def _extract_request_user_context(request: UserContextInput) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {}
-    for key in USER_CONTEXT_KEYS:
-        value = getattr(request, key, None)
-        if value is None:
-            continue
-        if isinstance(value, str) and not value.strip():
-            continue
-        if key == "constraints" and not value:
-            continue
-        payload[key] = value
-    return payload
-
-
-def _merge_user_context_payload(
-    explicit_context: Dict[str, Any],
-    inferred_context: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    merged = normalize_user_context(inferred_context or {})
-    merged.update(normalize_user_context(explicit_context or {}))
-    return merged
-
-
-def _compose_analysis_user_context(
-    db: Session,
-    user_id: str,
-    symbol: str,
-    *,
-    explicit_context: Optional[Dict[str, Any]] = None,
-    inferred_context: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """Compose the LLM-facing user context for an analysis run.
-
-    这里刻意【不】合并导入持仓（imported positions）：深度分析必须保持客观。
-    持仓、成本、浮盈一旦进入提示词，模型就会围绕"我的持仓该怎么办"作答，
-    结论随用户持仓漂移并引入噪音。
-
-    持仓相关的减仓/卖出决策改由独立的确定性退出引擎承担
-    （api/services/exit_engine_service.py）：它读取报告锚点与真实持仓自行
-    计算触发条件，不经过 LLM 上下文。db/user_id/symbol 参数保留仅为兼容
-    既有调用方签名。
-    """
-    return _merge_user_context_payload(explicit_context or {}, inferred_context or {})
-
-
-def _apply_user_context_to_request(request: "AnalyzeRequest", user_context: Dict[str, Any]) -> "AnalyzeRequest":
-    request.objective = user_context.get("objective")
-    request.risk_profile = user_context.get("risk_profile")
-    request.investment_horizon = user_context.get("investment_horizon")
-    request.cash_available = user_context.get("cash_available")
-    request.current_position = user_context.get("current_position")
-    request.current_position_pct = user_context.get("current_position_pct")
-    request.average_cost = user_context.get("average_cost")
-    request.max_loss_pct = user_context.get("max_loss_pct")
-    request.constraints = user_context.get("constraints", [])
-    request.user_notes = user_context.get("user_notes")
-    return request
-
-
-def _apply_prompt_template_to_request(
-    db: Session,
-    user_id: str,
-    request: "AnalyzeRequest",
-    *,
-    fallback_template_id: str,
-    horizon: Optional[str] = None,
-    default_only_when_missing: bool = True,
-) -> "AnalyzeRequest":
-    template_id = (request.prompt_template_id or "").strip()
-    if not template_id and request.query:
-        return request
-    if default_only_when_missing and not template_id and not request.query:
-        return request
-    symbol = _normalize_symbol((request.symbol or "").strip().upper())
-    if not symbol:
-        return request
-    code_to_name = _get_reverse_stock_map()
-    template = prompt_template_service.resolve_template(
-        db,
-        user_id,
-        template_id or fallback_template_id,
-        fallback_template_id=fallback_template_id,
-        scope=prompt_template_service.SCOPE_DEEP_ANALYSIS,
-    )
-    horizon_value = horizon or (request.horizons[0] if request.horizons else "short")
-    rendered = prompt_template_service.render_template(
-        template,
-        symbol=symbol,
-        name=code_to_name.get(symbol, symbol),
-        horizon=horizon_value,
-        trade_date=request.trade_date,
-        prompt_vars=request.prompt_vars or {},
-    )
-    request.symbol = symbol
-    request.query = rendered["query"]
-    request.user_intent = rendered["user_intent"]
-    request.prompt_template_id = template["id"]
-    return request
 
 
 def _build_result_payload(final_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -5554,61 +5501,26 @@ async def analyze(
     request: AnalyzeRequest,
     current_user: UserDB = Depends(_require_api_user),
 ) -> AnalyzeResponse:
-    with get_db_ctx() as db:
-        try:
-            _apply_prompt_template_to_request(
-                db,
-                current_user.id,
-                request,
-                fallback_template_id=prompt_template_service.DEFAULT_MANUAL_TEMPLATE_ID,
-                default_only_when_missing=False,
-            )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        merged_user_context = _compose_analysis_user_context(
-            db,
-            current_user.id,
-            request.symbol,
-            explicit_context=_extract_request_user_context(request),
+    """深度分析（全文研报生成）入口。
+
+    提交序列（套模板 → 合并上下文 → 建任务记录 → 推事件 → 投递后台任务）在
+    `api.services.analysis_job_service`：HTTP 路由与对话工具
+    （`submit_deep_analysis_job`）调的是**同一份实现**。这里只做两件 HTTP 专属的事：
+    把领域异常翻译成状态码、把结果映射成响应体。
+    """
+    try:
+        submitted = await analysis_job_service.submit_deep_analysis(
+            request=request,
+            user_id=current_user.id,
         )
-    _apply_user_context_to_request(request, merged_user_context)
-
-    job_id = uuid4().hex
-    now = _utcnow_iso()
-    _set_job(
-        job_id,
-        job_id=job_id,
-        user_id=current_user.id,
-        status="pending",
-        created_at=now,
-        started_at=None,
-        finished_at=None,
-        symbol=request.symbol,
-        trade_date=request.trade_date,
-        model_profile_id=request.model_profile_id,
-        experiment_id=request.experiment_id,
-        input_snapshot_hash=request.input_snapshot_hash,
-        error=None,
-        result=None,
-        decision=None,
+    except analysis_job_service.PromptTemplateError as exc:
+        # 模板 ID 不可用 → 400（与重构前逐字一致）
+        raise HTTPException(400, str(exc))
+    return AnalyzeResponse(
+        job_id=submitted.job_id,
+        status=submitted.status,  # type: ignore[arg-type]
+        created_at=submitted.created_at,
     )
-    _ensure_job_event_queue(job_id)
-    _emit_job_event(
-        job_id,
-        "job.created",
-        {"job_id": job_id, "symbol": request.symbol, "trade_date": request.trade_date},
-    )
-    if request.dry_run:
-        await _run_job(job_id, request, True, True, current_user.id, "api")
-        final_status = _jobs.get(job_id, {}).get("status", "completed")
-        return AnalyzeResponse(job_id=job_id, status=final_status, created_at=now)
-    _create_tracked_task(_run_job(job_id, request, True, True, current_user.id, "api"))
-    return AnalyzeResponse(job_id=job_id, status="pending", created_at=now)
-
-
-def _build_model_arena_snapshot_hash(payload: Dict[str, Any]) -> str:
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @app.post("/v1/model-arena/runs", response_model=ModelArenaRunResponse)
@@ -5616,152 +5528,27 @@ async def create_model_arena_run(
     request: ModelArenaRunRequest,
     current_user: UserDB = Depends(_require_api_user),
 ) -> ModelArenaRunResponse:
-    symbol = _normalize_symbol(request.symbol)
-    if not symbol:
-        raise HTTPException(status_code=400, detail="symbol is required")
+    """模型对比运行入口（一次实验 = 每个模型一个任务）。
 
-    with get_db_ctx() as db:
-        profiles = model_profile_service.list_model_profiles(db, current_user.id, include_inactive=False)
-        profile_map = {str(item.get("id") or ""): item for item in profiles}
-        selected_ids = [str(pid or "").strip() for pid in request.model_profile_ids if str(pid or "").strip()]
-        if not selected_ids:
-            selected_ids = [str(item.get("id") or "") for item in profiles if item.get("is_active")]
-        selected_ids = [pid for pid in selected_ids if pid]
-        selected_ids = list(dict.fromkeys(selected_ids))  # preserve order, dedupe
-        if not selected_ids:
-            raise HTTPException(status_code=400, detail="请先配置并启用至少一个模型配置")
-        invalid_ids = [pid for pid in selected_ids if pid not in profile_map]
-        if invalid_ids:
-            raise HTTPException(status_code=400, detail=f"模型配置不可用：{', '.join(invalid_ids)}")
-
-        merged_user_context = _compose_analysis_user_context(
-            db,
-            current_user.id,
-            symbol,
-            explicit_context={
-                "objective": request.objective,
-                "risk_profile": request.risk_profile,
-                "investment_horizon": request.investment_horizon,
-                "cash_available": request.cash_available,
-                "current_position": request.current_position,
-                "current_position_pct": request.current_position_pct,
-                "average_cost": request.average_cost,
-                "max_loss_pct": request.max_loss_pct,
-                "constraints": request.constraints,
-                "user_notes": request.user_notes,
-            },
-        )
-
-    snapshot_hash = _build_model_arena_snapshot_hash(
-        {
-            "symbol": symbol,
-            "trade_date": request.trade_date,
-            "selected_analysts": request.selected_analysts,
-            "horizons": request.horizons,
-            "query": request.query or "",
-            "prompt_template_id": request.prompt_template_id or "",
-            "prompt_vars": request.prompt_vars or {},
-            "user_context": merged_user_context,
-        }
-    )
-    experiment_id = uuid4().hex
-    now = _utcnow_iso()
-    jobs: list[ModelArenaRunJob] = []
-
-    for profile_id in selected_ids:
-        profile = profile_map.get(profile_id) or {}
-        analyze_req = AnalyzeRequest(
-            symbol=symbol,
-            trade_date=request.trade_date,
-            selected_analysts=request.selected_analysts,
-            config_overrides=request.config_overrides,
-            dry_run=request.dry_run,
-            query=request.query,
-            horizons=request.horizons,
-            prompt_template_id=request.prompt_template_id,
-            prompt_vars=request.prompt_vars,
-            model_profile_id=profile_id,
-            experiment_id=experiment_id,
-            input_snapshot_hash=snapshot_hash,
-            objective=merged_user_context.get("objective"),
-            risk_profile=merged_user_context.get("risk_profile"),
-            investment_horizon=merged_user_context.get("investment_horizon"),
-            cash_available=merged_user_context.get("cash_available"),
-            current_position=merged_user_context.get("current_position"),
-            current_position_pct=merged_user_context.get("current_position_pct"),
-            average_cost=merged_user_context.get("average_cost"),
-            max_loss_pct=merged_user_context.get("max_loss_pct"),
-            constraints=merged_user_context.get("constraints") or [],
-            user_notes=merged_user_context.get("user_notes"),
-        )
-
-        with get_db_ctx() as db:
-            try:
-                _apply_prompt_template_to_request(
-                    db,
-                    current_user.id,
-                    analyze_req,
-                    fallback_template_id=prompt_template_service.DEFAULT_MANUAL_TEMPLATE_ID,
-                    default_only_when_missing=False,
-                )
-            except ValueError as exc:
-                raise HTTPException(400, str(exc))
-
-        job_id = uuid4().hex
-        _set_job(
-            job_id,
-            job_id=job_id,
+    入参校验、实验号与输入快照哈希、逐个模型的提交，全部在
+    `api.services.analysis_job_service.submit_model_arena_run`：与对话工具
+    `submit_model_arena_job` 共用同一份实现。这里只翻译状态码与响应体。
+    """
+    try:
+        submitted = await analysis_job_service.submit_model_arena_run(
+            request=request,
             user_id=current_user.id,
-            status="pending",
-            created_at=now,
-            started_at=None,
-            finished_at=None,
-            symbol=analyze_req.symbol,
-            trade_date=analyze_req.trade_date,
-            model_profile_id=profile_id,
-            model_profile_name=profile.get("name"),
-            experiment_id=experiment_id,
-            input_snapshot_hash=snapshot_hash,
-            error=None,
-            result=None,
-            decision=None,
         )
-        _ensure_job_event_queue(job_id)
-        _emit_job_event(
-            job_id,
-            "job.created",
-            {
-                "job_id": job_id,
-                "symbol": analyze_req.symbol,
-                "trade_date": analyze_req.trade_date,
-                "model_profile_id": profile_id,
-                "experiment_id": experiment_id,
-            },
-        )
-        if analyze_req.dry_run:
-            await _run_job(job_id, analyze_req, True, True, current_user.id, "model_arena")
-            status_value = _jobs.get(job_id, {}).get("status", "completed")
-        else:
-            _create_tracked_task(_run_job(job_id, analyze_req, True, True, current_user.id, "model_arena"))
-            status_value = "pending"
-        jobs.append(
-            ModelArenaRunJob(
-                model_profile_id=profile_id,
-                model_profile_name=profile.get("name"),
-                job_id=job_id,
-                symbol=analyze_req.symbol,
-                trade_date=analyze_req.trade_date,
-                status=status_value,  # type: ignore[arg-type]
-                created_at=now,
-            )
-        )
-
+    except analysis_job_service.ArenaRequestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except analysis_job_service.PromptTemplateError as exc:
+        raise HTTPException(400, str(exc))
     return ModelArenaRunResponse(
-        experiment_id=experiment_id,
-        input_snapshot_hash=snapshot_hash,
-        symbol=symbol,
-        trade_date=request.trade_date,
-        jobs=jobs,
+        experiment_id=submitted.experiment_id,
+        input_snapshot_hash=submitted.input_snapshot_hash,
+        symbol=submitted.symbol,
+        trade_date=submitted.trade_date,
+        jobs=list(submitted.jobs),
     )
 
 
@@ -5973,139 +5760,6 @@ def manual_push_recommendations(
         raise HTTPException(400, str(e))
 
 
-def _apply_backtest_feedback_to_weights(
-    *,
-    user_id: str,
-    momentum_weight: Optional[float],
-    activity_weight: Optional[float],
-    near_high_weight: Optional[float],
-) -> tuple[Optional[float], Optional[float], Optional[float], Dict[str, Any]]:
-    """Use the latest completed backtest stats to slightly bias recommendation weights."""
-    jobs = _bt.list_jobs()
-    latest = None
-    for job in jobs:
-        if str(job.get("status") or "") != "completed":
-            continue
-        if str(job.get("user_id") or "") != user_id:
-            continue
-        latest = job
-        break
-    if latest is None:
-        resolved = {
-            "momentum": 0.4 if momentum_weight is None else float(momentum_weight),
-            "activity": 0.35 if activity_weight is None else float(activity_weight),
-            "near_high": 0.25 if near_high_weight is None else float(near_high_weight),
-        }
-        total = sum(resolved.values())
-        resolved = {k: round(v / total, 4) for k, v in resolved.items()}
-        learning_info: Dict[str, Any] = {"applied": False, "reason": "no_strategy_feedback"}
-        with get_db_ctx() as db:
-            resolved, learning_info = recommendation_feedback_service.build_learning_weight_adjustment(
-                db,
-                user_id=user_id,
-                base_weights=resolved,
-            )
-        return resolved["momentum"], resolved["activity"], resolved["near_high"], {
-            "applied": bool(learning_info.get("applied")),
-            "reason": "no_backtest",
-            "strategy_learning": learning_info,
-        }
-
-    stats = latest.get("stats") or {}
-    win_rate = float(stats.get("win_rate") or 0.0)
-    avg_return = float(stats.get("avg_return_pct") or 0.0)
-
-    base_m = 0.4 if momentum_weight is None else float(momentum_weight)
-    base_a = 0.35 if activity_weight is None else float(activity_weight)
-    base_n = 0.25 if near_high_weight is None else float(near_high_weight)
-
-    # Simple feedback principle:
-    # - High win-rate / positive return -> favor momentum
-    # - Low win-rate / negative return -> favor activity + near-high stability
-    m_shift = ((win_rate - 50.0) / 100.0) * 0.2 + (avg_return / 100.0)
-    m = max(0.0, min(10.0, base_m + m_shift))
-    a = max(0.0, min(10.0, base_a - m_shift * 0.5))
-    n = max(0.0, min(10.0, base_n - m_shift * 0.5))
-    total = m + a + n
-    if total <= 0:
-        return momentum_weight, activity_weight, near_high_weight, {"applied": False, "reason": "invalid_total"}
-    normalized = {
-        "momentum": round(m / total, 4),
-        "activity": round(a / total, 4),
-        "near_high": round(n / total, 4),
-    }
-    learning_info: Dict[str, Any] = {"applied": False}
-    with get_db_ctx() as db:
-        normalized, learning_info = recommendation_feedback_service.build_learning_weight_adjustment(
-            db,
-            user_id=user_id,
-            base_weights=normalized,
-        )
-    return normalized["momentum"], normalized["activity"], normalized["near_high"], {
-        "applied": True,
-        "backtest_job_id": latest.get("job_id"),
-        "win_rate": win_rate,
-        "avg_return_pct": avg_return,
-        "strategy_learning": learning_info,
-    }
-
-
-_DAILY_PRODUCT_STRATEGY_SKILLS: List[Dict[str, str]] = [
-    {"id": "market_strategy", "name": "市场策略框架", "reference": "market-strategy.md"},
-    {"id": "risk_scoring", "name": "风险评分标准", "reference": "risk-scoring-criteria.md"},
-    {"id": "analysis_framework", "name": "分析框架", "reference": "analysis-framework.md"},
-    {"id": "backtesting_guidelines", "name": "回测指引", "reference": "backtesting-guidelines.md"},
-    {"id": "chart_guide", "name": "图表解读指引", "reference": "chart-guide.md"},
-]
-
-
-def _resolve_daily_product_strategy_skills(
-    *,
-    strategy_mode: str,
-    requested_skills: List[str],
-    market: str,
-    feedback_info: Dict[str, Any],
-) -> List[str]:
-    allow = {item["id"] for item in _DAILY_PRODUCT_STRATEGY_SKILLS}
-    requested = [s for s in (requested_skills or []) if s in allow]
-    if strategy_mode == "manual":
-        return requested
-
-    # Auto mode: keep a stable baseline, then adapt by market + backtest outcome.
-    selected: List[str] = ["analysis_framework", "market_strategy"]
-    if market == "cn":
-        selected.append("chart_guide")
-    selected.append("risk_scoring")
-
-    if bool(feedback_info.get("applied")):
-        win_rate = float(feedback_info.get("win_rate") or 0.0)
-        avg_ret = float(feedback_info.get("avg_return_pct") or 0.0)
-        if win_rate < 45.0 or avg_ret < 0.0:
-            # Weak backtest regime -> strengthen risk & backtest discipline.
-            selected.append("backtesting_guidelines")
-
-    # Merge user-requested skills in auto mode (dedupe, keep order).
-    selected.extend(requested)
-    deduped: List[str] = []
-    seen: set[str] = set()
-    for skill in selected:
-        if skill in seen:
-            continue
-        seen.add(skill)
-        deduped.append(skill)
-    return deduped
-
-
-def _build_daily_product_query(symbol: str, strategy_skills: List[str]) -> str:
-    if not strategy_skills:
-        return f"daily_product 批量分析 {symbol}"
-    return (
-        f"daily_product 策略编排分析 {symbol}；"
-        f"请融合策略技能：{','.join(strategy_skills)}，"
-        "给出可执行交易计划并说明关键风险。"
-    )
-
-
 async def _finalize_daily_product_run_and_push(run_id: str) -> None:
     """Poll run jobs until done, then push summary to WeCom/WPS if configured."""
     while True:
@@ -6216,265 +5870,6 @@ async def _finalize_daily_product_run_and_push(run_id: str) -> None:
         await asyncio.sleep(0.5)
 
 
-def _start_daily_product_run(
-    *,
-    request: DailyProductRunRequest,
-    user_id: str,
-    db: Session,
-) -> DailyProductRunResponse:
-    run_id = uuid4().hex
-    run_created_at = _utcnow_iso()
-    code_to_name = _get_reverse_stock_map_cached_only()
-    recommendation_payload: RecommendationResponse | None = None
-    target_symbols: list[str] = []
-    symbol_to_name: dict[str, str] = {}
-
-    effective_momentum = request.momentum_weight
-    effective_activity = request.activity_weight
-    effective_near_high = request.near_high_weight
-    feedback_info: dict[str, Any] = {"applied": False}
-    if request.use_backtest_feedback:
-        (
-            effective_momentum,
-            effective_activity,
-            effective_near_high,
-            feedback_info,
-        ) = _apply_backtest_feedback_to_weights(
-            user_id=user_id,
-            momentum_weight=request.momentum_weight,
-            activity_weight=request.activity_weight,
-            near_high_weight=request.near_high_weight,
-        )
-    effective_strategy_skills = _resolve_daily_product_strategy_skills(
-        strategy_mode=request.strategy_mode,
-        requested_skills=request.strategy_skills,
-        market=request.market,
-        feedback_info=feedback_info,
-    )
-
-    if request.mode == "recommended":
-        rec = recommendation_service.recommend_for_user(
-            db=db,
-            user_id=user_id,
-            top_k=request.top_k,
-            candidate_limit=request.candidate_limit,
-            source_mode=request.recommendation_source,
-            scan_limit=request.scan_limit,
-            include_tracking=request.include_tracking,
-            include_watchlist=request.include_watchlist,
-            seed_symbols=request.seed_symbols,
-            min_change_pct=request.min_change_pct,
-            market=request.market,
-            min_price=request.min_price,
-            max_price=request.max_price,
-            min_amount=request.min_amount,
-            min_turnover_rate=request.min_turnover_rate,
-            min_volume_ratio=request.min_volume_ratio,
-            limit_up_threshold_pct=request.limit_up_threshold_pct,
-            limit_down_threshold_pct=request.limit_down_threshold_pct,
-            enforce_tradability=request.enforce_tradability,
-            profile=request.score_profile,
-            momentum_weight=effective_momentum,
-            activity_weight=effective_activity,
-            near_high_weight=effective_near_high,
-        )
-        recommendation_payload = RecommendationResponse(
-            pool_size=int(rec.get("pool_size") or 0),
-            scored_size=int(rec.get("scored_size") or 0),
-            items=[RecommendationItemResponse(**item) for item in rec.get("items") or []],
-            scoring_model=rec.get("scoring_model"),
-            analysis_jobs=[],
-        )
-        for item in rec.get("items") or []:
-            symbol = str(item.get("symbol") or "").strip().upper()
-            if not symbol:
-                continue
-            target_symbols.append(symbol)
-            symbol_to_name[symbol] = str(item.get("name") or symbol)
-    else:
-        if request.mode in {"tracking", "all"}:
-            rows = (
-                db.query(ImportedPortfolioPositionDB)
-                .filter(ImportedPortfolioPositionDB.user_id == user_id)
-                .order_by(
-                    ImportedPortfolioPositionDB.market_value.desc(),
-                    ImportedPortfolioPositionDB.current_position.desc(),
-                    ImportedPortfolioPositionDB.symbol.asc(),
-                )
-                .all()
-            )
-            for row in rows:
-                symbol = str(row.symbol or "").strip().upper()
-                if not symbol:
-                    continue
-                symbol_to_name.setdefault(symbol, str(row.security_name or symbol).strip() or symbol)
-        if request.mode in {"watchlist", "all"}:
-            rows = (
-                db.query(WatchlistItemDB)
-                .filter(WatchlistItemDB.user_id == user_id)
-                .order_by(WatchlistItemDB.sort_order.asc(), WatchlistItemDB.created_at.desc())
-                .all()
-            )
-            for row in rows:
-                symbol = _normalize_symbol(str(row.symbol or ""))
-                if not symbol:
-                    continue
-                symbol_to_name.setdefault(symbol, code_to_name.get(symbol) or symbol)
-
-        target_symbols = list(symbol_to_name.keys())[: max(1, min(int(request.top_k), 20))]
-
-    if not target_symbols:
-        empty_response = DailyProductRunResponse(
-            run_id=run_id,
-            status="completed",
-            mode=request.mode,
-            summary={
-                "total_targets": 0,
-                "queued_jobs": 0,
-                "scheduled_created": 0,
-                "backtest_feedback": feedback_info,
-                "strategy_mode": request.strategy_mode,
-                "strategy_skills": effective_strategy_skills,
-                "recommendation_source": request.recommendation_source,
-            },
-            recommendation=recommendation_payload,
-            jobs=[],
-        )
-        _set_daily_product_run(
-            run_id,
-            user_id=user_id,
-            mode=request.mode,
-            status="completed",
-            created_at=run_created_at,
-            finished_at=_utcnow_iso(),
-            jobs=[],
-            recommendation=recommendation_payload.model_dump() if recommendation_payload else None,
-            summary=empty_response.summary,
-        )
-        return empty_response
-
-    queued_jobs: list[DailyProductRunJob] = []
-    for symbol in target_symbols:
-        with get_db_ctx() as ctx_db:
-            merged_user_context = _compose_analysis_user_context(
-                ctx_db,
-                user_id,
-                symbol,
-            )
-        analyze_req = AnalyzeRequest(
-            symbol=symbol,
-            trade_date=cn_today_str(),
-            horizons=request.horizons or ["short"],
-            selected_analysts=request.selected_analysts,
-            query=_build_daily_product_query(symbol, effective_strategy_skills),
-        )
-        _apply_user_context_to_request(analyze_req, merged_user_context)
-        job_id = uuid4().hex
-        now = _utcnow_iso()
-        _set_job(
-            job_id,
-            job_id=job_id,
-            user_id=user_id,
-            status="pending",
-            created_at=now,
-            started_at=None,
-            finished_at=None,
-            symbol=symbol,
-            trade_date=analyze_req.trade_date,
-            error=None,
-            result=None,
-            decision=None,
-            request_source="daily_product_batch",
-        )
-        _ensure_job_event_queue(job_id)
-        _emit_job_event(
-            job_id,
-            "job.created",
-            {"job_id": job_id, "symbol": symbol, "trade_date": analyze_req.trade_date},
-        )
-        _create_tracked_task(
-            _run_job(job_id, analyze_req, True, True, user_id, "daily_product_batch"),
-            label=f"Daily product analyze task ({symbol})",
-        )
-        queued_jobs.append(
-            DailyProductRunJob(
-                symbol=symbol,
-                name=symbol_to_name.get(symbol) or code_to_name.get(symbol) or symbol,
-                job_id=job_id,
-                status="pending",
-                created_at=now,
-            )
-        )
-
-    scheduled_result: dict[str, Any] = {"created": [], "existing": [], "skipped_limit": []}
-    if request.ensure_scheduled and target_symbols:
-        try:
-            scheduled_result = scheduled_service.ensure_scheduled_for_symbols(
-                db=db,
-                user_id=user_id,
-                symbols=target_symbols,
-                horizon=request.schedule_horizon,
-                trigger_time=request.schedule_trigger_time,
-            )
-            db.commit()
-        except Exception as exc:
-            _log(f"[Daily Product] ensure_scheduled failed for user={user_id}: {exc}")
-
-    run_row = {
-        "run_id": run_id,
-        "user_id": user_id,
-        "mode": request.mode,
-        "status": "pending",
-        "created_at": run_created_at,
-        "finished_at": None,
-        "jobs": [j.model_dump() for j in queued_jobs],
-        "recommendation": recommendation_payload.model_dump() if recommendation_payload else None,
-        "summary": {
-            "total_targets": len(target_symbols),
-            "queued_jobs": len(queued_jobs),
-            "completed_jobs": 0,
-            "failed_jobs": 0,
-            "running_jobs": 0,
-            "pending_jobs": len(queued_jobs),
-            "scheduled_created": len(scheduled_result.get("created") or []),
-            "scheduled_existing": len(scheduled_result.get("existing") or []),
-            "scheduled_skipped_limit": len(scheduled_result.get("skipped_limit") or []),
-            "backtest_feedback": feedback_info,
-            "strategy_mode": request.strategy_mode,
-            "strategy_skills": effective_strategy_skills,
-            "recommendation_source": request.recommendation_source,
-            "scan_limit": request.scan_limit,
-        },
-    }
-    if recommendation_payload and recommendation_payload.items:
-        recommendation_feedback_service.persist_scan_results(
-            db,
-            user_id=user_id,
-            run_id=run_id,
-            source_mode=request.recommendation_source,
-            market=request.market,
-            score_profile=request.score_profile,
-            items=[item.model_dump() for item in recommendation_payload.items],
-            selected_symbols=target_symbols,
-            feedback_horizon_days=5 if "short" in (request.horizons or ["short"]) else 10,
-        )
-        db.commit()
-    _set_daily_product_run(run_id, **{k: v for k, v in run_row.items() if k != "run_id"})
-    _create_tracked_task(
-        _finalize_daily_product_run_and_push(run_id),
-        label=f"Daily product run monitor ({run_id[:8]})",
-    )
-
-    return DailyProductRunResponse(
-        run_id=run_id,
-        status="pending",
-        mode=request.mode,
-        summary=run_row["summary"],
-        recommendation=recommendation_payload,
-        jobs=queued_jobs,
-    )
-
-
 @app.post("/v1/daily-product/run", response_model=DailyProductRunResponse)
 async def run_daily_product_batch(
     request: DailyProductRunRequest,
@@ -6485,11 +5880,23 @@ async def run_daily_product_batch(
     产品增强批量分析入口（保留当前多Agent能力）：
     - recommended: 先智能推荐再批量分析
     - watchlist/tracking/all: 按用户股票池直接批量分析
+
+    提交序列（推荐/选池 → 逐个标的建任务 → 推事件 → 投递后台执行 → 记录批跑）
+    在 `api.services.analysis_job_service.submit_daily_review`：与对话工具
+    `submit_daily_review_job` 共用同一份实现。这里只做响应体映射。
     """
-    return _start_daily_product_run(
+    submitted = analysis_job_service.submit_daily_review(
         request=request,
         user_id=current_user.id,
         db=db,
+    )
+    return DailyProductRunResponse(
+        run_id=submitted.run_id,
+        status=submitted.status,  # type: ignore[arg-type]
+        mode=submitted.mode,
+        summary=submitted.summary,
+        recommendation=submitted.recommendation,
+        jobs=list(submitted.jobs),
     )
 
 
@@ -7044,7 +6451,7 @@ def list_daily_product_strategy_skills(
             {"id": "manual", "name": "手动编排", "description": "仅使用传入的 strategy_skills"},
             {"id": "auto", "name": "自动编排", "description": "基于市场与回测反馈自动选择策略技能"},
         ],
-        "skills": _DAILY_PRODUCT_STRATEGY_SKILLS,
+        "skills": analysis_job_service.DAILY_PRODUCT_STRATEGY_SKILLS,
         "default_auto_skills": ["analysis_framework", "market_strategy", "risk_scoring"],
     }
 

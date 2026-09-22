@@ -39,6 +39,7 @@ def build_registry(
     watchlist_port: object | None = None,
     announcements_port: object | None = None,
     freshness_port: object | None = None,
+    index_fetcher: object | None = None,
     outcome_port: object | None = None,
     report_port: object | None = None,
     recommendation_port: object | None = None,
@@ -59,10 +60,10 @@ def build_registry(
     刻意**不**装配半成品：没有取数器就不注册对应工具，避免出现「在册但一调
     就炸」的条目——那类条目会让 Agent 把预算浪费在必然失败的调用上。
 
-    L2 证据工具的四个注入点同理（见 `tools/evidence.py`）：
+    L2 证据工具的五个注入点同理（见 `tools/evidence.py`）：
     `evidence_fetchers`（市场类取数集合，组合根通常传
     `default_market_fetchers()`）、`watchlist_port`、`announcements_port`、
-    `freshness_port`。未注入的那个工具不会出现在注册表里。
+    `freshness_port`、`index_fetcher`。未注入的那个工具不会出现在注册表里。
 
     `outcome_port` / `report_port` / `recommendation_port` / `tracking_port` /
     `arena_port` / `risk_port` / `plan_port` / `quality_port` / `paper_port` /
@@ -154,7 +155,9 @@ def build_registry(
         for spec in make_consensus_tools(consensus_port):
             registry.register(spec)
     # L2 证据工具：按注入的依赖逐个装配，缺一个就少一个条目（不注册半成品）。
-    if any((evidence_fetchers, watchlist_port, announcements_port, freshness_port)):
+    if any(
+        (evidence_fetchers, watchlist_port, announcements_port, freshness_port, index_fetcher)
+    ):
         from .evidence import make_evidence_tools
 
         for spec in make_evidence_tools(
@@ -162,6 +165,7 @@ def build_registry(
             watchlist_port=watchlist_port,
             announcements_port=announcements_port,
             freshness_port=freshness_port,
+            index_fetcher=index_fetcher,
         ):
             registry.register(spec)
     return registry

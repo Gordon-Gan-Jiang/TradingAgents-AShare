@@ -26,7 +26,26 @@ class _FakeAk:
         raise ConnectionError("Remote end closed connection")
 
 
+def _seal_em_direct(monkeypatch):
+    """把**东财直连**那条中间通道也打桩成失败。
+
+    为什么必须这样：这个文件测的是"东财失败 → 退 Tushare"。而东财直连是链路的
+    第二环（akshare → 东财直连 → Tushare），**它并不总是失败**——实测本机东财
+    并非全面封禁（指数快照与公告接口都通），于是链路在我打桩的 Tushare 之前
+    就返回了真实数据，断言随之失败。
+
+    这不是被测代码的问题，而是**测试不密闭**：只打桩了第一环与第三环，
+    却依赖了第二环必然失败这种网络状态。测试必须不依赖网络才能说明问题。
+    """
+    from tradingagents.dataflows.providers import cn_eastmoney_direct as em
+
+    monkeypatch.setattr(
+        em, "fetch_em_individual_fund_flow_direct", lambda symbol: None
+    )
+
+
 def test_flow_falls_back_to_tushare(monkeypatch):
+    _seal_em_direct(monkeypatch)
     from tradingagents.dataflows.providers import cn_research_data as mod
     from tradingagents.dataflows.providers import cn_tushare
 
@@ -59,6 +78,7 @@ def test_flow_falls_back_to_tushare(monkeypatch):
 
 
 def test_flow_returns_none_when_tushare_absent(monkeypatch):
+    _seal_em_direct(monkeypatch)
     from tradingagents.dataflows.providers import cn_research_data as mod
     from tradingagents.dataflows.providers import cn_tushare
 
@@ -107,6 +127,7 @@ def test_chip_returns_none_when_tushare_absent(monkeypatch):
 
 
 def test_empty_tushare_row_does_not_fake_a_frame(monkeypatch):
+    _seal_em_direct(monkeypatch)
     """Tushare 返回"没有这条数据"时不得造一个空帧冒充成功。"""
     from tradingagents.dataflows.providers import cn_research_data as mod
     from tradingagents.dataflows.providers import cn_tushare
