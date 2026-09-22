@@ -282,6 +282,48 @@ _FIELD_LABELS: dict[str, tuple[str, str]] = {
 
 _NON_FACT_KEYS = {"note", "structured", "vendor_args", "category", "rendered"}
 
+# 财务指标的**单位按字段名推断**，不按工具。
+#
+# 缺陷（2026-09-22 实测）：两个 Markdown 表格解析路径都写死 `unit="yuan"`，
+# 于是 `get_fundamentals` 的比率类字段全被标成"元"：
+#
+#     净资产收益率(ROE)（2026-06-30） = 16.75
+#     毛利率（2026-06-30）            = 89.5552
+#     资产负债率（2026-06-30）        = 15.1931
+#
+# 危害不是"好看不好看"：
+#   1. 提示词会把单位渲染给模型（`…= 89.5552 (yuan, 截至 …)`），
+#      模型据此会写成「毛利率 89.5552 **元**」；
+#   2. `EvidenceItem.is_numeric` 要求 `unit ∈ NUMERIC_UNITS`
+#      （`{"ratio","pct","yuan","count","days"}`）；
+#   3. 校验器按 `unit in {"ratio","pct"}` 决定要不要做 ×100/÷100 换算。
+#
+# **判据按字段名，且"率"优先**：`净资产收益率` 同时含"率"与"资产"，
+# 它是指标不是金额，所以必须先判百分比。
+_PCT_WORDS = ("率", "比率", "占比", "比例")
+_YUAN_WORDS = (
+    "收入", "成本", "利润", "资产", "负债", "现金流", "权益",
+    "市值", "金额", "费用", "每股", "净值", "报酬",
+)
+_COUNT_WORDS = ("家数", "数量", "个数", "笔数", "次数", "只数")
+
+
+def _unit_for_metric(field: str) -> str:
+    """按字段名推断单位；认不出来就**留空**。
+
+    留空是本仓库的既有原则（见 `_FIELD_LABELS` 上方注释与 `evidence.py`）：
+    给错单位比不给更糟——它会让校验器的换算与数值判断悄悄走错分支。
+    所以这里宁可不判，也不猜。
+    """
+    name = str(field or "")
+    if any(word in name for word in _PCT_WORDS):
+        return "pct"
+    if any(word in name for word in _YUAN_WORDS):
+        return "yuan"
+    if any(word in name for word in _COUNT_WORDS):
+        return "count"
+    return ""
+
 
 def _as_of_from_payload(rendered: Any) -> str:
     """从 JSON 载荷里取数据自身时点的**日期部分**（如 `quote_time`）。"""
@@ -564,7 +606,7 @@ def _evidence_items_from_table(
                             id=f"E{len(items) + 1}",
                             field=f"{field}（{period}）",
                             value=value,
-                            unit="yuan",
+                            unit=_unit_for_metric(field),
                             source_key=source_key,
                             # G4：时点取**报告期**，不是查询日
                             as_of=period,
@@ -613,7 +655,7 @@ def _evidence_items_from_table(
                         id=f"E{len(items) + 1}",
                         field=f"{metric}（{period}）",
                         value=value,
-                        unit="yuan",
+                        unit=_unit_for_metric(metric),
                         source_key=source_key,
                         as_of=period,  # G4
                     )
