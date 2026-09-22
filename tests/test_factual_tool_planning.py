@@ -309,3 +309,49 @@ def test_market_level_factual_turn_is_not_treated_as_missing_symbol():
         clock=_Clock(),
     )
     assert "请告诉我具体的股票代码" not in result.answer, "市场级问句不该被追问标的"
+
+
+@pytest.mark.parametrize(
+    "text,symbol,expected",
+    [
+        # L1 只读工具里的两个"报告类"落点：单测早就封好了，但**没有任何规则入口**
+        # ——带代码/名称的问句一定能解析出标的，于是永远走不到规划层，只能靠这张表。
+        # 实测：「600519 最近这份报告的多视角共识怎么样」落到中档去跑洗盘探针，
+        # 「帮我找一份贵州茅台的研报结论」同理（黄金集 h03 记的就是这个缺口）。
+        ("600519 最近这份报告的多视角共识怎么样", "600519.SH", "report_consensus_read"),
+        ("600519 的多视角共识如何", "600519.SH", "report_consensus_read"),
+        ("帮我找一份贵州茅台的研报结论", "600519.SH", "report_conclusion_lookup"),
+        ("之前那份报告结论是什么", "600519.SH", "report_conclusion_lookup"),
+    ],
+)
+def test_report_tools_are_reachable_by_rules(text, symbol, expected):
+    from tradingagents.agent.routing import plan_factual_tool
+
+    assert plan_factual_tool(text, has_symbol=bool(symbol)) == expected
+
+
+def test_report_consensus_needs_a_symbol():
+    """共识是**某一个标的**的报告共识；无标的时不能选它（必然失败的调用）。"""
+    from tradingagents.agent.routing import SYMBOL_REQUIRED_TOOLS, plan_factual_tool
+
+    assert "report_consensus_read" in SYMBOL_REQUIRED_TOOLS
+    assert plan_factual_tool("多视角共识怎么样", has_symbol=False) != "report_consensus_read"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["600519 最近这份报告的多视角共识怎么样", "帮我找一份贵州茅台的研报结论"],
+)
+def test_report_questions_are_light_tier(text):
+    """报告类问句是**读既有结论**，不是跑一遍研判。
+
+    中档会去调洗盘探针——用户问"上一份报告怎么说"，平台答"洗盘还是派发"。
+    重档判定（`_requests_report_generation`）在前，所以"出个研报"仍走重档。
+    """
+    from tradingagents.agent.routing import TIER_LIGHT, RuleTierClassifier
+
+    class _Resolver:
+        def resolve(self, _text, symbol=None):
+            return type("R", (), {"symbol": "600519.SH", "symbols": (), "candidates": ()})()
+
+    assert RuleTierClassifier(_Resolver()).classify(text).tier == TIER_LIGHT

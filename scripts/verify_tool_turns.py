@@ -99,6 +99,57 @@ CASES: tuple[Case, ...] = (
     Case("watchlist_read", "我的自选股有哪些", note="自选"),
     Case("data_freshness_check", "你的数据是新的吗", alternates=("index_quote_read",),
          note="时效自检"),
+    # ── L2 证据：既有 vendor 数据面的代表（多数只在提示词里"可被选中"）──────
+    #
+    # 这一批是**旧 vendor 工具**：描述统一是"既有分析管道使用的数据工具 get_xxx"，
+    # 没有"用于回答「…」"的用法提示，也没有规则入口（不在 FACTUAL_TOOL_HINTS 里）。
+    # 它们能不能被选中，完全取决于规划器看不看得出问句与名字的对应关系——
+    # 这正是要量出来的东西。其中几个与新的 L2 工具语义重叠
+    # （get_individual_fund_flow vs capital_flow_read），此时新工具是更好的落点：
+    # 旧工具返回预格式化文本、`evidence=()`，取到数也无法被引用。
+    Case("get_stock_data", "600519 最近的日K线走势怎么样",
+         alternates=("get_realtime_quotes", "intraday_bars_read", "signal_washout_probe"),
+         may_abstain=True, note="日线数据（无规则入口）"),
+    Case("get_indicators", "600519 的 MACD 金叉了吗",
+         alternates=("signal_washout_probe",), note="技术指标（有规则入口）"),
+    Case("get_fundamentals", "贵州茅台市盈率多少", alternates=("signal_washout_probe",),
+         note="估值（有规则入口）"),
+    Case("get_balance_sheet", "600519 的资产负债率是多少", note="财报（有规则入口）"),
+    Case("get_cashflow", "600519 的现金流怎么样",
+         alternates=("get_balance_sheet", "signal_washout_probe"), note="现金流（有规则入口）"),
+    Case("get_income_statement", "600519 的毛利率是多少",
+         alternates=("get_fundamentals", "signal_washout_probe"), note="利润表（有规则入口）"),
+    Case("get_lhb_detail", "600519 上龙虎榜了吗",
+         alternates=("get_zt_pool",), may_abstain=True, note="龙虎榜（有规则入口）"),
+    Case("get_zt_pool", "今天涨停板有多少只", alternates=("get_lhb_detail",),
+         note="涨停池（市场级事实）"),
+    Case("get_board_spot", "半导体板块今天涨幅多少",
+         alternates=("market_mainline_view", "get_board_rank"), note="板块行情"),
+    Case("get_news", "600519 最近有什么新闻",
+         alternates=("data_symbol_news", "announcements_read"), note="新闻（vendor）"),
+    Case("get_global_news", "最近全球市场有什么大事",
+         alternates=("market_mainline_view", "get_board_spot"), may_abstain=True,
+         note="全球新闻（无规则入口）"),
+    Case("get_insider_transactions", "600519 最近有内部人交易吗",
+         alternates=("announcements_read", "data_symbol_news"), may_abstain=True,
+         note="内部人交易（无规则入口）"),
+    Case("get_hot_stocks_xq", "雪球上最近的热门股有哪些",
+         alternates=("market_screen", "get_board_rank"), may_abstain=True,
+         note="热门股（无规则入口）"),
+    Case("get_board_rank", "今天板块涨幅排名前十是哪些",
+         alternates=("market_mainline_view", "get_board_spot"), note="板块排名"),
+    Case("get_board_hist", "半导体板块最近一个月的走势",
+         alternates=("get_board_spot", "market_mainline_view"), may_abstain=True,
+         note="板块历史"),
+    Case("get_board_cons", "半导体板块里哪些票最强",
+         alternates=("get_board_spot", "market_screen"), may_abstain=True,
+         note="板块成分"),
+    Case("get_board_fund_flow", "今天哪个板块资金流入最多",
+         alternates=("market_mainline_view", "get_board_spot"), may_abstain=True,
+         note="板块资金流"),
+    Case("get_individual_fund_flow", "600519 和 000001.SZ 的资金流对比",
+         alternates=("signal_washout_probe_batch", "capital_flow_read"),
+         note="个股资金流（vendor，有新工具可替代）"),
 )
 
 

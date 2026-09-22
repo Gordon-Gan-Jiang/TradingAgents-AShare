@@ -80,6 +80,12 @@ FACTUAL_TOOL_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     # 根本不可选，"封了但用不上"。
     (("筹码", "集中度", "获利比例", "平均成本"), "chip_distribution_read"),
     (("分时", "承接", "尾盘", "盘口"), "intraday_bars_read"),
+    # "读既有的报告结论"是 L1 工具，不是重档管道：重档判定（`_requests_report_generation`）
+    # 在档位分类里排在前面，"出个研报"仍走重档，这里只接"读上一份报告"的问法。
+    # 没有这两条时，带代码/名称的问句会落到中档去跑洗盘探针——用户问"这份报告的多视角
+    # 共识怎么样"，平台答"洗盘还是派发"。
+    (("多视角", "共识"), "report_consensus_read"),
+    (("研报结论", "报告结论", "研报怎么说", "报告怎么说的", "历史报告"), "report_conclusion_lookup"),
     # 公告要盖过新闻（新闻那段也含"公告"二字）：公告是**权威披露**，新闻不是。
     # 把两者混在一起会让"最近有什么公告"拿到一堆媒体稿。
     (("公告", "披露", "年报预约", "问询函"), "announcements_read"),
@@ -117,6 +123,9 @@ SYMBOL_REQUIRED_TOOLS: frozenset[str] = frozenset(
         "chip_distribution_read",
         "intraday_bars_read",
         "announcements_read",
+        # 共识是**某一个标的**的报告共识；无标的时选它是一次必然失败的调用。
+        # （`report_conclusion_lookup` 不在此列：它读的是用户自己的报告列表。）
+        "report_consensus_read",
     }
 )
 
@@ -460,6 +469,11 @@ _LIGHT_MARKERS = (
     "承接",
     "指数",
     "点位",
+    # 报告类：**读**既有结论（重档判定在前，"出个研报"不会被这里截走）
+    "多视角",
+    "共识",
+    "研报结论",
+    "报告结论",
 )
 
 # 研判型：需要把多维证据合成一个判断。这是本变更的核心新增能力。
