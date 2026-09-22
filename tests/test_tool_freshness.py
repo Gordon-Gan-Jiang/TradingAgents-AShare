@@ -239,7 +239,8 @@ def test_vendor_failure_text_does_not_claim_the_source_is_available():
         data_module.call_vendor = saved
 
     assert result.coverage.available == ()
-    assert "fundamental_data" in result.coverage.unavailable
+    # 失败声明现在是"类别名（数据源故障：…）"整串，故查子串而非 tuple 精确匹配。
+    assert any("fundamental_data" in item for item in result.coverage.unavailable)
     assert result.degraded is True
     assert result.degraded_reason
     assert result.freshness["fundamental_data"]["status"] == "error"

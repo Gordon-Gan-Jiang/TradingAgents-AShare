@@ -198,3 +198,100 @@ def test_ordinary_market_text_is_still_data():
         "【研报】算力需求旺盛，光模块厂商订单饱满。",
     ):
         assert not _looks_like_vendor_failure(text), f"正常数据被误判为失败：{text!r}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 「结构合法但内容为空」的返回同样是「拿不到」
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `_looks_like_vendor_failure` 早就挡住了空字符串（注释写着"空返回同样是拿不到"），
+# 但**空 JSON** 穿了过去：`'{}'` 是长度 2 的非空字符串。
+#
+# 实测 `get_realtime_quotes(symbols='600519.SH')` 就返回 `'{}'`，于是：
+#     degraded=False                    （不是失败）
+#     available=('core_stock_apis',)    （声称该源**可用**）
+#     unavailable=()                    （声称**没有**未覆盖项）
+#     证据 0 条
+# 用户看到"数据源可用、没有未覆盖项、但没有数据"。600519.SH 是有效代码，
+# `{}` 只可能意味着"这次没取到"。
+
+
+def test_empty_json_payload_is_a_failure_not_data():
+    """空 dict / 空 list 必须判为失败——否则会声称数据源可用。"""
+    from tradingagents.tools.data import _looks_like_vendor_failure
+
+    for rendered in ("{}", "[]", "  {}  ", "{ }", "[]\n", "{} "):
+        assert _looks_like_vendor_failure(rendered) is True, f"{rendered!r} 是空载荷，不能当数据"
+
+
+def test_non_empty_json_is_still_data():
+    """判据必须收窄：**非空** JSON 不是失败（不能因为"是 JSON"就一律拒）。"""
+    from tradingagents.tools.data import _looks_like_vendor_failure
+
+    for rendered in ('{"quotes":{}}', '[1]', '{"a":1}', '{"items":[]}'):
+        assert _looks_like_vendor_failure(rendered) is False, f"{rendered!r} 有内容，不该判失败"
+
+
+def test_empty_payload_does_not_claim_the_source_is_available():
+    """空载荷下 coverage 必须说"该源取不到"，而不是"可用且没有未覆盖项"。"""
+    from tradingagents.tools.data import DATA_TOOL_DECLS, _coverage_for
+
+    decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_realtime_quotes")
+    coverage = _coverage_for(decl, rendered="{}")
+
+    assert coverage.available == (), "空载荷不得声称数据源可用"
+    # `unavailable` 的元素是"类别名（说明）"整串，所以这里要查**子串**，
+    # 不能用 tuple 的 `in`（那是精确匹配，会永远为假）。
+    assert any(decl.category in item for item in coverage.unavailable), (
+        "必须点名未覆盖的是哪个源"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Phase 1.3：数据源故障必须让**用户**看见，而不是只丢一个内部类别名
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 原本失败时只声明 `(decl.category,)`，用户看到的是「未覆盖：news_data」——
+# 一个内部标识符。真正的诊断（"被限流了"）写在 `ToolResult.degraded_reason` 里，
+# 而**全仓库没有任何代码读它**，算完就丢。
+#
+# 后果不是"少一条信息"，而是：真实的数据源故障被表述成"没有数据"，
+# 用户无法判断该刷新重试还是该换个问法。这与 `_coverage_for` 自己的注释
+# （"vendor 失败时不得声称该源可用"）是同一条原则。
+
+
+def test_vendor_failure_declares_the_diagnosis_not_just_the_category():
+    """故障声明里必须带人话诊断（沿用 `trade_ledger（没有已录入的交易流水）` 范式）。"""
+    from tradingagents.tools.data import DATA_TOOL_DECLS, _coverage_for
+
+    decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_global_news")
+    rendered = "Error fetching global news: Too Many Requests. Rate limited. Try after a while."
+    coverage = _coverage_for(decl, rendered=rendered)
+
+    assert coverage.available == (), "故障时不得声称源可用"
+    declared = coverage.unavailable[0]
+    assert decl.category in declared, "类别名要保留在前（既有断言用它匹配）"
+    assert "数据源故障" in declared, "必须明说是数据源故障"
+    assert "Rate limited" in declared, "必须带上真实诊断，否则用户分不清故障与无数据"
+
+
+def test_vendor_failure_note_says_empty_payload_in_plain_words():
+    """`{}` 不是一句诊断，不能原样摆给用户看。"""
+    from tradingagents.tools.data import _vendor_failure_note
+
+    assert _vendor_failure_note("{}") == "返回空数据"
+    assert _vendor_failure_note("[]") == "返回空数据"
+    # 真错误文案要原样透出（它是唯一能解释原因的线索）
+    real = "板块涨幅榜获取失败：ConnectionError: (39, 39)"
+    assert _vendor_failure_note(real) == real
+
+
+def test_healthy_data_declares_no_fault():
+    """反向：正常数据不得被安上"数据源故障"。"""
+    from tradingagents.tools.data import DATA_TOOL_DECLS, _coverage_for
+
+    decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_zt_pool")
+    coverage = _coverage_for(decl, rendered="2026-09-21 涨停家数：103\n连板分布：\n1    82\n")
+
+    assert coverage.available == (decl.category,)
+    assert coverage.unavailable == (), "正常数据不得声明故障"

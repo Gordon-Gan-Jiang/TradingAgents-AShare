@@ -5,6 +5,10 @@
 
 ## Phase 1 — 补齐失败识别（先做，独立、低风险）
 
+> **状态：已完成（2026-09-22）。** 实施中发现并修掉了两个计划外的真实缺陷，
+> 记在下面 1.2 / 1.3 的"实测新增"里。
+
+
 现状：`data.py:484` 的 `_VENDOR_FAILURE_MARKERS` 漏掉英文错误与限流措辞，于是
 `get_global_news` 的 `Error fetching global news: Too Many Requests.` 被当成正常数据，
 最终用户看到「本轮无可用证据」而不是「数据源被限流」。
@@ -14,6 +18,43 @@
 | 1.1 | `_VENDOR_FAILURE_MARKERS` 增补：`error fetching`、`rate limited`、`too many requests`、`timeout`、`connection` 类措辞；每条都附一行注释说明是实测漏网还是预判 | 用实探到的 `get_global_news` 原文做 fixture，`_looks_like_vendor_failure` 必须为 True |
 | 1.2 | 复核增补后**没有把正常数据误判为失败**：对 11 个在册数据工具各跑一次真实调用，确认 `degraded=False` 仍成立 | 11/11 正常数据不被误判；把这次实测结果写进测试注释 |
 | 1.3 | 失败时用户可见：确认 `degraded=True` 会让回答显式声明"数据源故障"，而不是"无可用证据" | 端到端：构造一个失败源，断言回答里出现故障声明 |
+
+### 实测新增（计划外，但属同一 Phase 的诚实性口径）
+
+**A. 空 JSON 载荷被当成有效数据。** `_looks_like_vendor_failure` 早就挡住了空字符串
+（注释写着"空返回同样是拿不到"），但 `'{}'` 是长度 2 的非空字符串，穿了过去。
+实测 `get_realtime_quotes(symbols='600519.SH')` 就返回 `'{}'`，于是
+
+```
+degraded=False                      （不是失败）
+available=('core_stock_apis',)      （声称该源**可用**）
+unavailable=()                      （声称**没有**未覆盖项）
+证据 0 条
+```
+
+用户看到"数据源可用、没有未覆盖项、但没有数据"。判据已收窄为"**能解析成 JSON 且是空
+dict/list**"——不碰散文，不存在把正常文案误判的路径；`{"quotes":{}}` 这类**非空**载荷
+仍判为数据。
+
+**B. 真正的诊断被算完就丢。** 失败时 `coverage.unavailable` 只声明 `(decl.category,)`，
+于是用户看到的是「未覆盖：news_data」——一个内部标识符。而人话诊断写在
+`ToolResult.degraded_reason` 里，**全仓库无任何代码读它**。现已按本仓库既有范式
+（`trade_ledger（没有已录入的交易流水）`）改为"类别名（数据源故障：<诊断>）"。
+
+**1.2 的实测结论**（11 个在册数据工具各真实调用一次）：6 个正常数据**无一被误判**，
+5 个判为失败的**全是真故障**（`get_global_news` 限流、`get_board_spot/rank/hist`
+连接被拒、`get_hot_stocks_xq` JSONDecodeError）。**误判 0 条。**
+（首轮扫描曾把 3 个判失败误以为是误判，实为我参数传错——`sector_type` 的合法值是
+`industry`/`1d`，默认即英文。）
+
+**1.3 的端到端实测**（问题「最近全球市场有什么大事」）：
+
+```
+本轮无可用证据，且全球新闻数据源故障，无法对最近全球市场大事给出有依据的判断。
+**数据未覆盖**：news_data（数据源故障：Error fetching global news: Too Many Requests. Rate limited.）
+```
+
+修复前用户只看到「本轮无可用证据」——故障被伪装成了"没有数据"。
 
 **风险**：误判正常数据为失败会让本来能答的问句变成降级。1.2 就是为此设的闸门，必须真跑。
 

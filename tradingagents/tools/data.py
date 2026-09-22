@@ -516,11 +516,51 @@ def _looks_like_vendor_failure(rendered: Any) -> bool:
     if not isinstance(rendered, str) or not rendered.strip():
         # 空返回同样是「拿不到」——不能声明该源可用
         return True
-    lowered = rendered.lower()
+    stripped = rendered.strip()
+    # **结构合法但内容为空**的 JSON 也是「拿不到」。
+    #
+    # 上面那条只挡住了空字符串。实测 `get_realtime_quotes(symbols='600519.SH')`
+    # 返回的是字符串 `'{}'`——`.strip()` 为真，于是穿过所有标记，最终：
+    #     degraded=False            （不是失败）
+    #     available=('core_stock_apis',)   （声称该源**可用**）
+    #     unavailable=()                    （声称**没有**未覆盖项）
+    #     证据 0 条
+    # 用户看到的是"数据源可用、没有未覆盖项、但没有数据"——这正是本文件
+    # `_coverage_for` 注释里明令禁止的形状。`600519.SH` 是有效代码，`{}` 只可能
+    # 意味着"这次没取到"。
+    #
+    # 判据刻意收得很窄：**只有**能解析成 JSON 且是空 dict/list 才算失败。
+    # 不匹配散文（散文解析会抛异常，这里直接放过），所以不存在把正常文案误判的路径。
+    if stripped[0] in "{[" and stripped[-1] in "}]":
+        import json as _json
+
+        try:
+            parsed = _json.loads(stripped)
+        except Exception:  # noqa: BLE001 — 不是 JSON 就按散文处理
+            parsed = None
+        if isinstance(parsed, (dict, list)) and not parsed:
+            return True
+    lowered = stripped.lower()
     return any(marker.lower() in lowered for marker in _VENDOR_FAILURE_MARKERS)
 
 
-def _coverage_for(decl: DataToolDecl, rendered: Any = None):
+def _vendor_failure_note(rendered: Any) -> str:
+    """把 vendor 的失败文案压成一句能在回答里说出口的诊断。
+
+    只取一行、限长，避免把整段供应商错误（可能几百字、含内部堆栈）塞进提示词
+    和用户面前的声明里。
+    """
+    text = " ".join(str(rendered or "").split())
+    # 空 JSON 的原文是 `{}` / `[]`，直接摆到用户面前等于没说。
+    # 换成一句人话——这里的语义确实是"这次没取到数据"。
+    if text and _looks_like_vendor_failure(text) and text.strip("{}[] \t") == "":
+        return "返回空数据"
+    return text[:80]
+
+
+def _coverage_for(
+    decl: DataToolDecl, rendered: Any = None, *, failure_note: str | None = None
+):
     """按 vendor 的**实际返回**声明覆盖。
 
     修复审计 A3：原实现恒返回 `available=(category,)`，于是 vendor 返回
@@ -529,5 +569,17 @@ def _coverage_for(decl: DataToolDecl, rendered: Any = None):
     from tradingagents.grounding.types import Coverage
 
     if rendered is None or _looks_like_vendor_failure(rendered):
-        return Coverage(available=(), unavailable=(decl.category,))
+        # 失败时**必须把诊断说清楚**，不能只丢一个内部类别名。
+        #
+        # 原本这里只声明 `(decl.category,)`，于是最终用户看到的是
+        # 「未覆盖：news_data」——一个内部标识符。而真正的诊断
+        # （"被限流了" / "连接被拒"）写在 `degraded_reason` 里，**全仓库无人读取**，
+        # 算完就丢。Phase 1.3 的要求正是"数据源故障必须让用户看见"。
+        #
+        # 括号说明的写法沿用本仓库既有范式（`trade_ledger（没有已录入的交易流水）`）：
+        # 类别名 + 一句人话。类别名保留在前是为了让既有断言（用 `in` 匹配）
+        # 与人的阅读都还成立。
+        note = failure_note if failure_note is not None else _vendor_failure_note(rendered)
+        declared = f"{decl.category}（数据源故障：{note}）" if note else decl.category
+        return Coverage(available=(), unavailable=(declared,))
     return Coverage(available=(decl.category,), unavailable=())
