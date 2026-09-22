@@ -136,3 +136,85 @@ def test_statement_questions_still_route_to_statements(question, expected):
     from tradingagents.agent.routing import plan_factual_tool
 
     assert plan_factual_tool(question, has_symbol=True) == expected
+
+
+# ── 中档事实问句：具体规则命中必须优先于判定探针 ──────────────────────
+
+
+@pytest.mark.parametrize(
+    "question,expected",
+    [
+        # 具体命中：该问句有自己明确的工具
+        ("600519 资产负债表怎么样", "get_balance_sheet"),
+        ("600519 最近这份报告的多视角共识怎么样", "report_consensus_read"),
+        ("600519 的筹码集中度如何", "chip_distribution_read"),
+        ("600519 最近有什么公告", "announcements_read"),
+    ],
+)
+def test_a_specific_rule_match_is_reported_for_the_medium_tier(question, expected):
+    """`_specific_factual_tool` 要认出"有自己明确工具"的问句。
+
+    缺陷背景：事实工具规则此前**只在轻档被查询**（`loop.py` 的 `TIER_LIGHT` 分支），
+    于是被分到中档的事实问句拿不到自己的工具，直接落到判定探针上——
+    用"洗盘还是派发"回答"资产负债率是多少"。
+    """
+    from tradingagents.agent.loop import _specific_factual_tool
+
+    assert _specific_factual_tool(question, has_symbol=True) == expected
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "600519 是不是在洗盘",
+        "600519 是不是在派发",
+        "帮我分析一下 600519",
+        "600519 值得买吗",
+    ],
+)
+def test_generic_fallbacks_are_not_treated_as_a_specific_match(question):
+    """**这条是安全属性，不是风格问题。**
+
+    `plan_factual_tool` 对匹配不上的问句返回通用兜底（`get_realtime_quotes` /
+    `get_board_spot`）。若把兜底也当"命中"，中档的判定问句就会被改写：
+    「600519 是不是在洗盘」会被换成一次报价——**把对的换成错的**。
+    所以这里必须返回 None，让探针继续跑。
+    """
+    from tradingagents.agent.loop import _specific_factual_tool
+
+    assert _specific_factual_tool(question, has_symbol=True) is None
+
+
+def test_the_retired_capability_sentinel_is_not_a_match():
+    """`NO_FACTUAL_TOOL`（空串）的语义是"本平台没有落点"，不是"命中了一个工具"。
+
+    它的正确处置是让回答层如实报"数据未覆盖"。若被当成命中，会去查一个
+    不存在的工具名。
+    """
+    from tradingagents.agent.loop import _specific_factual_tool
+
+    assert _specific_factual_tool("今天龙虎榜有多少只", has_symbol=False) is None
+
+
+def test_medium_tier_keeps_the_probe_but_takes_the_specific_tool():
+    """端到端断言中档工具选择：探针该留的留、该让的让。
+
+    只测 `_specific_factual_tool` 还不够——真正要保证的是**计划**层面的选择。
+    """
+    from tradingagents.agent.loop import TurnRequest, _plan_tools
+    from api.services.chat_service import build_registry
+
+    registry = build_registry(user_id=None)
+    probe = _plan_tools(
+        TurnRequest(text="600519 是不是在洗盘", user_id="u", symbol="600519.SH",
+                    tier="medium", as_of="2026-09-22"),
+        registry=registry,
+    )
+    assert [c.tool for c in probe] == ["signal_washout_probe"], "判定问句必须留在探针上"
+
+    factual = _plan_tools(
+        TurnRequest(text="600519 资产负债表怎么样", user_id="u", symbol="600519.SH",
+                    tier="medium", as_of="2026-09-22"),
+        registry=registry,
+    )
+    assert [c.tool for c in factual] == ["get_balance_sheet"], "事实问句必须拿到自己的工具"

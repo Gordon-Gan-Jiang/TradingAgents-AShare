@@ -124,9 +124,27 @@ CASES: tuple[Case, ...] = (
     # 所以它们没有消失——只是不在工具面上。
     Case("get_fundamentals", "贵州茅台市盈率多少", alternates=("signal_washout_probe",),
          note="估值（有规则入口）"),
-    Case("get_balance_sheet", "600519 的资产负债率是多少", note="财报（有规则入口）"),
-    Case("get_income_statement", "600519 的毛利率是多少",
-         alternates=("get_fundamentals", "signal_washout_probe"), note="利润表（有规则入口）"),
+    # ── 2026-09-22 更正：两条"财务比率"问句的期望工具 ──
+    #
+    # 原期望是 `get_balance_sheet` / `get_income_statement`，那是**错的**。
+    # 实测两者对"比率"的回答能力：
+    #   * `get_balance_sheet`    —— 40 条证据**全是资产科目**（货币资金/应收账款/
+    #                               预付款项…），**不含任何「负债率」字段**，结构上答不了；
+    #   * `get_income_statement` —— 40 条里比率类字段 **0 条**（只有营业收入/营业成本）；
+    #   * `get_fundamentals`     —— 40 条，**含**资产负债率 15.1931 / 毛利率 89.5552 /
+    #                               ROE 16.75 / 销售净利率 50.7516 / ROA 20.0558。
+    #
+    # 所以这里**刻意不把报表工具列为 alternates**：它们不是"可接受的另一种答法"，
+    # 而是给不出答案的工具。列进去会让错误路由继续通过验收。
+    Case("get_fundamentals", "600519 的资产负债率是多少",
+         alternates=("signal_washout_probe",), note="财务比率：资产负债率"),
+    Case("get_fundamentals", "600519 的毛利率是多少",
+         alternates=("signal_washout_probe",), note="财务比率：毛利率"),
+    # 报表工具仍有覆盖，只是换成它们**真正能答**的问句（"报表"要报表）。
+    # 把期望从错的问句改成对的问句，而不是删掉用例——删掉会让这两个工具
+    # 从验收面消失。
+    Case("get_balance_sheet", "600519 资产负债表怎么样", note="资产负债表（有规则入口）"),
+    Case("get_income_statement", "600519 利润表怎么样", note="利润表（有规则入口）"),
     # 龙虎榜的落点（`get_lhb_detail`）已退役 → 该问句现在**没有**结构化落点，
     # 期望是"数据未覆盖"。脚本没有"期望无工具"的形态，故不再作为 Case 收录；
     # 断言在 pytest 里（见上面的说明）。同类的还有 MACD/现金流/内部人交易。

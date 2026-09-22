@@ -591,6 +591,30 @@ def _missing_required_arguments(spec: Any, arguments: Mapping[str, Any]) -> set[
     return {key for key in required if arguments.get(key) in (None, "")}
 
 
+def _specific_factual_tool(text: str, *, has_symbol: bool) -> str | None:
+    """问句是否被**某条具体规则**命中；只命中通用兜底时返回 None。
+
+    区分"具体命中"与"通用兜底"是这段的全部要点。`plan_factual_tool` 对匹配不上的
+    问句会返回 `DEFAULT_MARKET_TOOL` / `DEFAULT_FACTUAL_TOOL`（"600519 怎么样" →
+    报价），那是**兜底**而不是判断：拿它去改写中档计划，会把
+    「600519 是不是在洗盘」从探针换成报价——把对的换成错的。
+
+    所以这里用一个**非空判据**：命中结果必须不是那两个兜底常量，也不是
+    `NO_FACTUAL_TOOL`（退役能力，语义是"没有落点"）。
+    """
+    from .routing import (
+        DEFAULT_FACTUAL_TOOL,
+        DEFAULT_MARKET_TOOL,
+        NO_FACTUAL_TOOL,
+        plan_factual_tool,
+    )
+
+    chosen = plan_factual_tool(text, has_symbol=has_symbol)
+    if not chosen or chosen in (DEFAULT_FACTUAL_TOOL, DEFAULT_MARKET_TOOL, NO_FACTUAL_TOOL):
+        return None
+    return chosen
+
+
 def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]:
     """工具计划：**规划层优先**，规则兜底。
 
@@ -748,6 +772,41 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
             )
         ]
     if request.symbol:
+        # ── 中档的"具体规则命中"必须先于探针（2026-09-22 修） ──
+        #
+        # 缺陷：事实工具规则（`plan_factual_tool`）**只在轻档被查询**（见上面
+        # `if request.tier == TIER_LIGHT:` 分支）。于是任何被分到中档的**事实型**
+        # 问句拿不到自己的工具，直接落到下面的探针上——用"洗盘还是派发"回答
+        # "资产负债表的比率是多少"。
+        #
+        # 实测（`600519 资产负债表怎么样`，中档）：
+        #     规则层给出 `get_balance_sheet`（具体命中）
+        #     实际执行 `signal_washout_probe`（答非所问）
+        # 同类：「最近这份报告的多视角共识怎么样」本应走 `report_consensus_read`。
+        #
+        # **为什么只在"具体命中"时改写**：`plan_factual_tool` 对匹配不上的问句会
+        # 返回通用兜底（`get_realtime_quotes` / `get_board_spot`）。若把兜底也当命中，
+        # 「600519 是不是在洗盘」就会被换成报价——那是把对的换成错的。
+        # 实测两类判然分开：
+        #     是不是在洗盘 / 是不是在派发 / 帮我分析一下 / 值得买吗 → 通用兜底（保留探针）
+        #     多视角共识 / 资产负债表 / 筹码集中度 / 毛利率        → 具体命中（改用该工具）
+        specific = _specific_factual_tool(request.text, has_symbol=True)
+        if specific is not None and registry is not None and hasattr(registry, "get"):
+            spec = registry.get(specific)
+            if spec is not None:
+                from .routing import build_factual_arguments
+
+                arguments = build_factual_arguments(
+                    spec, symbol=request.symbol, as_of=as_of, text=request.text
+                )
+                if arguments is not None:
+                    return [
+                        ToolCall(
+                            tool=specific,
+                            arguments=arguments,
+                            reason="specific factual rule beats the judgement probe",
+                        )
+                    ]
         planned = [
             ToolCall(
                 tool="signal_washout_probe",
