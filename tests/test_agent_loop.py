@@ -310,8 +310,14 @@ def test_second_failure_degrades_honestly_without_emitting_unverified_text():
     assert result.status == "degraded"
     assert "9800" not in result.answer
     assert "99%" not in result.answer
-    # 降级文本必须说明缺什么，并列出已获得的证据字段
-    assert "已获取的证据字段" in result.answer
+    # 降级文本必须说明缺什么，并把已获得的证据**连值带引用**列出来。
+    #
+    # 曾经只列字段名（「已获取的证据字段：rebound_volume_recovery、…」）：用户问
+    # "净流入多少"，降级回答里没有那个数——而平台明明有它。降级的意义是"不编造"，
+    # 不是"把取到的东西也藏起来"。这段文本由代码渲染、内容就是工具产出的证据本身，
+    # 因此不违反上一条断言（模型编的 9800 万仍然出不了门）。
+    assert "已获取的证据" in result.answer
+    assert "[E1]" in result.answer, "证据要带引用编号，用户才能追溯"
     assert result.rejected_claims >= 2
 
 
