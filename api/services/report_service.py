@@ -426,7 +426,21 @@ def recover_stale_active_reports(
     active_job_ids: Optional[Iterable[str]] = None,
     error_message: str = STALE_REPORT_ERROR_MESSAGE,
 ) -> Dict[str, int]:
-    """Recover stale pending/running reports left behind by interrupted jobs."""
+    """Recover stale pending/running reports left behind by interrupted jobs.
+
+    Returns a full outcome breakdown rather than a single number:
+
+    * ``total``     —— 本轮**检查到**的活跃报告数（不论是否被处置）
+    * ``completed`` —— 被判定为「已完成」的数量。恢复扫描**不会**产出完成项
+                       （它只把孤儿置为失败），恒为 0；显式给出而不是省略，
+                       是为了让调用方与监控能拿到完整的三元组，不必靠猜。
+    * ``failed``    —— 实际被标记为失败的数量
+
+    `total` 曾经恒等于 `failed`，两个键承载同一信息。调用方的日志又按
+    「marked failed」的口径去读 `total`，于是**一旦有报告因为活跃任务而被跳过**，
+    那行日志就会少报——它会把"检查了 5 个、只失败了 3 个"说成"处置了 3 个"。
+    现在调用方显式读 `failed`，`total` 恢复成它字面的意思。
+    """
     active_job_id_set = {str(job_id) for job_id in (active_job_ids or []) if str(job_id).strip()}
     rows = (
         db.query(ReportDB)
@@ -434,7 +448,7 @@ def recover_stale_active_reports(
         .all()
     )
     if not rows:
-        return {"total": 0, "failed": 0}
+        return {"total": 0, "completed": 0, "failed": 0}
 
     failed = 0
     changed = False
@@ -452,7 +466,8 @@ def recover_stale_active_reports(
         db.commit()
 
     return {
-        "total": failed,
+        "total": len(rows),
+        "completed": 0,
         "failed": failed,
     }
 

@@ -64,6 +64,60 @@ def test_extract_numbers_handles_multiple():
     assert [t.is_percent for t in tokens] == [False, True, True]
 
 
+# ── 结构性数字必须被排除（假阳性会让正常回答被降级）──────────────────────
+#
+# 实测来源（2026-09-22，真实降级）：`watchlist_read` 一轮回答被判
+# `unsourced_number`，而校验器给出的明细是
+#     数值 1 在所引证据 ['E1'] 中找不到来源（数值证据的标量: [20.0]）
+# 那个 `1` 不是任何事实——它是模型写的**编号列表序号**。
+# 这条降级链的代价很高：整轮回答被丢弃，而模型并没有说错任何数字。
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1. 002475.SZ 加入时间 2026-04-09",  # 编号列表的序号
+        "第1名 300476.SZ 胜宏科技",  # 序数词
+        "第3板",  # 序数词（连板）
+        "近1个月表现",  # 窗口参数：`个月`（此前只列了「个交易日」）
+        "近3个月涨幅",  # 窗口参数：`个月`
+        "1个月",
+    ],
+)
+def test_structural_ordinals_are_not_numeric_assertions(text):
+    """序号、序数词、`N个月` 这类窗口参数不是数值断言。
+
+    它们**不可能**是事实性数字，却会被抽成数值断言 → 所引证据里当然没有 →
+    判 `unsourced_number` → 整轮降级。属于纯粹的假阳性。
+    """
+    from tradingagents.grounding.numbers import extract_numbers
+
+    assert extract_numbers(text) == ()
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # 放宽遮蔽**不得**放过真实的数值断言（假阴性比假阳性更危险）
+        ("净流出 3200万", 32000000.0),
+        ("缩量至 54%", 54.0),
+        ("板块跌 2.1%", 2.1),
+        ("收盘 1253.8 元", 1253.8),
+        ("12.5 元", 12.5),
+        ("营收 5 亿", 500000000.0),
+        # `3个涨停` 里的 3 是**事实计数**，不是窗口参数——所以周期词表里
+        # 刻意不写裸 `个`，否则会放过真正该有源的数字。
+        ("连续3个涨停", 3.0),
+        ("上涨 12 只", 12.0),
+    ],
+)
+def test_real_numbers_survive_the_masking(text, expected):
+    from tradingagents.grounding.numbers import extract_numbers
+
+    tokens = extract_numbers(text)
+    assert [t.value for t in tokens] == [expected]
+
+
 # ── 单位归一后的匹配 ──────────────────────────────────────────────────────
 
 

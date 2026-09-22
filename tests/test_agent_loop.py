@@ -531,3 +531,51 @@ def test_missing_tool_is_reported_not_silently_skipped():
         extra_tool_calls=("no_such_tool",),
     )
     assert any(not d.ok for d in sink.of(ToolDone))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 降级必须留下**可诊断**的观测，而不是只留一个原因码
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 实测代价（2026-09-22）：降级文案此前只写 `unsourced_number` / `unsourced_date`，
+# 不记是哪条断言、哪个数字被判无源、所引证据里到底有什么。于是每排查一次降级，
+# 都要临时写一个 monkeypatch 校验器的插桩脚本——定位两个**校验器假阳性**
+# （编号列表序号 `1` 被当成数值断言；证据字段名里的「当日」被当成日期断言）
+# 就是这么做的。那个 `1` 若不留下原文，永远看不出是校验器错了。
+
+
+def test_degradation_records_a_diagnosable_trace_step():
+    """降级要留下「哪条断言、什么理由、证据里有什么」。"""
+    bad1 = StructuredAnswer(summary="x", claims=(Claim(text="主力净流出 9800 万", refs=("E1",)),))
+    bad2 = StructuredAnswer(summary="x", claims=(Claim(text="获利盘 99%", refs=("E1",)),))
+    result, _ = _run(QueueModel([bad1, bad2]))
+
+    assert result.status == "degraded"
+    steps = [s for s in result.steps if s.get("stage") == "verify"]
+    assert len(steps) == 2, "首次失败与修复后失败都要记，否则看不出修复轮改了什么"
+
+    assert [s["attempt"] for s in steps] == [1, 2]
+    for step in steps:
+        assert step["ok"] is False
+        assert step["reason"], "原因码本身仍要留（统计与过滤依赖它）"
+        assert step["failing_claim"], "必须留模型原文——判「模型编造 vs 校验器误判」的唯一依据"
+        assert step["detail"], "必须留校验器的量化理由（它含被判无源的具体数字）"
+        assert step["evidence"], "必须留证据内容：证据在 trace 里没有别处可查"
+        # 证据必须带**值**：只留字段名的话，事后仍然看不出那个数字到底在不在证据里
+        assert any(item.get("value") is not None for item in step["evidence"])
+
+
+def test_degraded_text_does_not_leak_internal_reason_codes():
+    """原因码是内部术语，不得出现在用户可见文案里。
+
+    实测生产库原文：
+        模型调用预算已用尽（1/1），未能修复未通过校验的回答（unsourced_date）。
+    用户既不知道 `unsourced_date` 是什么，也无从判断该怎么办；而那一轮的**真实**
+    原因是校验器假阳性——文案还把「平台判错了」说成了「预算不够」。
+    """
+    bad1 = StructuredAnswer(summary="x", claims=(Claim(text="主力净流出 9800 万", refs=("E1",)),))
+    bad2 = StructuredAnswer(summary="x", claims=(Claim(text="获利盘 99%", refs=("E1",)),))
+    result, _ = _run(QueueModel([bad1, bad2]))
+
+    assert "unsourced_number" not in result.answer
+    assert "找不到出处" in result.answer, "原因码要换成人话，信息不丢"

@@ -41,15 +41,23 @@ GOLDEN_MIN_RECALL=${GOLDEN_MIN_RECALL:-0.60}
 
 # 已知的既有失败（与本改造无关）。**只增不减**：修掉一条就从这里删一条，
 # 新加一条必须能说出"为什么它与本次改造无关"。
+#
+# 2026-09-22：8 条全部修掉，现在是**空的**——套件首次全绿（2673 passed）。
+# 修的是真根因，不是把断言改松：
+#   * 两条 watchlist + portfolio overview：测试 patch 的是 `_load_cn_stock_map`，
+#     而端点读 `_get_stock_name_map_cached_only()` / `_get_reverse_stock_map_cached_only()`
+#     （读接口刻意不触发冷加载），patch 从未生效——单独跑必败、全量跑靠别人预热偶然通过。
+#   * stock_map_fast_path：测试把 `_cn_stock_map` 置空，而函数读的是
+#     `_cn_stock_reverse_map`，且没掐掉它安排的后台刷新（会污染后续用例）。
+#   * report_recovery ×2：`recover_stale_active_reports` 的返回缺少 `completed` 键，
+#     且 `total` 恒等于 `failed`（调用方日志因此会少报）。
+#   * model profile：dry run 的 payload 漏了 `quick_think_llm` / `deep_think_llm`。
+#   * model arena：**时间炸弹测试**——样本日期硬编码 2026-05-20，而晋升门禁用
+#     "今天往前 N 天"的滚动窗口，日历推过 90 天样本就滑出窗口。
+#
+# ⚠️ 空数组在 bash 3.2 + `set -u` 下展开 `"${arr[@]}"` 会报 unbound variable，
+# 所以下面取值处一律用 `${arr[@]+"${arr[@]}"}` 兜底。
 KNOWN_BASELINE_FAILURES=(
-  "tests/test_api_smoke.py::TestModelArenaApi::test_model_arena_leaderboard_compare_promote_and_rollback"
-  "tests/test_api_smoke.py::TestModelProfileApi::test_model_profile_crud_and_analyze_dry_run"
-  "tests/test_api_smoke.py::TestPortfolioOverviewEndpoint::test_overview_returns_watchlist_scheduled_portfolio_and_latest_reports"
-  "tests/test_api_smoke.py::TestWatchlistAddEndpoint::test_batch_add_marks_duplicates"
-  "tests/test_api_smoke.py::TestWatchlistAddEndpoint::test_batch_add_supports_codes_and_full_names"
-  "tests/test_report_recovery.py::test_recover_stale_active_reports_marks_empty_running_report_failed"
-  "tests/test_report_recovery.py::test_recover_stale_active_reports_marks_partial_running_report_failed"
-  "tests/test_stock_map_fast_path.py::test_reverse_stock_map_cached_only_does_not_trigger_cold_load"
 )
 
 fail=0
@@ -60,7 +68,10 @@ report="$(mktemp)"
 # 完整输出落文件再解析：`tail -3` 会把失败明细切掉，也就没法按名字比对。
 no_proxy='*' .venv/bin/python -m pytest tests -q -p no:cacheprovider >"$report" 2>&1 || true
 tail -3 "$report"
-printf '%s\n' "${KNOWN_BASELINE_FAILURES[@]}" | sort > "${report}.known"
+# 空数组要用 `${arr[@]+"${arr[@]}"}` 展开：macOS 自带 bash 3.2 在 `set -u` 下
+# 对空数组直接展开 `"${arr[@]}"` 会报 "unbound variable"，把一次正常的全绿
+# 变成脚本崩溃。已知集为空是**期望状态**（全部修完），必须走得通。
+printf '%s\n' ${KNOWN_BASELINE_FAILURES[@]+"${KNOWN_BASELINE_FAILURES[@]}"} | sort > "${report}.known"
 grep -oE '^FAILED [^ ]+' "$report" | sed 's/^FAILED //' | sort > "${report}.new" || true
 new_failures="$(comm -13 "${report}.known" "${report}.new")"
 new_count="$(printf '%s' "$new_failures" | grep -c . || true)"

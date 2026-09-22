@@ -1187,10 +1187,14 @@ async def lifespan(app: FastAPI):
                 f"(recovered={recovered_count}, reset_to_stale={reset_count})."
             )
         report_reset = report_service.recover_stale_active_reports(db)
-        if report_reset["total"]:
+        # 读 `failed` 而不是 `total`：这句话说的是"标记为失败的数量"。
+        # 两个键此前恒等所以看起来没差，但 `total` 现在是"检查到的活跃报告数"，
+        # 有报告因活跃任务被跳过时两者会不同——那时旧写法会**少报**。
+        if report_reset["failed"]:
             _log(
-                "[Reports] Recovered %s stale active reports on startup (marked failed)."
-                % report_reset["total"]
+                "[Reports] Recovered %s of %s stale active reports on startup "
+                "(marked failed)."
+                % (report_reset["failed"], report_reset["total"])
             )
         mainline_reset = mainline_service.recover_stale_runs(db)
         if mainline_reset:
@@ -3944,6 +3948,13 @@ async def _run_job_inner(
                 "selected_analysts": request.selected_analysts,
                 "user_context": user_context_payload,
                 "llm_provider": config.get("llm_provider"),
+                # dry run 的全部意义就是"不跑但告诉你**会用什么**去跑"。
+                # 只报 provider 不报模型名，等于半个答案：同一 provider 下换个
+                # `quick_think_llm` 是完全不同的成本与质量，而这正是使用者想核对的。
+                # 这两个键在 config 里是一等的（有 quick/deep 互相兜底逻辑），
+                # 之前漏在了 payload 之外。
+                "quick_think_llm": config.get("quick_think_llm"),
+                "deep_think_llm": config.get("deep_think_llm"),
                 "data_vendors": config.get("data_vendors"),
             }
             _set_job(

@@ -24,6 +24,17 @@
 # 未做的一件事：`optional_tools` 没有为了"让精确率好看"而加条目。只有当规划器多调的
 # 那个工具**确实是该问句的一条合法路径**时才登记（例如组合级问题既可用平台自己的
 # `portfolio_risk_review`，也可用批量判定 `signal_washout_probe_batch`）。
+#
+# ## 退役 8 个 vendor 工具时的唯一改动：c05 的 `optional_tools`
+#
+# c05（"600519 和 000001.SZ 的资金流对比"）原先登记 `get_individual_fund_flow` 为
+# 合法路径。该工具**已从工具面退役**：它返回预格式化散文、`evidence=()`，取到的
+# 数字无法被校验器引用——"没有证据就没有回答"，所以它即使被选中也答不出这一问。
+# 登记它等于把"一条永远出不了结论的路径"算作合法，于是**多调它不扣分、不调它也不加分**，
+# 精确率因此失真。这不是"让分数好看"的改动：`required_tools` 一个字没动
+# （仍是 `signal_washout_probe_batch`），只是不再把退役工具算作合法路径。
+#
+# 除 c05 外，黄金集里没有任何条目引用这 8 个退役工具，因此其余期望**逐字未动**。
 {"id": "s01", "text": "600519 是不是在洗盘", "intent": "single_symbol_judgement", "symbols": ["600519.SH"], "required_tools": ["signal_washout_probe"], "optional_tools": [], "required_capabilities": [], "must_declare": ["position", "量比"], "expect_clarify": false, "note": "核心场景"}
 {"id": "s02", "text": "贵州茅台是不是在洗盘", "intent": "single_symbol_judgement", "symbols": ["600519.SH"], "required_tools": ["signal_washout_probe"], "optional_tools": [], "required_capabilities": [], "must_declare": ["position"], "expect_clarify": false, "note": "名称解析"}
 {"id": "s03", "text": "茅台是不是在洗盘", "intent": "single_symbol_judgement", "symbols": ["600519.SH"], "required_tools": ["signal_washout_probe"], "optional_tools": [], "required_capabilities": [], "must_declare": ["position"], "expect_clarify": false, "note": "简称别名"}
@@ -52,7 +63,7 @@
 {"id": "c02", "text": "帮我比较 600519、000001.SZ、300750", "intent": "multi_symbol_compare", "symbols": ["600519.SH", "000001.SZ", "300750.SZ"], "required_tools": ["signal_washout_probe_batch"], "optional_tools": [], "required_capabilities": [], "must_declare": [], "expect_clarify": false, "note": "三个标的"}
 {"id": "c03", "text": "茅台和宁德时代哪个好", "intent": "multi_symbol_compare", "symbols": [], "required_tools": [], "optional_tools": [], "required_capabilities": [], "must_declare": [], "expect_clarify": true, "note": "名称型比较：现行设计把「两个名字」当作歧义而追问（多标的识别只支持显式代码，见 test_name_ambiguity_still_asks）。产品上「A 和 B 哪个好」更像比较需求——本轮不改既有路由，如实记为待办"}
 {"id": "c04", "text": "这两个哪个更值得拿", "intent": "multi_symbol_compare", "symbols": [], "required_tools": [], "optional_tools": [], "required_capabilities": [], "must_declare": [], "expect_clarify": true, "note": "指代型比较，冷会话无先行词 → 期望追问"}
-{"id": "c05", "text": "600519 和 000001.SZ 的资金流对比", "intent": "multi_symbol_compare", "symbols": ["600519.SH", "000001.SZ"], "required_tools": ["signal_washout_probe_batch"], "optional_tools": ["get_individual_fund_flow"], "required_capabilities": [], "must_declare": [], "expect_clarify": false, "note": "比较 + 证据"}
+{"id": "c05", "text": "600519 和 000001.SZ 的资金流对比", "intent": "multi_symbol_compare", "symbols": ["600519.SH", "000001.SZ"], "required_tools": ["signal_washout_probe_batch"], "optional_tools": [], "required_capabilities": [], "must_declare": [], "expect_clarify": false, "note": "比较 + 证据；`get_individual_fund_flow` 已从工具面退役（散文输出、evidence=()，数字不可引用），故不再登记为合法路径"}
 {"id": "m01", "text": "今天走到好的票，放量票找十个给我", "intent": "market_screen", "symbols": [], "required_tools": ["market_screen"], "optional_tools": [], "required_capabilities": [], "must_declare": ["量比"], "expect_clarify": false, "note": "本轮已修，回归锚点"}
 {"id": "m02", "text": "帮我找十只放量票", "intent": "market_screen", "symbols": [], "required_tools": ["market_screen"], "optional_tools": [], "required_capabilities": [], "must_declare": ["量比"], "expect_clarify": false, "note": "筛选措辞"}
 {"id": "m03", "text": "给我挑5只强势股", "intent": "market_screen", "symbols": [], "required_tools": ["market_screen"], "optional_tools": [], "required_capabilities": [], "must_declare": ["量比"], "expect_clarify": false, "note": "数量+档案"}

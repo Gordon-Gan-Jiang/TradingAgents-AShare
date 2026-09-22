@@ -37,7 +37,7 @@ _MULTIPLIERS = {
     "万亿": 1e12,
 }
 
-# 需要先遮蔽的模式：日期、股票代码。否则它们会被抽成数值断言。
+# 需要先遮蔽的模式：日期、股票代码、结构性序号。否则它们会被抽成数值断言。
 _MASK_PATTERNS = (
     re.compile(r"\d{4}-\d{1,2}-\d{1,2}"),
     re.compile(r"\d{4}年\d{1,2}月\d{1,2}日"),
@@ -47,10 +47,31 @@ _MASK_PATTERNS = (
     # 裸 6 位代码（A 股代码以 0/3/6/8 开头）。这是一个启发式：
     # 金额通常带 万/亿 单位或位数更多，所以冲突很少；代价可接受。
     re.compile(r"(?<![\d.])[0368]\d{5}(?![\d.])"),
+    # 编号列表的序号不是数据断言。实测（真实降级，2026-09-22）：模型写
+    # "1. 002475.SZ 加入时间…" 时序号 `1` 被抽成数值断言，因为所引证据里
+    # 没有 1 而判 `unsourced_number`——整轮回答降级，而它并没有说错任何数字。
+    # 只在**行首或分句首**（标记位）且后面紧跟 `.`/`、`/`)` 时才遮蔽，
+    # 这样 "12.5 元" 这类真实小数不会被误伤（小数点后是数字，不是空白）。
+    re.compile(r"(?:(?<=\n)|(?<=^)|(?<=[；;。]))\s*\d{1,3}(?=[.、)）]\s)"),
+    # 序数词：「第1名」「第3板」。"第" 已经说明它不是数据。
+    re.compile(r"第\s*\d+"),
+    # **引用标记本身**不是数据断言。实测（2026-09-22）：模型在断言正文里内联写
+    # `量能萎缩 0.632[E1]`，那个 `E1` 里的 `1` 被抽成数值断言 → 所引证据里没有
+    # 数值 1（只有 0.632）→ 判 `unsourced_number` → 整轮降级，而回答里的数字
+    # **完全正确**。这是与「列表序号」「字段名里的日期词」同类的第三例假阳性：
+    # 校验器把**引用机制**读成了**数据**。
+    #
+    # 证据 ID 的格式是 `f"E{i}"`（见 tools/signals.py、tools/screen.py 等），
+    # 即大写 E 紧跟数字，所以 `\bE\d+\b` 精确覆盖 `[E1]`、`（E1）`、裸 `E1`
+    # 各种写法；`\b` 保证不会误伤 `PE12`、`EBITDA` 这类正常词。
+    re.compile(r"\bE\d+\b"),
 )
 
-# 周期词：紧跟数字时说明它是窗口参数而非数据
-_PERIOD_LOOKAHEAD = r"(?![\d]|\s*(?:日|天|周|月|年|个交易日|分钟|小时))"
+# 周期词：紧跟数字时说明它是窗口参数而非数据。
+# `个` 必须带量词前缀（`个月`/`个星期`…）：实测 "近1个月" 里的 `1` 因为
+# 只列了「个交易日」而被抽成数值断言 → 无源 → 降级。**不能只写裸 `个`**：
+# "连续3个涨停" 里的 3 是事实计数，放宽到裸 `个` 会放过真正该有源的数字。
+_PERIOD_LOOKAHEAD = r"(?![\d]|\s*(?:日|天|周|月|年|个(?:交易日|月|星期|季度|点)|分钟|小时))"
 
 _NUMBER_RE = re.compile(
     r"(?<![\d.,])"
@@ -199,6 +220,43 @@ def scalar_values(items: Iterable[object]) -> tuple[float, ...]:
         if getattr(item, "is_numeric", False):
             out.append(float(item.value))
     return tuple(out)
+
+
+def textual_values(items: Iterable[object]) -> tuple[float, ...]:
+    """取证据的**字段名**与**文本正文**里出现的数值。
+
+    为什么需要这两个来源：模型会照抄证据的字段名（「候选1」「MA20」「T+3」），
+    也会引用文本证据的正文（候选行、新闻摘录）。只比对数值标量会把这两种
+    **正确引用**统统判成编造。
+
+    事故记录（`verifier.py` 的「候选1」条目）：真实模型写「候选1为智光电气，
+    得分 4247.71」，因为候选行是文本证据（标量集合为空），那个 `1` 被判成
+    凭空捏造，整条回答被拒两次、降级。
+
+    本函数把这条口径抽出来共用——此前强校验路径内联了一份、弱校验路径
+    （`fallback.verify_text`）**完全没有**，于是同一种假阳性只在弱路径残留。
+    """
+    out: list[float] = []
+    for item in items:
+        out.extend(tok.value for tok in extract_numbers(str(getattr(item, "field", "") or "")))
+        if not getattr(item, "is_numeric", False):
+            out.extend(tok.value for tok in extract_numbers(str(getattr(item, "value", ""))))
+    return tuple(out)
+
+
+def evidence_text(items: Iterable[object]) -> str:
+    """证据的字段名 + 文本正文（不含数值标量）。
+
+    用途：判断一句话里的**日期词**是不是在引用证据。实测（2026-09-22）：
+    证据字段名本身叫「相对当日开盘涨跌幅」，模型照抄字段名，校验器却把其中的
+    「当日」当成无源的日期断言 → 整轮降级。
+    """
+    parts: list[str] = []
+    for item in items:
+        parts.append(str(getattr(item, "field", "") or ""))
+        if not getattr(item, "is_numeric", False):
+            parts.append(str(getattr(item, "value", "") or ""))
+    return " ".join(parts)
 
 
 def flow_direction_conflict(text: str, evidence_value: float) -> str | None:

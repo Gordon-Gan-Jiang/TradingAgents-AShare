@@ -880,12 +880,14 @@ def build_tool_digest(registry: Any) -> str:
 
     ## 三条渲染规则（都由实测踩坑得出）
 
-    1. **不许截断掉用法提示**。全部 50 个工具里有 25 个的 `description` 带
+    1. **不许截断掉用法提示**。当时全部 50 个工具里有 25 个的 `description` 带
        "用于回答「…」"，其中 14 个落在第 60 字之后。旧实现取"第一行前 60 字"，
-       恰好把这些唯一的区分信息全砍了——模型只能看着 23 条几乎同义的
+       恰好把这些唯一的区分信息全砍了——模型只能看着那些几乎同义的
        "既有分析管道使用的数据工具 get_xxx"猜。
+       （本轮从工具面退役 8 个这类 vendor 工具后，工具面为 42 个；这条规则
+       因此更宽松了，但它仍是防止截断复现的约束，所以保留。）
     2. **必须标出分层**。L1 是"一个工具回答一个判断问题"，L2 只是取数原语。
-       不标分层，模型不知道 `signal_washout_probe` 与 `get_indicators` 不在一个
+       不标分层，模型不知道 `signal_washout_probe` 与 `get_balance_sheet` 不在一个
        抽象层级上，于是同一个问题既调判定又调它底下的原始数据。
     3. **判断类工具排在取数原语前面**。清单是有位置权重的：把"能直接回答"的
        L1 放前面、把同义的 vendor 取数工具压到最后，选择明显更稳。
@@ -1488,6 +1490,37 @@ def run_turn_streaming(
     """执行回合并落库。取消时按 cancelled 记账，不落为 completed。"""
     from tradingagents.agent.middleware import DEFAULT_MIDDLEWARE
 
+    # ── 相对日词的基准日**必须**在这里给上，否则「今天」永远校验不过 ──
+    #
+    # `_RELATIVE_TODAY`（今天/今日/当日/本日）与 `_RELATIVE_PREV`（昨天/昨日/
+    # 上一交易日…）在 `date_assertion_ok` 里的判据是：
+    #     relative == "today"    → reference_date in cited_as_of
+    #     relative == "previous" → previous_trading_day in cited_as_of
+    #
+    # 这两个参数此前**从来没在生产路径上给过值**（只有测试传），默认 None，
+    # 于是上面两条判断恒为 False：**任何**含相对日词的断言都必然 `unsourced_date`，
+    # 日期写得对不对完全不影响结果。生产库里实测到的原话：
+    #     日期断言 '今天' 不在本轮证据的 as_of [] 内
+    #     日期断言 '当日' 与所引证据的 as_of ['2026-09-22'] 不一致   ← 给了 as_of 照样失败
+    #
+    # 之所以杀伤面很大：`当日` 是**证据自己的字段名**的一部分（当日最高/当日最低/
+    # 当日涨幅/收盘位于当日区间位置），模型照字段名写就会踩中；而相对日词在 A 股
+    # 语境里几乎无处不在。这也解释了 `unsourced_date` 长期是轻档降级的头号原因
+    # （40 条轻档降级里 23 条）。
+    #
+    # 注意修的是**基准日缺失**，不是放宽校验：断言仍须落在所引证据的 as_of 里，
+    # 只是"今天"终于有了一个可被满足的定义。`request.as_of` 已是本轮的基准日
+    # （`body.as_of or cn_today_str()`）。
+    from tradingagents.dataflows.trade_calendar import previous_cn_trading_day
+
+    reference_date = request.as_of or None
+    try:
+        previous_trading_day = (
+            previous_cn_trading_day(reference_date) if reference_date else None
+        )
+    except Exception:  # noqa: BLE001 — 日历读不到不能拖垮整轮
+        previous_trading_day = None
+
     deps = deps or _TurnDeps(
         registry=build_registry(user_id),
         model=build_answer_model(
@@ -1495,6 +1528,8 @@ def run_turn_streaming(
         ),
         model_label=_resolve_model_label(user_id=user_id, body=body),
         clock=build_clock(),
+        reference_date=reference_date,
+        previous_trading_day=previous_trading_day,
         middleware=DEFAULT_MIDDLEWARE,
     )
 

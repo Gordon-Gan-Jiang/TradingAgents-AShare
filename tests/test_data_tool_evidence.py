@@ -102,10 +102,14 @@ def test_evidence_ids_are_unique_and_sequential(monkeypatch):
 
 
 def test_table_text_output_does_not_invent_evidence(monkeypatch):
-    """表格/散文型输出**不**硬编证据：错配的标签-数字比没有证据更糟。"""
+    """表格/散文型输出**不**硬编证据：错配的标签-数字比没有证据更糟。
+
+    样本从 `get_stock_data` 换成 `get_fundamentals`（在册的散文型工具，同样带
+    日期参数）；判据不变——非结构化文本不得凭空生成证据。
+    """
     table = "| 日期 | 开盘 | 收盘 |\n|---|---|---|\n| 2026-09-19 | 9.60 | 9.80 |\n"
-    spec = _tool("get_stock_data", monkeypatch=monkeypatch, rendered=table)
-    result = spec.handler(symbol="600519.SH", start_date="2026-09-01", end_date="2026-09-19")
+    spec = _tool("get_fundamentals", monkeypatch=monkeypatch, rendered=table)
+    result = spec.handler(ticker="600519.SH", curr_date="2026-09-19")
 
     assert result.evidence == (), "非结构化文本不得凭空生成证据"
     assert result.data.get("rendered") == table, "原始文本仍要保留（分析图依赖逐字一致）"
@@ -152,3 +156,45 @@ def test_evidence_count_is_bounded(monkeypatch):
     spec = _tool("get_zt_pool", monkeypatch=monkeypatch, rendered=rows)
     result = spec.handler(date="2026-09-19")
     assert len(result.evidence) <= 40, f"证据条数应受限，实际 {len(result.evidence)}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 「拿不到」不得被表述成「没有」——包括限流与代码自己的错误前缀
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_rate_limited_vendor_text_is_not_treated_as_data():
+    """实测（2026-09-22）`get_global_news` 的真实返回：
+
+        'Error fetching global news: Too Many Requests. Rate limited. Try after a while.'
+
+    上面这段既不是新闻、也不是"没有新闻"，而是**限流**。修复前它一个标记都不命中，
+    于是工具把它当有效数据交给模型、同时声明「该源可用」——比缺数据更糟：
+    模型可能把这段英文错误文本当成新闻内容来解读。
+    """
+    from tradingagents.tools.data import _looks_like_vendor_failure
+
+    assert _looks_like_vendor_failure(
+        "Error fetching global news: Too Many Requests. Rate limited. Try after a while."
+    )
+    assert _looks_like_vendor_failure("Error fetching news for AAPL: 429 Client Error")
+    assert _looks_like_vendor_failure("")
+
+
+def test_ordinary_market_text_is_still_data():
+    """标记不得宽到把正常返回误判成失败——误判会把有数据的工具变成"白跑"。
+
+    这类 bug 的方向性代价不对称：漏识别只是"少报一次失败"，
+    误识别则让**能用的数据被丢掉**，并把一次成功查询表述成数据源故障。
+    """
+    from tradingagents.tools.data import _looks_like_vendor_failure
+
+    for text in (
+        "贵州茅台(600519) 2026-09-22 收盘 1253.8 元，涨跌幅 0.35%",
+        "1. 002475.SZ 立讯精密 加入时间 2026-01-05",
+        "公司公告：拟以自有资金回购股份，金额不超过 5 亿元。",
+        "板块资金流：半导体净流入 12.3 亿元，位居第一",
+        "数据日期 2026-09-22｜金额单位 元（负数表示净流出）",
+        "【研报】算力需求旺盛，光模块厂商订单饱满。",
+    ):
+        assert not _looks_like_vendor_failure(text), f"正常数据被误判为失败：{text!r}"

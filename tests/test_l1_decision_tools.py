@@ -803,3 +803,24 @@ def test_all_five_tools_share_the_same_l1_discipline():
         assert 5000 <= spec.latency_budget_ms <= 15000, name
         assert len(spec.freshness_sources) == 1, name
         assert spec.asynchronous is False, name
+
+
+def test_outcome_lookup_with_no_records_says_not_yet_backfilled():
+    """**「尚无回填」与「读取失败」必须能分辨**（与 trade_ledger 同一条纪律）。
+
+    空表是当前的真实状态（`signal_verdict_outcomes` 0 行），所以这不是假想情形：
+    用户问"上次那个判定兑现了吗"，正确答案是"尚无已回填的兑现记录"，
+    而不是"取不到"，更不是"没有兑现"——"尚未成熟"与"已经失效"是两件事。
+    """
+    from api.services import chat_service
+
+    uid = "outcome-empty-owner"
+    _seed_verdict(uid, "600519.SH", hours_ago=1)  # 有判定，但没有兑现行
+
+    registry = chat_service.build_registry(user_id=uid)
+    result = registry.invoke("verdict_outcome_lookup", limit=10)
+
+    assert result.data["count"] == 0
+    joined = " ".join(result.coverage.unavailable)
+    assert "尚无已回填" in joined, "必须说清是「还没回填」，不能只说取不到"
+    assert result.coverage.available, "没有兑现行不等于数据源不可用"

@@ -567,13 +567,18 @@ def test_model_failure_still_delivers_the_scan_list(monkeypatch):
     assert "ErrorEvent" in resp.text, "模型失败仍要如实告知原因"
 
 
-def test_screen_prompt_shows_evidence_values():
-    """筛选回合的提示词必须给出证据**数值**。
+def test_prompt_shows_evidence_values_in_every_turn():
+    """提示词必须给出证据**数值**——筛选回合与判定回合都一样。
 
     实测（真实模型 deepseek-v4-flash）：只给字段名时，模型写出的解读两次被
     校验器拒绝（`unsourced_number`）——它看不到数值，只能凭空写数字。
     原设计「只给字段名、不让模型复述数值」是为**判定解释**服务的；筛选任务的
     数字本身就是内容，且表格已由代码渲染，把数值给模型只是让它能正确引用。
+
+    **判定回合原本维持"只给字段名"，本轮一并改掉**：生产库统计显示通用路径
+    同样在踩 `unsourced_number`（19 条：轻档 13 / 中档 6），而中档**修复后
+    仍有 6 条**——修复救不回来，必须在首答就给足信息。原设计的前提是"复述会
+    引入错误"，实测更糟的是"看不见就只能编"。校验器照旧逐条核对，安全性不降。
     """
     from tradingagents.agent.loop import TurnRequest, _build_prompt
     from tradingagents.agent.middleware import TurnContext
@@ -592,15 +597,17 @@ def test_screen_prompt_shows_evidence_values():
     )
     assert "002169.SZ" in prompt, "候选代码要给到模型，否则它无法正确引用"
     assert "4247.71" in prompt or "4247.7" in prompt, "得分要给到模型"
-    assert "scan" not in prompt.lower() or True  # 仅作可读性占位
 
-    # 非筛选回合维持原样：只给字段名，避免模型复述数值
+    # 判定回合**同样**给取值（本轮改动的重点，见上面的 docstring）
     plain = _build_prompt(
         TurnRequest(text="贵州茅台是不是在洗盘", user_id="u1", symbol="600519.SH", tier="medium"),
         evidence,
         ctx,
     )
-    assert "4247.71" not in plain, "判定回合不应把数值喂给模型（原设计保持不变）"
+    assert "4247.71" in plain or "4247.7" in plain, (
+        "判定回合也必须给数值：只给字段名时模型写的数字无源可查，"
+        "校验器一律判 unsourced_number，且修复那一轮同样看不见数值"
+    )
 
 
 def test_screen_plan_arguments_pass_registry_validation():

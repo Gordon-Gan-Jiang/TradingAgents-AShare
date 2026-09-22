@@ -403,6 +403,28 @@ def test_trade_ledger_no_trades_is_declared_not_zero_pnl():
     assert result.coverage.unavailable, "没有流水必须声明，不能报成「盈亏 0」"
 
 
+def test_trade_ledger_no_trades_keeps_the_source_available():
+    """**「你没录入」与「数据源坏了」必须能分辨**。
+
+    两个分支的 `unavailable` 都非空，所以只看"有没有声明"是分不出来的：
+    * 没有流水（本用例）：`available` 含源键、**不 degraded** —— 工具是好的，
+      只是用户还没有流水；模型该说"尚未录入"，不该说"取不到"。
+    * 读取失败（见下一条用例）：`available` 为空、`degraded=True` —— 真取不到。
+
+    这层区分是产品语义：把"没有记录"讲成"数据源故障"会让用户以为平台坏了，
+    反过来把"故障"讲成"没有记录"会让用户以为自己没录。空表是当前的真实状态
+    （`trade_ledger` 0 行），所以这条不是假想。
+    """
+    spec = _ledger_tool(
+        _FakeLedgerPort({"summary": dict(LEDGER["summary"], trade_count=0), "trades": []})
+    )
+    result = spec.handler(limit=10, as_of="2026-09-21")
+
+    assert result.coverage.available, "没有任何流水不等于数据源不可用"
+    assert result.degraded is False, "空表不是故障，不得标降级"
+    assert "没有已录入" in " ".join(result.coverage.unavailable), "必须说清是「尚未录入」"
+
+
 def test_trade_ledger_failure_and_unparsable_paths():
     failing = _ledger_tool(_FakeLedgerPort(error=RuntimeError("ledger locked")))
     result = failing.handler(limit=10)

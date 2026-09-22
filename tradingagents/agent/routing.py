@@ -78,6 +78,14 @@ FACTUAL_TOOL_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     # 这一层不是可选的——带代码的问句一定能解析出标的，于是永远走不到规划层
     # （规则优先的代价），只能靠这张表选工具。表里没有 = 那个工具对这类问句
     # 根本不可选，"封了但用不上"。
+    #
+    # 反向的一次整理（本轮）：三个**已从工具面退役**的工具（`get_cashflow` /
+    # `get_indicators` / `get_lhb_detail`）的入口已从这里摘掉，各自的理由就地写在
+    # 摘除处。读到这里请分清两种"表里没有"：
+    #   * **退役**——能力被有意摘除（数字不可引用），对应问句现在**没有落点**，
+    #     见 `RETIRED_CAPABILITY_HINTS`，正确行为是弃权；
+    #   * **遗忘**——能力存在却没有入口，上面那句"封了但用不上"说的就是它。
+    # 两者不能混为一谈：前者补一条规则是错的（会把问题指向别的工具），后者才是 bug。
     (("筹码", "集中度", "获利比例", "平均成本"), "chip_distribution_read"),
     (("分时", "承接", "尾盘", "盘口"), "intraday_bars_read"),
     # "读既有的报告结论"是 L1 工具，不是重档管道：重档判定（`_requests_report_generation`）
@@ -95,26 +103,62 @@ FACTUAL_TOOL_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("净流入", "净流出", "主力", "资金流"), "capital_flow_read"),
     (("市盈率", "市净率", "估值", "基本面", "每股", "营收", "净利润"), "get_fundamentals"),
     (("资产负债", "负债率"), "get_balance_sheet"),
-    (("现金流",), "get_cashflow"),
+    # 此处曾有 `(("现金流",), "get_cashflow")`。**该工具已从工具面退役**（不是遗漏）：
+    # 它返回预格式化散文、`evidence=()`，取到的数字无法被校验器引用。见
+    # `RETIRED_CAPABILITY_HINTS`——退役能力的问句现在返回「没有落点」而不是兜底到
+    # 另一个工具。
     (("利润表", "营业利润", "毛利率"), "get_income_statement"),
     (("新闻", "公告", "消息面"), "data_symbol_news"),
-    (("macd", "kdj", "rsi", "均线", "金叉", "死叉", "技术指标"), "get_indicators"),
-    (("龙虎榜",), "get_lhb_detail"),
+    # 此处曾有 `(("macd", "kdj", "rsi", "均线", "金叉", "死叉", "技术指标"), "get_indicators")`。
+    # `get_indicators` **已从工具面退役**（同上）。**刻意不指向洗盘探针**：探针答的是
+    # "洗盘还是派发"，拿它回答"MACD 金叉了吗"就是拿另一个问题的结论冒充这个问题的答案。
+    # 此处曾有 `(("龙虎榜",), "get_lhb_detail")`。`get_lhb_detail` **已从工具面退役**；
+    # 也不改指 `get_zt_pool`（涨停池 ≠ 龙虎榜）。
     (("涨停",), "get_zt_pool"),
     (("板块", "行业涨幅"), "get_board_spot"),
 )
 
+# ── 已退役能力：规则层必须能说「没有落点」────────────────────────────────
+#
+# 上表摘掉的三条入口对应三个**已从工具面退役**的工具（见 `tools/data.py`）。
+# 摘掉入口是必须的，但**只摘入口还不够**：规则层若返回 `None`，执行层的
+# `DEFAULT_*` 兜底会顶上，于是用另一个问题的数据回答这个问题。实测（注册表摘掉
+# 这 8 个工具之后、规则表摘掉之前）：
+#
+#     '今天龙虎榜有多少只' → tier=light market_level=True planned=['get_board_spot']
+#     '600519 的现金流是多少' → tier=light planned=['get_realtime_quotes']
+#
+# 用户问龙虎榜，平台答板块行情——**比诚实说"数据未覆盖"糟得多**。因此这里显式
+# 登记"已退役能力"的问句标记：命中且没有别的活规则匹配时，规则层返回
+# `NO_FACTUAL_TOOL`，由执行层落成**空计划**，回答层如实报"数据未覆盖"。
+#
+# 为什么不 redirect：把「MACD」指到洗盘探针、把「龙虎榜」指到涨停池，都是在拿另
+# 一个问题的答案冒充这个问题的答案。**没有落点的正确形态是弃权。**
+RETIRED_CAPABILITY_HINTS: tuple[str, ...] = (
+    # get_cashflow（现金流）——资金流是另一件事，`capital_flow_read` 已在上面接住
+    # 「净流入/主力/资金流」，这里刻意**不含**这些词。
+    "现金流",
+    # get_indicators（技术指标）
+    "macd", "kdj", "rsi", "均线", "金叉", "死叉", "技术指标",
+    # get_lhb_detail（龙虎榜）
+    "龙虎榜",
+)
+
+# 规则层的「本平台没有能回答它的工具」。空串不是合法工具名，因此永远不会被
+# 误当成注册表里的条目；执行层见到它必须**不做兜底替换**。
+NO_FACTUAL_TOOL = ""
+
 # 这些工具需要代码作为参数；无标的的问句只能用市场级工具
+#
+# 已退役的 4 个（`get_stock_data` / `get_indicators` / `get_cashflow` /
+# `get_individual_fund_flow`）不在此列——它们已不在工具面上。**登记本身是强制的**：
+# 漏登记的后果不是"选不出来"，而是无标的的问句也能选中它，然后必然失败。
 SYMBOL_REQUIRED_TOOLS: frozenset[str] = frozenset(
     {
         "get_realtime_quotes",
-        "get_stock_data",
-        "get_indicators",
         "get_fundamentals",
         "get_balance_sheet",
-        "get_cashflow",
         "get_income_statement",
-        "get_individual_fund_flow",
         "data_symbol_news",
         "get_hot_stocks_xq",
         # 本轮新增的三条按标的取数的证据工具。**必须登记**：漏登记的后果不是
@@ -134,9 +178,12 @@ SYMBOL_REQUIRED_TOOLS: frozenset[str] = frozenset(
 # `index_quote_read` 只需要 `as_of`（不需要代码），所以它在无标的时是合法落点。
 # 不登记它的后果是「今天上证指数多少点」被判成"用户没说清楚"而追问代码——
 # 平台明明查得到指数点位。
+#
+# `get_lhb_detail` 已从这里移除：它**已从工具面退役**。这不是"忘了登记"——
+# 退役后无标的的龙虎榜问句**没有落点**，由 `RETIRED_CAPABILITY_HINTS` 显式声明，
+# 正确形态是如实报"数据未覆盖"，而不是拿板块行情去顶。
 MARKET_LEVEL_TOOLS: tuple[str, ...] = (
     "get_zt_pool",
-    "get_lhb_detail",
     "get_board_spot",
     "get_global_news",
     "index_quote_read",
@@ -193,11 +240,23 @@ def build_factual_arguments(
     return args
 
 
+def _is_retired_capability_question(lowered: str, text: str) -> bool:
+    """问句问的是一件**已从工具面退役**的能力（现金流的绝对值 / 技术指标 / 龙虎榜）。"""
+    return any(
+        hint in lowered or hint in text for hint in RETIRED_CAPABILITY_HINTS
+    )
+
+
 def plan_factual_tool(text: str, *, has_symbol: bool) -> str:
     """选一个便宜的数据工具。规则优先，零 LLM。
 
     无标的时**绝不**选需要代码的工具：那是一次注定失败的调用，还会让回答
     看起来"查过了但没有数据"，比不查更误导。
+
+    返回 `NO_FACTUAL_TOOL`（空串）表示**本平台没有能回答它的工具**——该能力
+    已从工具面退役，且没有等价的活工具。这与"规则没匹配上"必须分开：后者才该
+    落到 `DEFAULT_*` 兜底。执行层见到空串**不做兜底替换**，而是落成空计划让
+    回答层如实报"数据未覆盖"。
     """
     lowered = (text or "").lower()
     matched: str | None = None
@@ -206,23 +265,34 @@ def plan_factual_tool(text: str, *, has_symbol: bool) -> str:
             matched = tool
             break
 
-    if has_symbol:
-        return matched or DEFAULT_FACTUAL_TOOL
-    if matched and matched not in SYMBOL_REQUIRED_TOOLS:
-        return matched
-    return DEFAULT_MARKET_TOOL
+    if matched is not None:
+        if has_symbol:
+            return matched
+        return matched if matched not in SYMBOL_REQUIRED_TOOLS else DEFAULT_MARKET_TOOL
+
+    # 没有活规则匹配。这里先问一句"是不是问了一件已退役的能力"：
+    # 是 → 没有落点（弃权）；不是 → 走既有的最泛兜底（"600519 怎么样" → 报价）。
+    if _is_retired_capability_question(lowered, text or ""):
+        return NO_FACTUAL_TOOL
+
+    return DEFAULT_FACTUAL_TOOL if has_symbol else DEFAULT_MARKET_TOOL
 
 
 def looks_like_market_level_factual(text: str) -> bool:
     """无标的的**市场级事实**问句（「今天涨停板有多少只」）。
 
     这类问句此前只有一个落点：全市场筛选（且要先过筛选标记词），否则直接 400
-    追问"请输入代码"。而平台本就有涨停池/龙虎榜/板块这些**不需要标的**的工具，
+    追问"请输入代码"。而平台本就有涨停池/板块/全局新闻这些**不需要标的**的工具，
     让用户为一句"涨停板有多少只"去补一个代码，是把平台的能力藏起来。
 
     判据刻意收窄：必须命中轻档事实标记，且**不需要标的**的工具确实存在。
     这样"今天大盘怎么样""现在市场情绪如何"仍不会被误放进流程——它们需要的是
     P2 才有的主线/情绪工具，今天放进来只会答"无可用证据"。
+
+    退役能力造成的"无落点"（`NO_FACTUAL_TOOL`）同样算这一档，但**不是**因为
+    "有工具可答"：它是无标的的市场级问句，必须走这条路才能同时避开两个错误——
+    走追问分支会为一句"龙虎榜有多少只"去要股票代码，走 `DEFAULT_*` 兜底会拿
+    板块行情来答。落成市场级回合 + 空计划后，回答层如实报"数据未覆盖"。
     """
     t = (text or "").strip()
     if not t:
@@ -231,7 +301,10 @@ def looks_like_market_level_factual(text: str) -> bool:
         return False
     if not any(marker in t for marker in _LIGHT_MARKERS):
         return False
-    return plan_factual_tool(t, has_symbol=False) in MARKET_LEVEL_TOOLS
+    planned = plan_factual_tool(t, has_symbol=False)
+    if planned == NO_FACTUAL_TOOL:
+        return True
+    return planned in MARKET_LEVEL_TOOLS
 
 
 @dataclass(frozen=True)

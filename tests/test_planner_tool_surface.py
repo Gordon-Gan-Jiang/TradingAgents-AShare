@@ -6,7 +6,7 @@
 本轮排查发现跑分链路有两处系统性偏差，都会让"规划器乱调工具"这个结论失真：
 
 1. **规划器与执行层看到的不是同一份工具面。**
-   `build_planner()` 用生产注册表（50 个工具）构造提示词，而黄金集 harness 用哑
+   `build_planner()` 用生产注册表（当时 50 个工具；本轮退役 8 个后为 42 个）构造提示词，而黄金集 harness 用哑
    依赖装配了 26 个。规划器选中一个只在生产注册表里的 L1 工具（例如
    `report_consensus_read`）时，`_plan_tools` 会因为"未在册"把它**丢掉**。
    于是观测到的工具集合 ≠ 规划器的真实选择——精度与召回都测在一个被截断的
@@ -117,8 +117,9 @@ def test_digest_labels_every_tool_with_its_layer():
     """摘要必须标出工具面分层。
 
     L1 是"一个工具回答一个判断问题"，L2 只是取数原语。不标分层，模型无从知道
-    `signal_washout_probe` 与 `get_indicators` 不在一个抽象层级上，就会同一个问题
+    `signal_washout_probe` 与 `get_balance_sheet` 不在一个抽象层级上，就会同一个问题
     既调判定又调它底下的原始数据——多调工具的典型形态。
+    （这里原先是拿 `get_indicators` 举例；它**已从工具面退役**，例子换成一个仍在册的 L2 工具。）
     """
     registry = chat_service.build_registry("golden")
     digest = chat_service.build_tool_digest(registry)

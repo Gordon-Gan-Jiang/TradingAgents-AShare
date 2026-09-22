@@ -57,6 +57,18 @@ class Completion:
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+# 静态系统规则。注意 JSON 模板里 `verdict_ref` 是 **null**，不是某个示例 id。
+#
+# 它原本写成 `"verdict_ref": "V1"`——一个**看起来像真实取值**的占位符，同时又有一条
+# 动态指令说"必须填 <真实 id>"。于是同一条提示词里出现两个互相冲突的值，而模板还被
+# "输出必须是严格的 JSON，不要输出其它内容"这句推着照抄。校验器只接受本轮的真实判定
+# id（`grounding/verifier.py` 的 `verdict_ref not in verdict_ids`），照抄模板就是
+# `verdict_ref_not_from_turn`——这正是修复后残余降级里反复出现的那一项。
+#
+# 为什么选 null 而不是"请填真实 id"之类的说明文字：null 在**两种情况下都安全**
+# （有判定时由下方动态行补上真实 id；无判定时校验器直接跳过这条检查），
+# 而任何"像取值的占位符"在两种情况下都可能被照抄。占位符的默认值应当是
+# **安全的那一侧**，不是看起来最像样例的那一侧。
 _SYSTEM_RULES = """你是一名 A 股投研助手。你必须遵守以下规则，违反会导致回答被系统拒绝：
 
 1. 每条结论都必须携带证据编号引用（形如 [E1]），不得引用不存在的编号。
@@ -69,7 +81,7 @@ _SYSTEM_RULES = """你是一名 A 股投研助手。你必须遵守以下规则�
 {
   "summary": "一句话结论",
   "claims": [{"text": "带数值的断言", "refs": ["E1"]}],
-  "verdict_ref": "V1",
+  "verdict_ref": null,
   "unavailable": ["维度名"],
   "falsifier_observed": null
 }"""
@@ -164,6 +176,16 @@ class LlmAnswerModel:
                 f"- 失效条件：{'；'.join(verdict.falsifiers) or '（无）'}",
                 f"- 数据未覆盖：{'、'.join(verdict.unavailable) or '（无）'}",
                 f"你必须在 verdict_ref 中填 \"{verdict.id}\"。",
+            ]
+        else:
+            # 没判定时必须**明说**该字段留空。上面那段静态模板里
+            # 只有 `"verdict_ref": null`，而模型很容易顺手填上一个不存在的引用。
+            # 校验器只在 `verdict_ref is not None` 时才核对（见 grounding/verifier.py），
+            # 所以"留空"永远安全，"编一个"永远失败——这层不对称要直接告诉模型。
+            lines += [
+                "",
+                "## 本轮无探针判定",
+                "verdict_ref 必须为 null，不得编造判定引用。",
             ]
         return "\n".join(lines)
 

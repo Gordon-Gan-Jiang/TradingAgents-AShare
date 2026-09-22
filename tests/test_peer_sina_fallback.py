@@ -112,3 +112,41 @@ def test_unknown_symbol_returns_none(monkeypatch, tmp_path):
     assert mod.fetch_peer_frames("999999.SH", "2026-09-19") is None, (
         "找不到所属行业时必须诚实返回 None，而不是猜一个板块"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 供应商**抛异常**时也必须守住「三元组或 None」契约
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_both_providers_failing_returns_none_not_an_exception(monkeypatch):
+    """EM 与新浪**都抛异常**时，必须返回 None。
+
+    这里原本有一处不对称：EM 分支包了 try/except（注释写明"东财被封是常态"），
+    而新浪兜底是**裸调用**。新浪一旦抛（断连、限流、字段变更都见过），异常就会
+    穿出 `fetch_peer_frames`，调用方拿到的是异常而不是 None——"相对强度拿不到"
+    于是升级成"这个工具坏了"。
+
+    `fetch_stock_turnover` 的 `stock_individual_info_em` 调用是同一个毛病，
+    同一轮一起修了。
+    """
+    from tradingagents.dataflows.providers import cn_research_data as m
+
+    monkeypatch.setattr(m, "_fetch_peer_frames_via_em", lambda *a, **k: (_ for _ in ()).throw(Exception("EM 被封")))
+    monkeypatch.setattr(m, "_peer_frames_via_sina", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("新浪断连")))
+
+    assert m.fetch_peer_frames("600519.SH", "2026-09-22") is None
+
+
+def test_em_half_result_plus_sina_failure_returns_none(monkeypatch):
+    """EM 返回 `(None, None, None)` 半成品、新浪又抛异常时，同样返回 None。
+
+    EM 路径**内部吞异常**，所以"拿不到行业"会表现为一个半成品元组；那种形状
+    必须退新浪，新浪也失败就只能是 None——不能把半成品当"取到了"。
+    """
+    from tradingagents.dataflows.providers import cn_research_data as m
+
+    monkeypatch.setattr(m, "_fetch_peer_frames_via_em", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(m, "_peer_frames_via_sina", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("新浪断连")))
+
+    assert m.fetch_peer_frames("600519.SH", "2026-09-22") is None

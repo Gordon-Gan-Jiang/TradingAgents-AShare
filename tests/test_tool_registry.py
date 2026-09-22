@@ -351,10 +351,32 @@ def test_batch_tool_ranks_by_evidence_strength():
 # 不变量：不存在「未注册」的工具定义
 # ══════════════════════════════════════════════════════════════════════════
 
-# 迁移已完成（组 4 的 4.4/4.5/4.7/4.11）：19 个既有分析师工具已登记入册，
-# 因此豁免名单**清空**。保留一个空集合是刻意的——它让「新增豁免」成为一个
-# 需要显式修改此处的动作，而不是让扫描「顺便看不到」。隐式豁免等于没有护栏。
-LEGACY_ANALYST_TOOLS: frozenset[str] = frozenset()
+# 迁移已完成（组 4 的 4.4/4.5/4.7/4.11）：19 个既有分析师工具已登记入册。
+#
+# **本轮（退役 8 个 vendor 工具）重新引入的豁免**——正如上面那段话预期的：这是一次
+# 显式的代码改动，应当被 review 看到。豁免的 8 个**不是遗漏，而是刻意的退役**：
+#
+#   * 它们返回预格式化中文散文、`evidence=()`，取到的数字无法被校验器引用
+#     （"没有证据就没有回答"）；41 轮真实对话里规划层一次也没选中过它们。
+#   * 因此从**工具面**（ToolSpec 注册表：对话 Agent / MCP / 规划器共用）摘掉。
+#   * 但**分析图仍在用**（7 分析师管道 + `tradingagents/agents/utils/*_tools.py`），
+#     所以 `@tool` 保留、`data_tool_impl` 仍能解析它们的声明。删掉会让分析图在
+#     调用时抛 `KeyError`——"退役"不等于"让分析图取不到数"。
+#
+# 换句话说：这 8 个名字出现在这里，是在说"它存在，但**故意**不在工具面上"。
+# 任何**新增**的未注册 `@tool`（不在这份名单里）仍然是 D1 违规，测试会红。
+LEGACY_ANALYST_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_stock_data",
+        "get_indicators",
+        "get_cashflow",
+        "get_news",
+        "get_insider_transactions",
+        "get_board_cons",
+        "get_individual_fund_flow",
+        "get_lhb_detail",
+    }
+)
 
 
 def _langchain_tool_functions():
@@ -394,19 +416,57 @@ def test_every_langchain_tool_is_registered_or_explicitly_exempt():
     }
     assert not unregistered, (
         f"发现未注册的 @tool 定义: {unregistered}。"
-        "新增工具必须注册进 ToolRegistry，或加入 LEGACY_ANALYST_TOOLS 并说明迁移计划。"
+        "新增工具必须注册进 ToolRegistry，或加入 LEGACY_ANALYST_TOOLS——"
+        "后者只允许用于**已从工具面退役、但分析图仍在用**的工具，并要写清理由。"
     )
 
 
-def test_legacy_exemption_list_is_empty_after_migration():
-    """迁移后豁免名单必须为空：所有 `@tool` 都已在注册表中。
+def test_legacy_exemption_list_holds_exactly_the_retired_tools():
+    """豁免名单**恰好**是那 8 个已退役工具，一个不多一个不少。
 
-    留一个空集合而不是删掉这个常量，是为了让「重新引入豁免」成为一次显式的
-    代码改动——那正是需要被 review 看到的动作。
+    原来这条断言是 `LEGACY_ANALYST_TOOLS == frozenset()`（迁移刚完成时豁免确实为空）。
+    本轮从工具面退役 8 个工具，豁免因此被**显式**重新引入——这正是那个空集合
+    "为了让重新引入成为一次显式改动"的设计意图。
+
+    为什么要断言"恰好等于"而不是"包含"：豁免名单是护栏上唯一的缺口。缺口必须
+    有边界，否则它会缓慢变成"所有未注册工具的收容所"，而 D1 就名存实亡了。
     """
-    assert LEGACY_ANALYST_TOOLS == frozenset()
+    assert LEGACY_ANALYST_TOOLS == frozenset(
+        {
+            "get_stock_data",
+            "get_indicators",
+            "get_cashflow",
+            "get_news",
+            "get_insider_transactions",
+            "get_board_cons",
+            "get_individual_fund_flow",
+            "get_lhb_detail",
+        }
+    ), "豁免名单只能有这 8 个已退役工具"
+
     actual = set(_langchain_tool_functions())
+    # 19 个既有 @tool **全部仍在**（退役只摘工具面，不动分析图）
     assert len(actual) == 19, f"既有 @tool 数量应为 19，实际 {len(actual)}"
+
+    # 豁免的每个名字都必须真的对应一个 `@tool` 定义——名单里不许留幽灵
+    ghosts = sorted(LEGACY_ANALYST_TOOLS - actual)
+    assert not ghosts, f"豁免名单里的 @tool 根本不存在: {ghosts}"
+
+
+def test_retired_tools_are_registered_in_neither_layer():
+    """退役的工具在**任何**注册表里都不该出现（含注入了端口的组合根）。
+
+    只检查"默认装配"是不够的：那 8 个是 vendor 数据工具，本来就不依赖注入端口，
+    真正需要防的是有人日后把它们重新注册回工具面。
+    """
+    from tradingagents.tools import build_registry
+
+    registry = build_registry()
+    present = sorted(n for n in LEGACY_ANALYST_TOOLS if registry.get(n) is not None)
+    assert not present, (
+        f"这些工具已从工具面退役，却又被注册回来了：{present}。"
+        "它们返回散文、evidence=()，数字无法被引用；重新注册前先解决证据问题。"
+    )
 
 
 def test_composition_root_registers_signal_tools():
@@ -427,6 +487,7 @@ def test_registry_without_ports_factory_still_has_data_tools():
     from tradingagents.tools import build_registry
 
     names = set(build_registry().names())
-    assert "get_stock_data" in names
+    # 用 `get_fundamentals` 当样本：`get_stock_data` 已从工具面退役（不在册）。
+    assert "get_fundamentals" in names
     assert "signal_washout_probe" not in names
     assert "data_symbol_news" not in names

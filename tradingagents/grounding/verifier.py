@@ -22,13 +22,16 @@
 from __future__ import annotations
 
 import re
+from typing import Iterable
 
 from .numbers import (
     date_assertion_ok,
+    evidence_text,
     extract_dates,
     extract_numbers,
     flow_direction_conflict,
     matches_any,
+    textual_values,
 )
 from .types import CheckResult, Coverage, EvidenceItem, EvidenceSet, StructuredAnswer
 
@@ -52,6 +55,53 @@ _INSTRUMENT_RE = re.compile(r"(?<!\d)(\d{6})(?:\.(?:SH|SZ|SS))?(?!\d)", re.IGNOR
 def _instruments(text: str) -> set[str]:
     """抽取断言中提到的股票代码（归一为 6 位裸代码）。"""
     return {match.group(1) for match in _INSTRUMENT_RE.finditer(text or "")}
+
+
+# 只有**字段名本身表示资金流方向**的证据才有资格用来判方向。
+#
+# 中英并存是必须的：证据字段既可能是中文（`evidence.py` 里
+# `("主力净流入", facts["main_net_inflow"], "yuan")`），也可能是英文
+# （原始资金流帧的 `capital_composition.main_net_inflow`）。只认中文会让
+# 英文命名路径的方向护栏**静默失效**——`test_flow_direction_conflict_is_rejected`
+# 用的正是英文 fixture，第一次实现时就漏了这个。
+_FLOW_FIELD_WORDS = ("流入", "流出", "inflow", "outflow")
+
+
+def _flow_conflict_over(claim_text: str, items: Iterable[EvidenceItem]):
+    """在**方向语义相关**的证据里找方向冲突，返回 `(说明, 命中的证据)`。
+
+    ## 为什么必须把方向判定锚定到字段名（实测假阳性，2026-09-22）
+
+    方向检查此前对**每一个**匹配到的数值都做一遍，于是价格、成交量这类与资金流
+    无关的指标也被拿去判方向。确定性复现：
+
+        断言：'主力净流出 3200万，收盘价 1253.8 元'
+        证据：E1 主力净流出 = -32000000 yuan（方向与文本**一致**）
+              E2 收盘价     =  1253.8     yuan
+        结果：ok=False，reason=flow_direction_conflict
+              detail=text says outflow but evidence value is positive（证据 E2=1253.8 yuan）
+
+    这条断言**一个错都没有**——数字都有源、方向也一致——却被判冲突，理由还是
+    拿「收盘价」去判资金流。也就是说：**任何同时提到资金流向词与任一正值指标的
+    断言都会被误杀**，而「主力净流出 X 万，股价 Y 元」正是投研文本的常见句式。
+    这与本会话修过的其他几例同属一类：校验器把**无关的证据**当成了断言的依据。
+
+    ## 为什么还要看值是不是数字
+
+    文本证据（口径说明、公告摘录）的 value 是字符串，`float()` 会抛错；
+    只对真正带数值的证据判方向。
+    """
+    for item in items:
+        field = str(getattr(item, "field", "") or "")
+        if not any(word in field for word in _FLOW_FIELD_WORDS):
+            continue
+        value = getattr(item, "value", None)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        conflict = flow_direction_conflict(claim_text, float(value))
+        if conflict:
+            return conflict, item
+    return None
 
 
 def _check_claim(
@@ -90,15 +140,9 @@ def _check_claim(
     # 事故记录：真实模型照抄字段名「候选1」写「候选1为智光电气，得分 4247.71」，
     # 因为候选行是文本证据（标量集合为空），那个 `1` 被判成凭空捏造，整条回答
     # 被拒两次、降级成"说明缺什么"。误判会命中任何带数字的字段名与所有文本证据。
-    label_numbers: list[float] = []
-    text_numbers: list[float] = []
-    for item in cited:
-        label_numbers.extend(
-            tok.value for tok in extract_numbers(str(getattr(item, "field", "") or ""))
-        )
-        if not item.is_numeric:
-            text_numbers.extend(tok.value for tok in extract_numbers(str(item.value)))
-    textual_numbers = tuple(label_numbers + text_numbers)
+    # 口径由 `numbers.textual_values` 定义，弱校验路径（`fallback.verify_text`）
+    # 用的是**同一个** helper——此前两边各写一份，结果强路径修了、弱路径漏了。
+    textual_numbers = textual_values(cited)
 
     for token in extract_numbers(claim_text):
         matched = False
@@ -125,14 +169,6 @@ def _check_claim(
                 allow_scale_variants=allow_scale,
             ):
                 continue
-            conflict = flow_direction_conflict(claim_text, float(item.value))
-            if conflict:
-                return CheckResult.rejected(
-                    REASON_DIRECTION_CONFLICT,
-                    failing_claim=claim_text,
-                    detail=f"{conflict}（证据 {item.id}={item.value} {item.unit}）",
-                    refs_available=evidence.ids(),
-                )
             matched = True
             break
         if not matched:
@@ -147,10 +183,41 @@ def _check_claim(
                 ),
                 refs_available=evidence.ids(),
             )
+        # 数值确认有源**之后**才判方向，且锚定**字段名**（不是单位）：
+        # 放在这里而不是数值分支内部，是为了让「非数值单位」的资金流证据
+        # 也走得到护栏——它由文本口径匹配，进不了上面那个 `is_numeric` 循环。
+        # 判定口径见 `_flow_conflict_over` 的假阳性记录。
+        conflicted = _flow_conflict_over(claim_text, cited)
+        if conflicted is not None:
+            conflict, flow_item = conflicted
+            return CheckResult.rejected(
+                REASON_DIRECTION_CONFLICT,
+                failing_claim=claim_text,
+                detail=(
+                    f"{conflict}（证据 {flow_item.id}={flow_item.value} "
+                    f"{flow_item.unit}，字段「{flow_item.field}」）"
+                ),
+                refs_available=evidence.ids(),
+            )
 
     # ── 日期 ────────────────────────────────────────────────────────────
     cited_as_of = evidence.as_of_of(refs)
+    # 与上面数值分支**同一个道理**（见「事故记录」）：日期词出现在所引证据的
+    # 字段名或文本正文里时，模型是在**引用**，不是在断言一个日期。
+    #
+    # 实测（2026-09-22，真实降级，`intraday_bars_read`）：证据字段名本身就叫
+    # 「相对当日开盘涨跌幅」「当日最高」「当日最低」，模型照抄字段名写出
+    # 「截至 2026-09-22，收盘价为 1253.8 元，相对当日开盘涨跌幅为 0.131773 pct」，
+    # 校验器把其中的「当日」当成日期断言判无源 → 整轮降级。
+    # 模型因为**正确引用证据**而被罚——与「候选1」那次是同一种假阳性，
+    # 数值分支修了，日期分支漏了。
+    #
+    # 取值来源与数值分支对齐：字段名总是算，文本证据的正文算；
+    # 数值证据的 value 是标量，不带日期，其日期在 `as_of` 里（照旧走 as_of 规则）。
+    cited_text = evidence_text(cited)
     for assertion in extract_dates(claim_text):
+        if assertion.raw and assertion.raw in cited_text:
+            continue
         if not date_assertion_ok(
             assertion,
             cited_as_of,

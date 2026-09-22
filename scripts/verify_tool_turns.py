@@ -107,32 +107,36 @@ CASES: tuple[Case, ...] = (
     # 这正是要量出来的东西。其中几个与新的 L2 工具语义重叠
     # （get_individual_fund_flow vs capital_flow_read），此时新工具是更好的落点：
     # 旧工具返回预格式化文本、`evidence=()`，取到数也无法被引用。
-    Case("get_stock_data", "600519 最近的日K线走势怎么样",
-         alternates=("get_realtime_quotes", "intraday_bars_read", "signal_washout_probe"),
-         may_abstain=True, note="日线数据（无规则入口）"),
-    Case("get_indicators", "600519 的 MACD 金叉了吗",
-         alternates=("signal_washout_probe",), note="技术指标（有规则入口）"),
+    #
+    # ⚠️ **本轮：8 个工具已从工具面退役，因此不再作为 Case 的期望。**
+    #
+    # `get_stock_data` / `get_indicators` / `get_cashflow` / `get_news` /
+    # `get_insider_transactions` / `get_board_cons` / `get_individual_fund_flow` /
+    # `get_lhb_detail` 已摘出 ToolSpec 注册表（对话 Agent / MCP / 规划器共用的
+    # 那一份）。它们**不可能**再被选中，把它们留成期望值是假的失败来源。
+    #
+    # 退役后可引用的落点已就地换成新工具（在下面各条 `alternates` 里）。
+    # "退役能力的问句必须如实弃权、不许被兜底到别的工具"这条**已由 pytest 锁住**
+    # （`tests/test_factual_tool_planning.py::test_retired_capability_questions_have_no_landing_spot`
+    # 与 `tests/test_routing_references_real_tools.py`），不靠这个需要真模型的手工脚本兜。
+    #
+    # 分析图仍在用这 8 个 `@tool`（`tradingagents/graph/*`、`agents/analysts/*`），
+    # 所以它们没有消失——只是不在工具面上。
     Case("get_fundamentals", "贵州茅台市盈率多少", alternates=("signal_washout_probe",),
          note="估值（有规则入口）"),
     Case("get_balance_sheet", "600519 的资产负债率是多少", note="财报（有规则入口）"),
-    Case("get_cashflow", "600519 的现金流怎么样",
-         alternates=("get_balance_sheet", "signal_washout_probe"), note="现金流（有规则入口）"),
     Case("get_income_statement", "600519 的毛利率是多少",
          alternates=("get_fundamentals", "signal_washout_probe"), note="利润表（有规则入口）"),
-    Case("get_lhb_detail", "600519 上龙虎榜了吗",
-         alternates=("get_zt_pool",), may_abstain=True, note="龙虎榜（有规则入口）"),
-    Case("get_zt_pool", "今天涨停板有多少只", alternates=("get_lhb_detail",),
+    # 龙虎榜的落点（`get_lhb_detail`）已退役 → 该问句现在**没有**结构化落点，
+    # 期望是"数据未覆盖"。脚本没有"期望无工具"的形态，故不再作为 Case 收录；
+    # 断言在 pytest 里（见上面的说明）。同类的还有 MACD/现金流/内部人交易。
+    Case("get_zt_pool", "今天涨停板有多少只",
          note="涨停池（市场级事实）"),
     Case("get_board_spot", "半导体板块今天涨幅多少",
          alternates=("market_mainline_view", "get_board_rank"), note="板块行情"),
-    Case("get_news", "600519 最近有什么新闻",
-         alternates=("data_symbol_news", "announcements_read"), note="新闻（vendor）"),
     Case("get_global_news", "最近全球市场有什么大事",
          alternates=("market_mainline_view", "get_board_spot"), may_abstain=True,
          note="全球新闻（无规则入口）"),
-    Case("get_insider_transactions", "600519 最近有内部人交易吗",
-         alternates=("announcements_read", "data_symbol_news"), may_abstain=True,
-         note="内部人交易（无规则入口）"),
     Case("get_hot_stocks_xq", "雪球上最近的热门股有哪些",
          alternates=("market_screen", "get_board_rank"), may_abstain=True,
          note="热门股（无规则入口）"),
@@ -141,15 +145,9 @@ CASES: tuple[Case, ...] = (
     Case("get_board_hist", "半导体板块最近一个月的走势",
          alternates=("get_board_spot", "market_mainline_view"), may_abstain=True,
          note="板块历史"),
-    Case("get_board_cons", "半导体板块里哪些票最强",
-         alternates=("get_board_spot", "market_screen"), may_abstain=True,
-         note="板块成分"),
     Case("get_board_fund_flow", "今天哪个板块资金流入最多",
          alternates=("market_mainline_view", "get_board_spot"), may_abstain=True,
          note="板块资金流"),
-    Case("get_individual_fund_flow", "600519 和 000001.SZ 的资金流对比",
-         alternates=("signal_washout_probe_batch", "capital_flow_read"),
-         note="个股资金流（vendor，有新工具可替代）"),
 )
 
 

@@ -22,3 +22,11 @@ cryptography
 json-repair
 markdown
 PyYAML
+# 与 pyproject.toml 的 [project.dependencies] 保持一致：这份文件是**部署清单**，
+# 少一项就意味着新环境按它装完之后会在运行时缺东西。
+#   * python-multipart —— FastAPI 的 `UploadFile = File(...)`（api/main.py 的文件上传
+#     接口）在运行时需要它，缺了会在**收到上传请求时**才报错。
+#   * mcp —— MCP 出口把平台能力暴露给外部 Agent（Claude / Cursor / DSH）时用；
+#     传输中立核心不依赖它，但 streamable-http 挂载需要。
+python-multipart
+mcp

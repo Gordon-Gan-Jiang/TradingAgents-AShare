@@ -193,7 +193,9 @@ def test_data_tool_populates_freshness():
     from tradingagents.tools.data import make_data_tools
 
     tools = {s.name: s for s in make_data_tools()}
-    spec = tools["get_stock_data"]
+    # 样本从 `get_stock_data` 换成 `get_fundamentals`：前者已从工具面退役、不再在册。
+    # 换的是样本，不是判据——两者都是"带日期参数的散文型 vendor 工具"。
+    spec = tools["get_fundamentals"]
     orig = spec.handler
 
     import tradingagents.tools.data as data_module
@@ -201,13 +203,13 @@ def test_data_tool_populates_freshness():
     saved = data_module.call_vendor
     data_module.call_vendor = lambda *a, **k: "表格"
     try:
-        result = spec.handler(symbol="600519.SH", start_date="2026-01-01", end_date="2026-03-04")
+        result = spec.handler(ticker="600519.SH", curr_date="2026-03-04")
     finally:
         data_module.call_vendor = saved
 
     # 数据工具无法确证截止日 → 必须标 unknown，而不是 fresh
     assert result.freshness
-    assert result.freshness["core_stock_apis"]["status"] == "unknown"
+    assert result.freshness["fundamental_data"]["status"] == "unknown"
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -231,16 +233,16 @@ def test_vendor_failure_text_does_not_claim_the_source_is_available():
         "(eastmoney/sina/tencent all failed): timeout"
     )
     try:
-        spec = {s.name: s for s in data_module.make_data_tools()}["get_stock_data"]
-        result = spec.handler(symbol="600519.SH", start_date="2026-01-01", end_date="2026-03-04")
+        spec = {s.name: s for s in data_module.make_data_tools()}["get_fundamentals"]
+        result = spec.handler(ticker="600519.SH", curr_date="2026-03-04")
     finally:
         data_module.call_vendor = saved
 
     assert result.coverage.available == ()
-    assert "core_stock_apis" in result.coverage.unavailable
+    assert "fundamental_data" in result.coverage.unavailable
     assert result.degraded is True
     assert result.degraded_reason
-    assert result.freshness["core_stock_apis"]["status"] == "error"
+    assert result.freshness["fundamental_data"]["status"] == "error"
 
 
 def test_empty_vendor_output_is_treated_as_unavailable():
@@ -250,8 +252,8 @@ def test_empty_vendor_output_is_treated_as_unavailable():
     saved = data_module.call_vendor
     data_module.call_vendor = lambda *a, **k: "   "
     try:
-        spec = {s.name: s for s in data_module.make_data_tools()}["get_stock_data"]
-        result = spec.handler(symbol="600519.SH", start_date="2026-01-01", end_date="2026-03-04")
+        spec = {s.name: s for s in data_module.make_data_tools()}["get_fundamentals"]
+        result = spec.handler(ticker="600519.SH", curr_date="2026-03-04")
     finally:
         data_module.call_vendor = saved
 
@@ -265,12 +267,12 @@ def test_successful_vendor_output_claims_available():
     saved = data_module.call_vendor
     data_module.call_vendor = lambda *a, **k: "| date | close |\n| 2026-03-04 | 10.0 |"
     try:
-        spec = {s.name: s for s in data_module.make_data_tools()}["get_stock_data"]
-        result = spec.handler(symbol="600519.SH", start_date="2026-01-01", end_date="2026-03-04")
+        spec = {s.name: s for s in data_module.make_data_tools()}["get_fundamentals"]
+        result = spec.handler(ticker="600519.SH", curr_date="2026-03-04")
     finally:
         data_module.call_vendor = saved
 
-    assert result.coverage.available == ("core_stock_apis",)
+    assert result.coverage.available == ("fundamental_data",)
     assert result.degraded is False
 
 

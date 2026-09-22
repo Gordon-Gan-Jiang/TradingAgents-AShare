@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import pytest
 
+from tradingagents.grounding.fallback import verify_text
 from tradingagents.grounding.types import Claim, EvidenceItem, EvidenceSet, StructuredAnswer
+from tradingagents.grounding.verifier import REASON_UNSOURCED_DATE, verify
 
 
 def _ev():
@@ -343,3 +345,254 @@ def test_check_result_carries_actionable_detail_for_repair():
     assert r.failing_claim == "主力净流出 9800 万"
     assert r.detail
     assert r.refs_available == ("E1", "E2", "E3", "E4", "E5")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 引用证据的**文本**时不得被判成无源（假阳性会让正确回答降级）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 实测来源（2026-09-22，真实降级，`intraday_bars_read`）：
+#     校验器明细：日期断言 '当日' 与所引证据的 as_of ['2026-09-22'] 不一致
+#     失败断言：'截至 2026-09-22，收盘价为 1253.8 元，相对当日开盘涨跌幅为 0.131773 pct。'
+# 而该轮的证据**字段名本身就是**「相对当日开盘涨跌幅」「当日最高」「当日最低」。
+# 模型照抄自己所引证据的字段名，却被判「无源的日期断言」——因为正确引用而被罚。
+# 数值分支早就修过同一种假阳性（见 verifier.py 的「候选1」事故记录），
+# 日期分支漏了。
+
+
+def _ev_with_ri_field():
+    """复刻 `intraday_bars_read` 真实证据：字段名里带「当日」。"""
+    return EvidenceSet(
+        items=(
+            EvidenceItem(id="E1", field="收盘价", value=1253.8, unit="yuan",
+                         source_key="intraday_bars", as_of="2026-09-22"),
+            EvidenceItem(id="E2", field="相对当日开盘涨跌幅", value=0.131773, unit="pct",
+                         source_key="intraday_bars", as_of="2026-09-22"),
+        )
+    )
+
+
+def test_quoting_a_field_name_containing_a_date_word_is_accepted():
+    """日期词出现在所引证据的字段名里 → 是引用，不是日期断言。"""
+    from tradingagents.grounding.verifier import verify
+
+    ans = StructuredAnswer(
+        summary="分时承接",
+        claims=(
+            Claim(text="截至 2026-09-22，收盘价为 1253.8 元，相对当日开盘涨跌幅为 0.131773 pct。",
+                  refs=("E1", "E2")),
+        ),
+    )
+    r = verify(ans, _ev_with_ri_field())
+
+    assert r.ok is True, f"照抄证据字段名不应降级：{r.reason} / {r.detail}"
+
+
+def test_a_date_word_not_in_the_cited_evidence_is_still_rejected():
+    """对照组：证据文本里没有该日期词时，相对日期词照旧必须与 as_of 一致。
+
+    放宽必须以「证据文本里真的有这个词」为界，否则等于放弃日期校验。
+    """
+    from tradingagents.grounding.verifier import verify
+
+    ans = StructuredAnswer(
+        summary="分时承接",
+        claims=(Claim(text="今天收盘价为 1253.8 元", refs=("E1",)),),
+    )
+    r = verify(ans, _ev_with_ri_field(), reference_date="2026-09-23")
+
+    assert r.ok is False
+    assert r.reason == "unsourced_date"
+
+
+def test_field_name_numbers_are_sourced_in_the_weak_text_path():
+    """弱校验路径（`verify_text`）此前只比对数值标量，缺了「候选1」那次修复。
+
+    文本证据（候选行）没有标量，字段名里的数字只存在于字段名中——只比对标量
+    必然把**正确引用**判成编造。
+    """
+    from tradingagents.grounding.fallback import verify_text
+
+    ev = EvidenceSet(
+        items=(
+            EvidenceItem(id="E1", field="候选1", value="智光电气 得分 4247.71", unit="",
+                         source_key="market_screen", as_of="2026-09-22"),
+        )
+    )
+    r = verify_text("候选1为智光电气，得分 4247.71。", ev)
+
+    assert r.ok is True, f"引用文本证据的字段名不应降级：{r.reason} / {r.detail}"
+
+
+def test_weak_text_path_accepts_a_numbered_list():
+    """编号列表的序号不是数值断言（真实降级：`watchlist_read` 因序号 1 被判无源）。"""
+    from tradingagents.grounding.fallback import verify_text
+
+    ev = EvidenceSet(
+        items=(
+            EvidenceItem(id="E1", field="自选股数量", value=20.0, unit="count",
+                         source_key="watchlist", as_of="2026-09-22"),
+        )
+    )
+    r = verify_text("1. 我的自选股共 20 只。", ev)
+
+    assert r.ok is True, f"列表序号不应被判无源：{r.reason} / {r.detail}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 方向检查必须锚定**资金流字段**，不能拿无关证据判方向
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _flow_ev(flow_field="主力净流出", flow_value=-3.2e7, flow_unit="yuan"):
+    return EvidenceSet(
+        items=(
+            EvidenceItem(id="E1", field=flow_field, value=flow_value, unit=flow_unit,
+                         source_key="individual_fund_flow", as_of="2026-03-03"),
+            EvidenceItem(id="E2", field="收盘价", value=1253.8, unit="yuan",
+                         source_key="stock_data", as_of="2026-03-03"),
+            EvidenceItem(id="E3", field="沪指点位", value=3962.0, unit="",
+                         source_key="index", as_of="2026-03-03"),
+        )
+    )
+
+
+def test_a_correct_flow_claim_that_also_mentions_a_price_is_accepted():
+    """**第四例假阳性**（实测，2026-09-22）。
+
+    方向检查此前对**每一个**匹配到的数值都做一遍，于是「收盘价 1253.8」也被拿去
+    判资金流方向：文本里有「流出」而 1253.8 是正数 → 判 `flow_direction_conflict`，
+    把一条**数字全对、方向也一致**的断言拒掉：
+
+        '主力净流出 3200万，收盘价 1253.8 元'
+        证据 E1 主力净流出 = -32000000（方向与文本一致）
+             E2 收盘价     = 1253.8
+        旧行为：ok=False, flow_direction_conflict（证据 E2=1253.8 yuan）
+
+    「主力净流出 X 万，股价 Y 元」是投研文本的常见句式，所以这条假阳性会稳定命中。
+    """
+    from tradingagents.grounding.verifier import verify
+
+    ans = StructuredAnswer(
+        summary="x",
+        claims=(Claim(text="主力净流出 3200万，收盘价 1253.8 元", refs=("E1", "E2")),),
+    )
+    r = verify(ans, _flow_ev())
+    assert r.ok is True, f"正确断言被误杀：{r.reason} / {r.detail}"
+
+
+def test_a_correct_flow_claim_mentioning_a_dimensionless_index_is_accepted():
+    """指数点位（`unit=""`，无量纲）同样不得被拿去判资金流方向。"""
+    from tradingagents.grounding.verifier import verify
+
+    ans = StructuredAnswer(
+        summary="x",
+        claims=(Claim(text="主力净流出 3200万，沪指 3962 点", refs=("E1", "E3")),),
+    )
+    assert verify(ans, _flow_ev()).ok is True
+
+
+def test_direction_conflict_is_still_caught_for_english_field_names():
+    """英文命名的资金流字段（原始帧字段名）也必须能判方向。
+
+    第一次实现锚定时只认「流入/流出」两个汉字，于是英文 fixture
+    （`capital_composition.main_net_inflow`）的方向护栏**静默失效**——
+    既有测试 `test_flow_direction_conflict_is_rejected` 当场失败。
+    中英并存是真实情况（见 `evidence.py` 的证据构造）。
+    """
+    from tradingagents.grounding.verifier import verify
+
+    ev = _flow_ev(flow_field="capital_composition.main_net_inflow")
+    ans = StructuredAnswer(
+        summary="x", claims=(Claim(text="主力资金净流入 3200 万", refs=("E1",)),)
+    )
+    r = verify(ans, ev)
+    assert r.ok is False
+    assert r.reason == "flow_direction_conflict"
+
+
+def test_direction_conflict_is_caught_even_when_the_flow_field_has_no_unit():
+    """空单位的资金流证据也要判方向。
+
+    这类证据由**文本口径**匹配（`is_numeric` 为 False），进不了数值分支的循环，
+    所以方向检查必须放在"数值确认有源之后"，否则它的护栏是死的——而
+    `unit=""` 恰恰是 `evidence.py` 里最常见的单位取值。
+    """
+    from tradingagents.grounding.verifier import verify
+
+    ev = _flow_ev(flow_unit="")
+    ans = StructuredAnswer(
+        summary="x", claims=(Claim(text="主力资金净流入 3200 万", refs=("E1",)),)
+    )
+    r = verify(ans, ev)
+    assert r.ok is False
+    assert r.reason == "flow_direction_conflict"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 相对日词必须有**基准日**才可能通过——生产路径曾经一个都不给
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `date_assertion_ok` 对相对日词的判据是：
+#     relative == "today"    → reference_date in cited_as_of
+#     relative == "previous" → previous_trading_day in cited_as_of
+#
+# 生产`_TurnDeps` 此前从不传这两个参数（只有测试传），默认 None ⇒ 两条判断恒为
+# False ⇒ **任何**含「今天/今日/当日/本日/昨日/上一交易日」的回答都必然
+# `unsourced_date`，日期写得对不对完全不影响结果。生产库实测原话：
+#     日期断言 '今天' 不在本轮证据的 as_of [] 内
+#     日期断言 '当日' 与所引证据的 as_of ['2026-09-22'] 不一致   ← 给了 as_of 照样失败
+#
+# 杀伤面大的原因：`当日` 是**证据字段名**的一部分（当日最高/当日最低/当日涨幅/
+# 收盘位于当日区间位置），模型照字段名写就会踩中。
+
+
+def _ev_as_of(as_of: str = "2026-09-22"):
+    return EvidenceSet(
+        items=(
+            EvidenceItem(id="E1", field="收盘价", value=1253.8, unit="yuan",
+                         source_key="sina", as_of=as_of),
+        )
+    )
+
+
+def test_relative_date_passes_once_a_reference_date_is_supplied():
+    """给上基准日，「截至 2026-09-22…当日涨幅…」必须能通过。
+
+    `当日` 在这里不是日期断言，而是字段描述的一部分；即便按相对日词处理，
+    只要基准日等于所引证据的 as_of，它就该通过。
+    """
+    # 这条断言**完全可溯源**（1253.8 正是 E1 的取值），唯一"可疑"之处是 `当日`。
+    # 给了基准日就必须通过——否则一条正确的回答会因为用词习惯被拒。
+    text = "当日收盘价 1253.8 元 [E1]。"
+    assert verify_text(text, _ev_as_of(), reference_date="2026-09-22").ok is True
+    assert verify_text(
+        "截至 2026-09-22，当日市场结构性活跃 [E1]。", _ev_as_of(), reference_date="2026-09-22"
+    ).ok is True
+
+
+def test_relative_date_fails_when_no_reference_date_is_supplied():
+    """不给基准日时同一句话必然失败——锁住"基准日缺失=结构性必败"这个事实。
+
+    这条不是"期望的失败"，而是把**生产曾经的状态**固定成可观测的行为：
+    只要有人再把它改成不给值，这个测试就会红。
+    """
+    text = "当日收盘价 1253.8 元 [E1]。"
+    result = verify_text(text, _ev_as_of(), reference_date=None)
+    assert result.ok is False
+    assert result.reason == REASON_UNSOURCED_DATE
+
+
+def test_production_turn_deps_supply_the_reference_dates():
+    """装配层必须把基准日传下去——这是"提示词/校验器一致"的最后一环。
+
+    上面两条证明的是语义；这一条防的是**装配漏传**（正是本轮的真实缺陷：
+    语义没问题，只是没人给它值）。
+    """
+    import inspect
+
+    from api.services import chat_service
+
+    source = inspect.getsource(chat_service.run_turn_streaming)
+    assert "reference_date=" in source, "生产 _TurnDeps 未传 reference_date，相对日词会恒失败"
+    assert "previous_trading_day=" in source, "生产 _TurnDeps 未传 previous_trading_day"

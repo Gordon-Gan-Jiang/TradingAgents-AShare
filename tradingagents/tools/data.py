@@ -1,4 +1,4 @@
-"""既有 19 个分析师数据工具的**唯一实现与注册**（design D1/D2）。
+"""既有 19 个分析师数据工具中 **11 个在工具面 + 8 个已退役**的实现来源（design D1/D2）。
 
 ## 收敛前的状态
 
@@ -9,9 +9,28 @@
 
 ## 收敛方式：声明表 + 单次实现
 
-`DATA_TOOL_DECLS` 是唯一来源（名字、参数顺序、JSON Schema、来源类别）。
-`call_vendor` 是唯一的调用点。既有 `@tool` 只做一行委托，签名与 docstring
-保持原样——**分析图的行为逐字不变**。
+`DATA_TOOL_DECLS` 是工具面（`make_data_tools()` → `ToolSpec`）的唯一来源
+（名字、参数顺序、JSON Schema、来源类别）。`call_vendor` 是唯一的调用点。
+既有 `@tool` 只做一行委托，签名与 docstring 保持原样——**分析图的行为逐字不变**。
+
+## 8 个工具**已从工具面退役**（不是遗漏）
+
+`get_stock_data` / `get_cashflow` / `get_indicators` / `get_lhb_detail` /
+`get_insider_transactions` / `get_individual_fund_flow` / `get_board_cons` /
+`get_news` 这 8 个已**不再注册进工具面**，理由是同一条：
+
+1. 它们返回**预格式化的中文散文**且 `evidence=()`，于是取到的任何数字都**无法被
+   回答层的机械校验器引用**——「没有证据就没有回答」，注册它们等于给 Agent 一个
+   永远出不了结论的入口。
+2. 41 轮真实对话回放里，规划层**一次都没有**选中过它们：面对同一问句，它总是
+   落到结构化更好的落点（资金流 → `capital_flow_read`、新闻 → `data_symbol_news`、
+   指数 → `index_quote_read` 等）。留着 = 增加选择噪声而不增加能力。
+
+**它们的声明为何仍在本模块**：两个消费者的边界不同。
+`agents/utils/*_tools.py` 的 8 个 `@tool`（LangGraph 7 分析师管道）**必须继续可用**，
+而它们委托的是 `data_tool_impl(name)` → `_DECL_BY_NAME`。因此这 8 条声明移入
+`RETIRED_DATA_TOOL_DECLS`：**工具面不再有它们，分析图逐字不变**。
+不要因为它们出现在本文件里就以为可以重新注册——重新注册必须先解决「证据」问题。
 
 ## 为什么 `structured=False`
 
@@ -34,8 +53,14 @@ from .spec import ToolResult, ToolSpec
 
 VENDOR_NOTE = (
     "legacy prose vendor：返回预格式化文本，单个数值不可引用（not citable）。"
-    "若回答需要引用具体数字，请使用结构化 data_* 工具（kline / news / washout 等）。"
+    "若回答需要引用具体数字，请改用这些落点：数值型用 `capital_flow_read`（资金流）/ "
+    "`chip_distribution_read`（筹码）/ `data_symbol_news`（新闻）/ `index_quote_read`（指数）；"
+    "或返回 JSON、能产出可引用证据的那些（`get_realtime_quotes`、`get_zt_pool` 等）。"
 )
+# 注：此处曾写「请使用结构化 data_* 工具（kline / news / washout 等）」——
+# `kline` 在注册表里**根本不存在**。把不存在的工具写进给模型的提示里，模型会照着
+# 编一个名字出来，然后收到 unknown arguments。提示词里只允许出现真名。
+# （本轮退役 8 个 vendor 工具时复查了这段：上面点到的名字均为在册工具。）
 
 OUTPUT_CONTRACT = "DATA_PROSE"
 
@@ -76,26 +101,14 @@ def _decl(name: str, args: tuple[str, ...], props: Mapping[str, Any], category: 
     )
 
 
+# ── 工具面（11 个）：`make_data_tools()` 只遍历这一份 ───────────────────────
+#
+# 19 → 11。退掉的 8 个见下方 `RETIRED_DATA_TOOL_DECLS`（连同退役理由）。
 DATA_TOOL_DECLS: tuple[DataToolDecl, ...] = (
-    _decl(
-        "get_stock_data", ("symbol", "start_date", "end_date"),
-        {"symbol": _SYMBOL, "start_date": _START, "end_date": _END},
-        "core_stock_apis", ("symbol", "start_date", "end_date"),
-    ),
     _decl(
         "get_realtime_quotes", ("symbols",),
         {"symbols": {**_STR_LIST, "description": "标的代码列表"}},
         "core_stock_apis", ("symbols",),
-    ),
-    _decl(
-        "get_indicators", ("symbol", "indicator", "curr_date", "look_back_days"),
-        {
-            "symbol": _SYMBOL,
-            "indicator": {**_STR, "description": "指标名，如 rsi / macd / close_50_sma"},
-            "curr_date": _DATE,
-            "look_back_days": {**_INT, "default": 30, "description": "回看天数"},
-        },
-        "technical_indicators", ("symbol", "indicator", "curr_date"),
     ),
     _decl(
         "get_fundamentals", ("ticker", "curr_date"),
@@ -108,19 +121,9 @@ DATA_TOOL_DECLS: tuple[DataToolDecl, ...] = (
         "fundamental_data", ("ticker",),
     ),
     _decl(
-        "get_cashflow", ("ticker", "freq", "curr_date"),
-        {"ticker": _TICKER, "freq": {**_STR, "default": "quarterly"}, "curr_date": {**_DATE, "default": None}},
-        "fundamental_data", ("ticker",),
-    ),
-    _decl(
         "get_income_statement", ("ticker", "freq", "curr_date"),
         {"ticker": _TICKER, "freq": {**_STR, "default": "quarterly"}, "curr_date": {**_DATE, "default": None}},
         "fundamental_data", ("ticker",),
-    ),
-    _decl(
-        "get_news", ("ticker", "start_date", "end_date"),
-        {"ticker": _TICKER, "start_date": _START, "end_date": _END},
-        "news_data", ("ticker", "start_date", "end_date"),
     ),
     _decl(
         "get_global_news", ("curr_date", "look_back_days", "limit"),
@@ -130,10 +133,6 @@ DATA_TOOL_DECLS: tuple[DataToolDecl, ...] = (
             "limit": {**_INT, "default": 5},
         },
         "news_data", ("curr_date",),
-    ),
-    _decl(
-        "get_insider_transactions", ("ticker",),
-        {"ticker": _TICKER}, "news_data", ("ticker",),
     ),
     _decl(
         "get_board_spot", ("sector_type",),
@@ -150,12 +149,59 @@ DATA_TOOL_DECLS: tuple[DataToolDecl, ...] = (
         {"board_name": {**_STR, "description": "板块名称"}, "sector_type": {**_STR, "default": "industry"}},
         "board_data", ("board_name",),
     ),
+    _decl("get_board_fund_flow", (), {}, "board_data", ()),
+    _decl(
+        "get_zt_pool", ("date",),
+        {"date": _DATE}, "board_data", ("date",),
+    ),
+    _decl("get_hot_stocks_xq", (), {}, "board_data", ()),
+)
+
+
+# ── 已从工具面退役的 8 个（声明保留，仅为分析图委托可解析）─────────────────
+#
+# **不要因为它们在文件里就重新注册。** 退役理由是它们返回散文且 `evidence=()`，
+# 任何数字都无法被校验器引用——「没有证据就没有回答」。41 轮真实对话里规划层
+# 从未选中过它们（详见模块 docstring）。
+#
+# 这份声明的**唯一**用途：`agents/utils/*_tools.py` 的 8 个 `@tool` 通过
+# `data_tool_impl(name) → _DECL_BY_NAME` 取参数顺序。删掉这里，分析图会在调用时
+# 抛 `KeyError`（边界：**分析图的 8 个 `@tool` 必须继续可用**）。
+RETIRED_DATA_TOOL_DECLS: tuple[DataToolDecl, ...] = (
+    _decl(
+        "get_stock_data", ("symbol", "start_date", "end_date"),
+        {"symbol": _SYMBOL, "start_date": _START, "end_date": _END},
+        "core_stock_apis", ("symbol", "start_date", "end_date"),
+    ),
+    _decl(
+        "get_indicators", ("symbol", "indicator", "curr_date", "look_back_days"),
+        {
+            "symbol": _SYMBOL,
+            "indicator": {**_STR, "description": "指标名，如 rsi / macd / close_50_sma"},
+            "curr_date": _DATE,
+            "look_back_days": {**_INT, "default": 30, "description": "回看天数"},
+        },
+        "technical_indicators", ("symbol", "indicator", "curr_date"),
+    ),
+    _decl(
+        "get_cashflow", ("ticker", "freq", "curr_date"),
+        {"ticker": _TICKER, "freq": {**_STR, "default": "quarterly"}, "curr_date": {**_DATE, "default": None}},
+        "fundamental_data", ("ticker",),
+    ),
+    _decl(
+        "get_news", ("ticker", "start_date", "end_date"),
+        {"ticker": _TICKER, "start_date": _START, "end_date": _END},
+        "news_data", ("ticker", "start_date", "end_date"),
+    ),
+    _decl(
+        "get_insider_transactions", ("ticker",),
+        {"ticker": _TICKER}, "news_data", ("ticker",),
+    ),
     _decl(
         "get_board_cons", ("board_name", "sector_type"),
         {"board_name": {**_STR, "description": "板块名称"}, "sector_type": {**_STR, "default": "industry"}},
         "board_data", ("board_name",),
     ),
-    _decl("get_board_fund_flow", (), {}, "board_data", ()),
     _decl(
         "get_individual_fund_flow", ("symbol",),
         {"symbol": _SYMBOL}, "board_data", ("symbol",),
@@ -164,14 +210,15 @@ DATA_TOOL_DECLS: tuple[DataToolDecl, ...] = (
         "get_lhb_detail", ("symbol", "date"),
         {"symbol": _SYMBOL, "date": _DATE}, "board_data", ("symbol", "date"),
     ),
-    _decl(
-        "get_zt_pool", ("date",),
-        {"date": _DATE}, "board_data", ("date",),
-    ),
-    _decl("get_hot_stocks_xq", (), {}, "board_data", ()),
 )
 
-_DECL_BY_NAME = {decl.name: decl for decl in DATA_TOOL_DECLS}
+# 19 条声明的全集。**工具面用 `DATA_TOOL_DECLS`（11）**；这一份只喂
+# `data_tool_impl`，让分析图的 19 个 `@tool` 全部仍能解析参数顺序。
+ALL_DATA_TOOL_DECLS: tuple[DataToolDecl, ...] = (
+    DATA_TOOL_DECLS + RETIRED_DATA_TOOL_DECLS
+)
+
+_DECL_BY_NAME = {decl.name: decl for decl in ALL_DATA_TOOL_DECLS}
 
 
 def call_vendor(name: str, *args: Any, **kwargs: Any) -> str:
@@ -183,7 +230,12 @@ def call_vendor(name: str, *args: Any, **kwargs: Any) -> str:
 
 
 def data_tool_impl(name: str) -> Callable[..., str]:
-    """返回一个按声明表顺序调用 vendor 的实现函数，供既有 `@tool` 委托。"""
+    """返回一个按声明表顺序调用 vendor 的实现函数，供既有 `@tool` 委托。
+
+    查的是 `ALL_DATA_TOOL_DECLS`（19 条）：退役的 8 个**也要能解析**，
+    否则 `agents/utils/*_tools.py` 里那 8 个 `@tool` 会在调用时 KeyError，
+    分析图直接坏掉——「从工具面摘掉」不等于「让分析图不能取数」。
+    """
     decl = _DECL_BY_NAME[name]
 
     def impl(*args: Any, **kwargs: Any) -> str:
@@ -339,7 +391,10 @@ def _evidence_items_from_json(rendered: str, *, source_key: str, as_of: str) -> 
 
 
 def make_data_tools() -> tuple[ToolSpec, ...]:
-    """构造 19 个数据工具的 ToolSpec。
+    """构造**工具面**上的 11 个数据工具 ToolSpec（19 减掉退役的 8 个）。
+
+    只遍历 `DATA_TOOL_DECLS`——`RETIRED_DATA_TOOL_DECLS` 刻意不在这里出现，
+    那 8 个是「分析图能用、Agent 工具面不给」的边界。
 
     handler 返回的 `data["rendered"]` 保留 vendor 的原始字符串（用于与分析图
     保持逐字一致），同时显式声明 `structured=False`。
@@ -441,6 +496,18 @@ _VENDOR_FAILURE_MARKERS = (
     "暂时不可用",
     "暂无数据",
     "无数据",
+    # 实测（2026-09-22）：`get_global_news` 真实返回
+    #     'Error fetching global news: Too Many Requests. Rate limited. Try after a while.'
+    # 上面所有标记一个都不命中，于是**限流被当成有效数据**：工具一边把这段英文
+    # 错误文本交给模型，一边声明「该源可用」。这是与「拿不到 ≠ 没有」同一条原则
+    # 的直接违反，而且它比缺数据更糟——模型可能拿这句话当新闻内容来解读。
+    #
+    # `Error fetching` 是本仓库自己产生的前缀（`dataflows/yfinance_news.py`），
+    # 不是供应商文案，所以它比任何猜测的关键词都可靠。
+    "error fetching",
+    "too many requests",
+    "rate limited",
+    "try after a while",
 )
 
 

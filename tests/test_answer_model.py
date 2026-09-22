@@ -221,3 +221,86 @@ def test_model_never_invents_a_verdict_reference():
     m = _model(['{"summary":"x","claims":[{"text":"量能恢复","refs":["E1"]}]}'])
     answer = m.propose(prompt="p", evidence=_ev(), verdict=_verdict())
     assert answer.verdict_ref is None
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 提示词必须**披露校验器会检查的每一样东西**（否则模型只能猜）
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 这一节锁的是一条反复踩到的规律：**校验器检查了提示词从未给出的信息**。
+#
+#   * `as_of`：此前提示词里没有任何日期，而 `date_assertion_ok` 要求日期断言
+#     落在所引证据的 as_of 集合内 → 模型只能猜 → 实测是轻档降级的头号来源。
+#   * `verdict_ref`：校验器要求它属于**本轮**判定 id，而静态 JSON 模板里
+#     写着一个看起来像真实取值的 `"V1"`，动态指令却又要求填真实 id。
+#     两个互相冲突的值同时出现，照抄模板就是 `verdict_ref_not_from_turn`。
+#
+# 共同点：**不是模型做不到，是没告诉它**（或告诉了它两个矛盾的答案）。
+
+
+def _prompt_for(verdict):
+    """跑通真实链路，返回模型**实际收到**的那条提示词。"""
+    from tradingagents.agent.model import LlmAnswerModel
+
+    box: dict[str, str] = {}
+
+    def completer(prompt: str) -> str:
+        box["prompt"] = prompt
+        return '{"summary":"s","claims":[]}'
+
+    LlmAnswerModel(completer).propose(prompt="任务：600519 是不是在洗盘", evidence=_ev(), verdict=verdict)
+    assert "prompt" in box, "补全器没有被调用，链路没跑通"
+    return box["prompt"]
+
+
+def test_prompt_discloses_every_field_the_verifier_checks():
+    """校验器逐项检查的东西，提示词里必须逐项给出。
+
+    漏掉任何一项，模型的"失败"就只是"没被告知"，而不是"做不到"。
+    """
+    prompt = _prompt_for(_verdict())
+
+    # 1) 证据编号：`unknown_ref` / `claim_without_citation` 要能通过。
+    assert "[E1]" in prompt
+    # 2) 取值：`unsourced_number` 要能通过——看不见数值就只能编。
+    assert "1.228" in prompt
+    # 3) as_of：`unsourced_date` 要能通过——只允许所引证据的 as_of。
+    assert "2026-01-16" in prompt
+    # 4) 本轮判定 id：`verdict_ref_not_from_turn` 要能通过。
+    assert _verdict().id in prompt
+    # 5) 未覆盖维度：`coverage_unavailable_not_disclosed` 要能通过。
+    assert "chip_distribution" in prompt
+
+
+def test_prompt_does_not_offer_a_fake_verdict_id():
+    """静态模板里**不得**出现看起来像真实取值的判定 id。
+
+    `"V1"` 曾经就是模板里的占位符，而它与测试夹具的 id 恰好相同——
+    这种"碰巧一致"最阴险：有时能过，有时`verdict_ref_not_from_turn`，
+    于是被当成模型不稳定，而不是提示词自相矛盾。
+
+    这里用一个**与模板里任何字样都不同**的 id 来暴露冲突。
+    """
+    from tradingagents.grounding.types import TurnVerdict
+
+    verdict = TurnVerdict(
+        id="vd_7f3a91_not_a_placeholder", probe="washout", symbol="600519.SH",
+        as_of="2026-01-16", state="washout", confidence=61,
+    )
+    prompt = _prompt_for(verdict)
+
+    assert "vd_7f3a91_not_a_placeholder" in prompt
+    assert '"V1"' not in prompt, "模板里仍有一个像真实取值的占位判定 id，模型会照抄它"
+
+
+def test_prompt_without_verdict_says_the_ref_must_be_null():
+    """本轮没有判定时必须**明说** verdict_ref 留空。
+
+    校验器只在 `verdict_ref is not None` 时才核对，所以"留空"永远安全、
+    "编一个"永远失败。这层不对称必须直接告诉模型，否则它会顺手填一个引用。
+    """
+    prompt = _prompt_for(None)
+
+    assert "verdict_ref" in prompt
+    assert "null" in prompt
+    assert "无探针判定" in prompt

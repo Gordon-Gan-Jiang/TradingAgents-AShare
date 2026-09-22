@@ -369,7 +369,18 @@ def fetch_stock_turnover(symbol: str, day: str) -> float | None:
     因为那正是 D6 要消除的口径混淆。
     """
     ak = _ak()
-    info = ak.stock_individual_info_em(symbol=_bare_code(symbol))
+    try:
+        info = ak.stock_individual_info_em(symbol=_bare_code(symbol))
+    except Exception:  # noqa: BLE001
+        # 实测（2026-09-22）：该接口在本机**稳定抛**
+        # `ConnectionError: ('Connection aborted.', RemoteDisconnected(...))`——
+        # EM 会拒绝/断开这个端点（此前还观测到过 `ValueError: Length mismatch`，
+        # 即响应内容与预期列不符）。两种都是"拿不到"，不是"没有"。
+        #
+        # 契约是「拿不到返回 None，由上层把相对换手标为不可得」，所以这里必须
+        # 吞掉异常：让它冒出去会升级成**整个工具失败**，而实际只是**一个维度不可得**——
+        # 那会把一次"部分可用"的查询表述成"数据源坏了"。
+        return None
     if info is None or len(info) == 0:
         return None
     try:
@@ -510,7 +521,17 @@ def fetch_peer_frames(symbol: str, day: str):
     if em_result is not None and em_result[0]:
         return em_result
 
-    sina_result = _peer_frames_via_sina(symbol, day)
+    # 新浪兜底必须和 EM 一样吞异常。
+    #
+    # 这里原本是**裸调用**：EM 那一支有 try/except，这一支没有。于是新浪一旦抛
+    # （`ConnectionError`、限流、字段变更都是实测中见过的形态），异常会直接穿出
+    # `fetch_peer_frames`，**违反它自己声明的「三元组或 None」契约**——调用方拿到
+    # 的是异常而不是 None，于是"相对强度拿不到"升级成"这个工具坏了"。
+    # 与 `fetch_stock_turnover` 是同一个毛病：护栏只加在一个分支上。
+    try:
+        sina_result = _peer_frames_via_sina(symbol, day)
+    except Exception:  # noqa: BLE001
+        sina_result = None
     if sina_result is not None:
         return sina_result
     # 契约是「返回三元组**或 None**」。EM 路径在拿不到行业时会返回

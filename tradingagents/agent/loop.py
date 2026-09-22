@@ -357,6 +357,87 @@ def _is_text_mode(answer: StructuredAnswer) -> bool:
     return not answer.claims and bool(answer.summary.strip())
 
 
+# 校验原因码 → 用户能读懂的说法。
+#
+# 原因码是给机器和开发者看的（`unsourced_number` 之类），直接拼进降级文案等于
+# 把内部术语丢给用户。实测生产库里的原文：
+#
+#     模型调用预算已用尽（1/1），未能修复未通过校验的回答（unsourced_date）。
+#
+# 用户既不知道 `unsourced_date` 是什么，也无从判断该怎么办。而这一轮的**真实**
+# 原因还是校验器的假阳性（证据字段名里的「当日」被判成日期断言）——文案把
+# 「平台判错了」说成了「预算不够」，两件事都不是用户能理解的。
+#
+# 映射后信息不丢，只是换成人话；原因码仍然进 trace 与 `EndEvent.reason`。
+_REASON_PHRASE: dict[str, str] = {
+    "unsourced_number": "回答里的数值在本轮证据中找不到出处",
+    "unsourced_date": "回答里的日期与本轮证据的日期不一致",
+    "flow_direction_conflict": "回答的资金流方向与证据相反",
+    "verdict_ref_not_from_turn": "回答引用了不属于本轮的判定",
+    "coverage_unavailable_not_disclosed": "回答没有声明未覆盖的数据项",
+    "claim_without_citation": "回答里有断言没有标注引用编号",
+    "unknown_ref": "回答引用了不存在的证据编号",
+    "directive": "回答含有买卖指令式措辞",
+}
+
+
+def _reason_phrase(reason: str) -> str:
+    """把原因码翻成人话；未知原因码原样返回（宁可露出代码，也不要撒谎）。"""
+    return _REASON_PHRASE.get(reason, reason)
+
+
+def _verification_failure_step(
+    check: CheckResult,
+    evidence: EvidenceSet,
+    *,
+    stage: str,
+    attempt: int,
+) -> dict[str, Any]:
+    """把「校验到底为什么失败」落成可读观测，而不是只留一个原因码。
+
+    ## 为什么必须记（这是实测代价，不是设计洁癖）
+
+    降级此前只留下原因码（`unsourced_number` / `unsourced_date`），**不记是哪条
+    断言、哪个数字被判无源、所引证据里究竟有什么**。于是每排查一次降级，就要临时
+    写一个 monkeypatch 校验器的插桩脚本。2026-09-22 定位两个校验器假阳性就是这么做
+    的，其中一个的明细是：
+
+        数值 1 在所引证据 ['E1'] 中找不到来源（数值证据的标量: [20.0]）
+
+    那个 `1` 其实是模型写的**编号列表序号**——不把这句话留下来，就永远看不出
+    是校验器错了。**每出现一种新的降级原因，这个临时脚本的成本就要重付一次。**
+
+    ## 为什么连证据一起记
+
+    「模型错」还是「校验器错」，唯一判据是**证据里到底有什么**。证据内容在 trace
+    里没有别处可查（提示词不落库），所以这里是唯一能事后判断的地方。
+
+    用户可见文案**不**包含这些内部细节（见 `_reason_phrase`）——trace 是开发者
+    视角，两者分开。
+    """
+    cited = [
+        {
+            "id": item.id,
+            "field": item.field,
+            "value": item.value,
+            "unit": item.unit,
+            "as_of": item.as_of,
+        }
+        for item in evidence.items
+    ]
+    return {
+        "stage": stage,
+        "ok": False,
+        "attempt": attempt,
+        "reason": check.reason,
+        "detail": check.detail,
+        # 模型原文：脱离它就无从判断是模型编造还是校验器误判
+        "failing_claim": check.failing_claim,
+        "weak": bool(check.weak),
+        "evidence": cited,
+    }
+
+
 def _tokens_of(model: Any) -> int:
     """取上次补全的 token 用量。
 
@@ -530,11 +611,24 @@ def _plan_tools(request: TurnRequest, *, registry: Any = None) -> list[ToolCall]
         from .routing import (
             DEFAULT_FACTUAL_TOOL,
             DEFAULT_MARKET_TOOL,
+            NO_FACTUAL_TOOL,
             build_factual_arguments,
             plan_factual_tool,
         )
 
-        candidates = [plan_factual_tool(request.text, has_symbol=bool(request.symbol))]
+        chosen = plan_factual_tool(request.text, has_symbol=bool(request.symbol))
+        if chosen == NO_FACTUAL_TOOL:
+            # 规则层判定"本平台没有能回答它的工具"——该能力**已从工具面退役**，
+            # 且没有等价的活工具（见 `RETIRED_CAPABILITY_HINTS`）。
+            #
+            # 此时**绝不落 DEFAULT_* 兜底**：那是拿另一个问题的数据回答这个问题。
+            # 实测（注册表摘掉 8 个工具之后）：用户问「今天龙虎榜有多少只」，
+            # 兜底发出 `get_board_spot`——平台拿板块行情回答龙虎榜。
+            # 空计划 = 本轮没有可用证据，回答层会如实报"数据未覆盖"；
+            # 这正是"没有证据就没有回答"想要的结果，而不是一个跑题的答案。
+            return []
+
+        candidates = [chosen]
         for fallback in (DEFAULT_FACTUAL_TOOL, DEFAULT_MARKET_TOOL):
             if fallback not in candidates:
                 candidates.append(fallback)
@@ -736,29 +830,50 @@ def _build_prompt(
 ) -> str:
     """构造模型提示。
 
-    刻意只给**证据编号与字段名**，不给数值的散文描述：数值由模型从证据里
-    引用，而不是被复述一遍（复述是数值错误的来源）。
+    **证据编号、字段名、`as_of` 与取值都要给出**。两项"给足信息"都是踩出来的：
+
+    * **`as_of`**：此前提示词里没有任何日期信息，而校验器要求日期断言落在
+      **所引证据**的 as_of 集合内（`date_assertion_ok`）——模型只能凭空猜日期，
+      猜错就是 `unsourced_date`。实测它是轻档降级的**头号来源**（40 条轻档降级
+      里 23 条，57.5%），却在修复后**一次都不出现**（中档 11 条修复后失败里
+      没有一条是日期问题）：不是"模型做不到"，是"没告诉它"。
+    * **取值**：原设计只给字段名，理由是"防止模型复述数值引入错误"。实测更糟的是
+      **看不见就只能编**：只给字段名时模型写出的数字无源可查，校验器一律判
+      `unsourced_number`。这条教训在筛选回合更早被测到，当时只修了筛选路径；
+      生产库统计显示通用路径同样在踩它（19 条 `unsourced_number` 降级：轻档 13 /
+      中档 6，且**中档修复后仍有 6 条**，说明修复救不回来，必须在首答就给足信息）。
+
+    两处的安全性都不变：校验器照旧**逐条核对**每条断言的数值与日期，给出信息
+    只是让模型有机会写对，不是放宽校验。
+
+    日期不会因此变成数值风险：`extract_numbers` 已排除日期
+    （见 `grounding/numbers.py`），日期只走 `extract_dates` 那条规则。
 
     `history` 注入最近若干轮问答，用于消解「它」「这只」这类指代——没有它，
     所谓多轮对话退化成互不相干的单轮问答（审计 A1）。
     """
-    if request.screen:
-        # 筛选回合把**数值**一并给出。实测：只给字段名时真实模型写出的解读
-        # 两次被校验器拒（unsourced_number）——它看不到数值，只能凭空写数字。
-        # 原设计「只给字段名」是为判定解释服务的（防止模型复述数值引入错误）；
-        # 而筛选任务的数字本身就是内容，且候选表已由代码渲染，喂给模型只是
-        # 让它能正确引用。校验器照旧逐条核对，安全性不变。
-        #
-        # **文本值必须包上不可信标记**：数值可以放心给，散文不行——新闻标题、
-        # 研报摘录是外部可控文本，包起来才能在提示词里区分"数据"与"指令"。
-        fields = (
-            ", ".join(
-                f"[{item.id}] {item.field}={_as_prompt_value(item)}" for item in evidence.items
-            )
-            or "（无）"
+    # 证据清单：**编号 + 字段名 + as_of + 取值**，一条回合也不省。
+    #
+    # 取值曾经只在筛选回合给出（原设计：通用回合"只给字段名，避免模型复述数值
+    # 引入错误"）。生产库统计否证了它：19 条 `unsourced_number` 降级里，中档
+    # **修复后仍有 6 条**——修复救不回来，因为模型在两轮里都看不见数值。
+    # 原设计的前提是"复述会引入错误"，而实测更糟的是**看不见就只能编**。
+    # 筛选回合更早踩到同一个坑并已修（见 `tests/test_market_screen_intent.py`），
+    # 本轮把那条结论回灌到通用路径。
+    #
+    # **文本取值必须包上不可信标记**：数值可以放心给，散文不行——新闻标题、
+    # 公告原文、研报摘录是外部可控文本，任何人都能在标题里写「忽略以上要求」。
+    # 包起来才能在提示词里区分"数据"与"指令"。
+    #
+    # 代价是提示词变长（证据上限 40 条），而延迟正是要压的目标；这一点靠实测
+    # 而非估计来守：取值带来的 token 增量与首答通过率提升在同一轮实验里量。
+    fields = (
+        ", ".join(
+            f"[{item.id}] {item.field}(as_of {item.as_of})={_as_prompt_value(item)}"
+            for item in evidence.items
         )
-    else:
-        fields = ", ".join(f"[{item.id}] {item.field}" for item in evidence.items) or "（无）"
+        or "（无）"
+    )
     verdict_line = (
         f"探针判定：{ctx.verdict.state}（置信 {ctx.verdict.confidence}），"
         "你只能解释它、不能改写它。"
@@ -796,6 +911,13 @@ def _build_prompt(
         f"可用证据：{fields}\n"
         f"必须在 unavailable 中声明的未覆盖维度：{must_declare}\n"
         "要求：每条断言必须引用证据编号；上列未覆盖维度必须逐项声明，不得描述为「无影响」。"
+        # 日期规则必须与校验器**逐字对齐**（`date_assertion_ok`）：只允许所引证据的
+        # as_of。写成"尽量准确"之类的软约束没有用——校验器是机械的，提示词也必须
+        # 给出机械可满足的条件。
+        "日期断言只能用该断言**所引证据**的 as_of：写「截至 2026-09-22」就必须引用 "
+        "as_of 为 2026-09-22 的证据；不得写 as_of 之外的日期。"
+        "若要写「今天」或「上一交易日」，仅当它们等于所引证据的 as_of 时才可写，"
+        "否则直接写具体日期。\n"
         "若证据里出现「数据口径」字段，回答**必须**说明相应维度为模型估计，"
         "不得表述为交易所原始数据。\n"
         # 提示注入护栏（Phase 4.3）：新闻/公告/研报正文来自**外部**，任何人都能
@@ -1155,10 +1277,14 @@ def run_turn(
             # 「1 次归纳」没有任何约束力。
             if ctx.model_calls >= budget.max_model_calls:
                 status = STATUS_DEGRADED
+                # 诊断进 trace（开发者视角），不进口径文案（用户视角）。
+                ctx.steps.append(
+                    _verification_failure_step(check, evidence, stage="verify", attempt=1)
+                )
                 text = render_insufficient(
                     evidence,
                     f"模型调用预算已用尽（{ctx.model_calls}/{budget.max_model_calls}），"
-                    f"未能修复未通过校验的回答（{check.reason}）。",
+                    f"未能修复未通过校验的回答：{_reason_phrase(check.reason)}。",
                 )
                 text = _with_screen_block(text, request, merged)
                 text = _apply_before_answer(chain, ctx, text)
@@ -1174,6 +1300,12 @@ def run_turn(
                 sink.emit(EndEvent(status=STATUS_DEGRADED, reason="model_budget_exhausted"))
                 return result
 
+            # 修复前的首次失败也记：只有这样，事后才能看出修复轮究竟改了没有、
+            # 以及第二次失败是同一个原因还是换了一个（实测确实会换——轻档预算
+            # 放宽后 `unsourced_number` 归零，却冒出 `verdict_ref_not_from_turn`）。
+            ctx.steps.append(
+                _verification_failure_step(check, evidence, stage="verify", attempt=1)
+            )
             repaired = model.repair(
                 previous=answer, failure=check, evidence=evidence, verdict=ctx.verdict
             )
@@ -1187,9 +1319,14 @@ def run_turn(
             else:
                 rejected_claims += 1
                 status = STATUS_DEGRADED
+                # 第一次失败与修复后失败**都记**：只看最后一条会丢掉"改了什么、
+                # 为什么还是不过"——而这正是判断修复轮是否有效所必需的。
+                ctx.steps.append(
+                    _verification_failure_step(recheck, evidence, stage="verify", attempt=2)
+                )
                 text = render_insufficient(
                     evidence,
-                    f"两次生成均未能给出可溯源的回答（{recheck.reason}）。",
+                    f"两次生成均未能给出可溯源的回答：{_reason_phrase(recheck.reason)}。",
                 )
                 text = _with_screen_block(text, request, merged)
                 text = _apply_before_answer(chain, ctx, text)

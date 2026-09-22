@@ -14,11 +14,14 @@
 ## 本文件锁住什么
 
 1. 轻档**必须**计划恰好一个便宜的数据工具（按问句语义选，规则优先、零 LLM）。
-2. 无标的的轻档问句只能选**市场级**工具（涨停/龙虎榜/板块/全局新闻），不能凭空
+2. 无标的的轻档问句只能选**市场级**工具（涨停/板块/全局新闻/指数），不能凭空
    给一个需要代码的工具——那会必然失败。
 3. 中档仍计划探针（不能被这次改动波及）。
 4. 黄金集里 `factual_lookup` 的工具召回必须达到 100%——**用度量证明修好了**，
    而不是"我觉得修好了"。
+5. **已退役能力的问句没有落点**（本轮新增）：退役的 8 个 vendor 工具返回散文、
+   `evidence=()`，留着入口只会制造一个永远出不了结论的落点。这类问句现在的期望
+   是 `NO_FACTUAL_TOOL`（如实弃权），**不是**换一个工具顶上。
 """
 
 from __future__ import annotations
@@ -39,13 +42,46 @@ import pytest
         ("600519 资产负债率是多少", "600519.SH", "get_balance_sheet"),
         ("600519 最近有什么新闻", "600519.SH", "data_symbol_news"),
         ("今天的涨停板有多少只", None, "get_zt_pool"),
-        ("今天龙虎榜有哪些", None, "get_lhb_detail"),
     ],
 )
 def test_factual_question_maps_to_a_cheap_tool(text, symbol, expected):
     from tradingagents.agent.routing import plan_factual_tool
 
     assert plan_factual_tool(text, has_symbol=bool(symbol)) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 三类**已从工具面退役**的能力（各自原来有规则入口）。
+        # 退役理由：它们返回预格式化散文、`evidence=()`，取到的数字无法被校验器
+        # 引用——"没有证据就没有回答"意味着留着入口只会制造一个永远出不了结论的
+        # 落点。见 `tradingagents/tools/data.py` 与 `RETIRED_CAPABILITY_HINTS`。
+        "今天龙虎榜有哪些",
+        "今天龙虎榜有多少只",
+        "600519 上龙虎榜了吗",
+        "600519 的现金流是多少",
+        "600519 的 MACD 是多少",
+    ],
+)
+def test_retired_capability_questions_have_no_landing_spot(text):
+    """退役能力的问句现在**没有落点**，期望是"无工具"而不是换一个工具顶上。
+
+    期望值同样从"没有证据就没有回答"推出来，而且要分清两种"没落点"：
+
+    * **退役**（这里）——能力被有意摘掉，问句**不该**被指向别的工具。把
+      「龙虎榜」指到涨停池、把「MACD」指到洗盘探针，是拿另一个问题的答案冒充
+      这个问题的答案；实测过的最坏形态是兜底到 `get_board_spot`（板块行情）。
+      正确形态是 `NO_FACTUAL_TOOL` → 空计划 → 回答层如实报"数据未覆盖"。
+    * **遗忘**——能力存在却没有入口，那才是 bug（`FACTUAL_TOOL_HINTS` 的补全就
+      是在修这一类）。
+
+    **不断言**这里返回的兜底工具名：那会把"拿另一个工具顶上去"固化成期望。
+    """
+    from tradingagents.agent.routing import NO_FACTUAL_TOOL, plan_factual_tool
+
+    assert plan_factual_tool(text, has_symbol=True) == NO_FACTUAL_TOOL
+    assert plan_factual_tool(text, has_symbol=False) == NO_FACTUAL_TOOL
 
 
 def test_symbolless_question_never_gets_a_symbol_requiring_tool():

@@ -9,7 +9,7 @@ Covers:
 6. /v1/jobs/{id}/result — completed job returns result
 """
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -662,8 +662,21 @@ class TestModelArenaApi:
         assert me.status_code == 200
         user_id = me.json()["id"]
         now = datetime.now(timezone.utc)
-        signal_day = "2026-05-20"
-        t1_day = "2026-05-21"
+        # 样本日期必须**相对今天**推导，不能硬编码。
+        #
+        # 晋升门禁把 `lookback_days` 解析成「今天往前 N 天」的**滚动窗口**
+        # （`_resolve_date_range` 用 `datetime.now()`），所以样本落在哪天，
+        # 决定了它是否还在窗口里。这里原本硬编码 `2026-05-20`：写成时它落在
+        # 90 天窗口内、测试通过；日历往后推，样本就滑出窗口，门禁诚实地报
+        # 「目标模型在评估窗口内没有可用 T+1 样本」并返回 400。
+        # 这是一枚**时间炸弹**：测试会因为"今天是几号"而失败，与代码质量无关。
+        signal_day = (now - timedelta(days=5)).strftime("%Y-%m-%d")
+        t1_day = (now - timedelta(days=4)).strftime("%Y-%m-%d")
+        # 四个查询接口用的是**显式**时段，必须与上面的样本日期同源，
+        # 否则它们又会各自硬编码一个会过期的窗口。
+        window = (
+            f"start_date={signal_day}&end_date={t1_day}"
+        )
 
         with get_db_ctx() as db:
             base = model_profile_service.create_model_profile(
@@ -778,7 +791,7 @@ class TestModelArenaApi:
             db.commit()
 
         board_resp = self.client.get(
-            "/v1/model-arena/leaderboard?start_date=2026-05-01&end_date=2026-05-31&scope=all",
+            f"/v1/model-arena/leaderboard?{window}&scope=all",
             headers=self.headers,
         )
         assert board_resp.status_code == 200
@@ -793,7 +806,7 @@ class TestModelArenaApi:
         )
 
         compare_resp = self.client.get(
-            "/v1/model-arena/symbol-compare?symbol=600519.SH&start_date=2026-05-01&end_date=2026-05-31&scope=all",
+            f"/v1/model-arena/symbol-compare?symbol=600519.SH&{window}&scope=all",
             headers=self.headers,
         )
         assert compare_resp.status_code == 200
@@ -803,7 +816,7 @@ class TestModelArenaApi:
         assert any((item.get("model_profile_id") == target["id"]) for item in compare.get("rows") or [])
 
         detail_resp = self.client.get(
-            f"/v1/model-arena/model-detail?model_profile_id={target['id']}&start_date=2026-05-01&end_date=2026-05-31&scope=all&limit=50",
+            f"/v1/model-arena/model-detail?model_profile_id={target['id']}&{window}&scope=all&limit=50",
             headers=self.headers,
         )
         assert detail_resp.status_code == 200
@@ -813,7 +826,7 @@ class TestModelArenaApi:
         assert any(item.get("symbol") == "600519.SH" for item in detail.get("rows") or [])
 
         trend_resp = self.client.get(
-            "/v1/model-arena/model-trend?start_date=2026-05-01&end_date=2026-05-31&scope=all&top_n=5&min_samples=1",
+            f"/v1/model-arena/model-trend?{window}&scope=all&top_n=5&min_samples=1",
             headers=self.headers,
         )
         assert trend_resp.status_code == 200
@@ -1163,7 +1176,14 @@ class TestWatchlistAddEndpoint:
             "宁德时代": "300750.SZ",
         }
         code_to_name = {value: key for key, value in name_to_code.items()}
-        with patch("api.main._load_cn_stock_map", return_value=name_to_code), \
+        # 必须 patch 端点**实际调用**的那两个函数（`POST /v1/watchlist` 用的是
+        # `_get_stock_name_map_cached_only()` 与 `_get_reverse_stock_map()`）。
+        # 此前 patch 的是 `_load_cn_stock_map`——那是个**加载器**，而端点读的是
+        # cached-only 变体，所以这个 patch 从未生效：冷缓存时 name→code 为空，
+        # 「宁德时代」「贵州茅台」解析不出来，测试在**隔离运行时必失败**；
+        # 而在全量运行里，更早的用例预热了全局 `_cn_stock_names`，于是偶然通过。
+        # 这正是"两个方向的顺序依赖"（单独跑失败、全量跑通过）的来源。
+        with patch("api.main._get_stock_name_map_cached_only", return_value=name_to_code), \
              patch("api.main._get_reverse_stock_map", return_value=code_to_name):
             r = self.client.post("/v1/watchlist", headers=self.headers, json={
                 "text": "600519 宁德时代, 未知标的",
@@ -1180,7 +1200,14 @@ class TestWatchlistAddEndpoint:
             "贵州茅台": "600519.SH",
         }
         code_to_name = {value: key for key, value in name_to_code.items()}
-        with patch("api.main._load_cn_stock_map", return_value=name_to_code), \
+        # 必须 patch 端点**实际调用**的那两个函数（`POST /v1/watchlist` 用的是
+        # `_get_stock_name_map_cached_only()` 与 `_get_reverse_stock_map()`）。
+        # 此前 patch 的是 `_load_cn_stock_map`——那是个**加载器**，而端点读的是
+        # cached-only 变体，所以这个 patch 从未生效：冷缓存时 name→code 为空，
+        # 「宁德时代」「贵州茅台」解析不出来，测试在**隔离运行时必失败**；
+        # 而在全量运行里，更早的用例预热了全局 `_cn_stock_names`，于是偶然通过。
+        # 这正是"两个方向的顺序依赖"（单独跑失败、全量跑通过）的来源。
+        with patch("api.main._get_stock_name_map_cached_only", return_value=name_to_code), \
              patch("api.main._get_reverse_stock_map", return_value=code_to_name):
             r = self.client.post("/v1/watchlist", headers=self.headers, json={
                 "text": "600519.SH 贵州茅台",
@@ -1720,7 +1747,9 @@ class TestPortfolioOverviewEndpoint:
         self.code_to_name = {value: key for key, value in self.name_to_code.items()}
 
     def _add_watchlist(self, text: str):
-        with patch("api.main._load_cn_stock_map", return_value=self.name_to_code), \
+        # 与 `TestWatchlistAddEndpoint` 同一个坑：端点读的是
+        # `_get_stock_name_map_cached_only()`，patch 加载器不会生效。
+        with patch("api.main._get_stock_name_map_cached_only", return_value=self.name_to_code), \
              patch("api.main._get_reverse_stock_map", return_value=self.code_to_name):
             response = self.client.post("/v1/watchlist", headers=self.headers, json={"text": text})
         assert response.status_code == 200
@@ -1767,7 +1796,11 @@ class TestPortfolioOverviewEndpoint:
             )
             db.commit()
 
-        with patch("api.main._get_reverse_stock_map", return_value=self.code_to_name):
+        # `/v1/portfolio/overview` 是**读**接口，用 `_get_reverse_stock_map_cached_only()`
+        # （冷缓存不阻塞、不触发网络加载）。patch `_get_reverse_stock_map` 对它无效，
+        # 于是这个用例此前依赖别的用例把全局缓存预热好——单独跑就失败。
+        # 定时任务类接口（`/v1/scheduled*`）用的是冷加载变体，那些 patch 保持不变。
+        with patch("api.main._get_reverse_stock_map_cached_only", return_value=self.code_to_name):
             response = self.client.get("/v1/portfolio/overview", headers=self.headers)
 
         assert response.status_code == 200

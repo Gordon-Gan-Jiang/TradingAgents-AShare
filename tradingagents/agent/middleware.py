@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Protocol, Sequence, runtime_checkable
 
+from tradingagents.grounding.directives import scrub_directives
 from tradingagents.tools.spec import RESEARCH_DISCLAIMER, ToolResult
 
 from .events import Notice
@@ -267,17 +268,24 @@ class DirectiveLanguageGuard(BaseMiddleware):
     """拦截指令式买卖措辞（合规要求）。
 
     研究结论允许是「条件化观察」，不允许是「立即清仓」这类祈使句。
+
+    ## 词表为什么从 `grounding/directives.py` 取
+
+    这里原本自带一份 6 条清单，比校验器那份少了 `建议买入` / `建议卖出`。
+    而结构化回答走**强**校验（`grounding/verifier.py` 不检查指令措辞），
+    指令护栏只剩这一道，于是那两个词能从主路径**原样出门**（已实测复现）。
+    清单现在全项目只有一份，见该模块的说明与
+    `tests/test_directive_policy_single_source.py`。
     """
 
     name = "directive_language_guard"
 
-    _DIRECTIVES = ("立即清仓", "马上买入", "立刻卖出", "全仓买入", "无条件卖出", "抓紧买入")
-
     def before_answer(self, ctx: TurnContext, text: str) -> str:
-        for phrase in self._DIRECTIVES:
-            if phrase in text:
-                text = text.replace(phrase, "（该措辞已被合规过滤）")
-                ctx.notices.append("directive_language_guard: 已过滤指令式措辞")
+        text, hits = scrub_directives(text)
+        if hits:
+            ctx.notices.append(
+                "directive_language_guard: 已过滤指令式措辞（%s）" % "、".join(hits)
+            )
         return text
 
 

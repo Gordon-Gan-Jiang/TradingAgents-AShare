@@ -98,7 +98,8 @@ def test_mcp_server_exposes_only_synchronous_tools(wired):
     assert "signal_washout_probe" in names
     assert "signal_washout_probe_batch" in names
     assert "data_symbol_news" in names
-    assert "get_stock_data" in names  # 迁移后的数据工具也在册
+    # 迁移后的数据工具也在册；样本用 `get_fundamentals`（`get_stock_data` 已退役）。
+    assert "get_fundamentals" in names
     # 昂贵管道与写操作不可达
     assert "analyze_pipeline" not in names
 
@@ -312,7 +313,8 @@ def test_mcp_end_to_end_over_real_transport(wired, monkeypatch):
 
     names = {t.name for t in tools.tools}
     assert "signal_washout_probe" in names
-    assert "get_stock_data" in names
+    # 样本用 `get_fundamentals`：`get_stock_data` 已从工具面退役。
+    assert "get_fundamentals" in names
     assert "analyze_pipeline" not in names
 
     # mcp 2.x：字段名是 snake_case（is_error / structured_content）；

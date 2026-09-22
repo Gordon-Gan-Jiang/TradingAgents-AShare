@@ -57,12 +57,30 @@ def _item(value, *, item_id="E1", field="新闻标题"):
 def test_untrusted_text_is_marked_in_the_prompt():
     from tradingagents.agent.loop import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
 
-    # 取值只进提示词的地方是筛选回合（普通回合只给字段名）——标记要出现在取值处
+    # 取值现在进入**每一条**回合（此前只有筛选回合带取值）——标记要出现在取值处
     prompt = _prompt_with([_item(f"公司发布公告：{INJECTION}")], screen=True)
 
     assert UNTRUSTED_OPEN in prompt and UNTRUSTED_CLOSE in prompt, "外部文本必须被边界标记包住"
     inner = prompt.split(UNTRUSTED_OPEN, 1)[1].split(UNTRUSTED_CLOSE, 1)[0]
     assert INJECTION in inner, "可疑文本必须落在标记**内部**（在标记外就等于没标）"
+
+
+def test_untrusted_text_is_marked_on_the_common_path_too():
+    """**非筛选回合也必须标注**——这是本轮改动放大的风险面。
+
+    取值原本只在筛选回合进提示词，因此"标记外部文本"这件事的作用面很窄。
+    改成一律给出取值后，新闻标题、公告原文、研报摘录在**每一条**回合都会进
+    提示词，注入面随之扩大。标记若只覆盖筛选路径，通用路径就是敞开的。
+    """
+    from tradingagents.agent.loop import UNTRUSTED_CLOSE, UNTRUSTED_OPEN
+
+    prompt = _prompt_with([_item(f"公司发布公告：{INJECTION}")], screen=False)
+
+    assert UNTRUSTED_OPEN in prompt and UNTRUSTED_CLOSE in prompt, (
+        "通用回合的取值同样来自外部，必须被边界标记包住"
+    )
+    inner = prompt.split(UNTRUSTED_OPEN, 1)[1].split(UNTRUSTED_CLOSE, 1)[0]
+    assert INJECTION in inner, "可疑文本必须落在标记内部"
 
 
 def test_history_text_is_wrapped_too():

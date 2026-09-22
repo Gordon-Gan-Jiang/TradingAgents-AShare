@@ -13,12 +13,15 @@
 
 from __future__ import annotations
 
+from tradingagents.grounding.directives import DIRECTIVE_PHRASES as _DIRECTIVE_PHRASES
 from tradingagents.grounding.numbers import (
     date_assertion_ok,
+    evidence_text,
     extract_dates,
     extract_numbers,
     matches_any,
     scalar_values,
+    textual_values,
 )
 from tradingagents.grounding.types import CheckResult, EvidenceSet
 
@@ -26,17 +29,9 @@ REASON_UNSOURCED_NUMBER = "unsourced_number"
 REASON_UNSOURCED_DATE = "unsourced_date"
 REASON_DIRECTIVE = "directive_language"
 
-# 指令式买卖措辞：研究结论允许是条件化观察，不允许是祈使句
-_DIRECTIVE_PHRASES = (
-    "立即清仓",
-    "马上买入",
-    "立刻卖出",
-    "全仓买入",
-    "无条件卖出",
-    "抓紧买入",
-    "建议买入",
-    "建议卖出",
-)
+# 指令式买卖措辞：清单在 `grounding/directives.py`，**只此一份**。
+# 这里曾各自维护一份，结果与中间件的清单漂移，`建议买入`/`建议卖出`
+# 能从强校验的主路径漏出去（详见该模块注释）。
 
 
 def verify_text(
@@ -47,7 +42,12 @@ def verify_text(
     previous_trading_day: str | None = None,
 ) -> CheckResult:
     """弱校验：数值与日期的存在性 + 指令式措辞拦截。"""
-    available = scalar_values(evidence.items)
+    # 文本路径此前只比对**数值标量**，于是强校验路径早就修掉的那类假阳性在这里
+    # 原样残留：模型照抄字段名（「候选1」）或引用文本证据正文时，那个数字在
+    # 标量集合里找不到 → 判 unsourced_number → 降级。两条路径口径必须一致，
+    # 否则「修了一处、漏了另一处」会反复发生。
+    available = scalar_values(evidence.items) + textual_values(evidence.items)
+    cited_text = evidence_text(evidence.items)
 
     for phrase in _DIRECTIVE_PHRASES:
         if phrase in text:
@@ -69,6 +69,9 @@ def verify_text(
 
     cited_as_of = frozenset(item.as_of for item in evidence.items)
     for assertion in extract_dates(text):
+        # 同强校验路径：日期词出现在证据字段名/正文里就是在引用，不是断言。
+        if assertion.raw and assertion.raw in cited_text:
+            continue
         if not date_assertion_ok(
             assertion,
             cited_as_of,
