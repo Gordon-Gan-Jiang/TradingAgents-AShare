@@ -135,6 +135,11 @@ def main() -> int:
     parser.add_argument("--json", type=Path, default=None, help="把原始结果写到该路径")
     parser.add_argument("--compare", type=Path, default=None, help="与历史 JSON 对比")
     parser.add_argument("--fail-under", type=float, default=None, help="规划准确率门槛（CI 用）")
+    parser.add_argument(
+        "--fail-under-recall", type=float, default=None,
+        help="工具召回率门槛（CI 用）。离线（规则路径）实测 66.7%，规划层启用时 96.2%——"
+             "两个口径的基线不同，门槛必须跟着当前口径走，否则闸门要么常红要么形同虚设",
+    )
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--no-write", action="store_true", help="不写 docs 报告")
     parser.add_argument("--with-planner", action="store_true",
@@ -184,6 +189,14 @@ def main() -> int:
     if args.fail_under is not None and metrics["planning_accuracy"] < args.fail_under:
         print(
             f"\n[FAIL] 规划准确率 {_fmt(metrics['planning_accuracy'])} < 门槛 {_fmt(args.fail_under)}",
+            file=sys.stderr,
+        )
+        return 1
+    if args.fail_under_recall is not None and metrics["tool_recall"] < args.fail_under_recall:
+        print(
+            f"\n[FAIL] 工具召回率 {_fmt(metrics['tool_recall'])} < 门槛 "
+            f"{_fmt(args.fail_under_recall)}（当前口径："
+            f"{'规划层启用' if args.with_planner else '规则路径（离线）'}）",
             file=sys.stderr,
         )
         return 1
