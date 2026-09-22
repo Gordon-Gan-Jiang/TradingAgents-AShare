@@ -491,3 +491,112 @@ def test_registry_without_ports_factory_still_has_data_tools():
     assert "get_fundamentals" in names
     assert "signal_washout_probe" not in names
     assert "data_symbol_news" not in names
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 「多给的参数」有两种，正确处理方式相反
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 原本这里一律硬拒（`unknown = [...] ; if unknown: raise`）。它抓到过一个真 bug
+# ——`routing.py:194` 记着：曾经按 `symbol`/`as_of` 硬猜参数名，于是每次调用都被
+# 拒。所以这个拒绝本身有价值，**不能静默取消**。
+#
+# 但代价与收益不成比例。实测（2026-09-22，问题「贵州茅台市盈率多少」）规划器给出：
+#
+#     {"ticker": "600519.SH", "curr_date": "2026-09-22", "symbol": "600519.SH"}
+#                             ↑ 必需参数齐全且正确            ↑ 多带的一个等价别名
+#
+# 结果整次调用抛 `ValueError: unknown arguments: ['symbol']` → 工具 0 条证据 →
+# 用户看到「本轮无可用证据」。**模型因为多给了一个信息而受罚**，而这是必然会
+# 重演的行为（LLM 天然会把上下文里的 `symbol` 一并带上）。
+#
+# 区分判据：名字**近似**某个已声明参数 = 像拼错 → 拒绝；
+# 与任何声明参数都不同源 = 外来键 → 丢弃。两类都有测试钉住。
+
+
+def _registry_with(schema: dict, handler) -> object:
+    """按给定 schema / handler 造一个只含一个工具的注册表。"""
+    from tradingagents.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register(_spec(input_schema=schema, handler=handler))
+    return registry
+
+
+def test_foreign_argument_is_dropped_not_fatal():
+    """外来键只丢弃：必需参数齐全时不该让整次调用失败。"""
+    seen: dict = {}
+    registry = _registry_with(
+        {
+            "type": "object",
+            "properties": {"ticker": {"type": "string"}, "curr_date": {"type": "string"}},
+            "required": ["ticker"],
+        },
+        lambda **kw: seen.update(kw) or "ok",
+    )
+    result = registry.invoke(
+        "demo_tool", ticker="600519.SH", curr_date="2026-03-04", symbol="600519.SH"
+    )
+
+    assert result == "ok"
+    assert seen == {"ticker": "600519.SH", "curr_date": "2026-03-04"}, (
+        f"外来键不得传给 handler，实得 {seen}"
+    )
+    assert registry.last_dropped_arguments == ("symbol",), "丢弃必须可观测"
+
+
+def test_mistyped_argument_is_rejected_and_names_the_right_one():
+    """拼错必须拒绝，且要点名"应该改成哪个"。
+
+    静默丢弃拼错的参数的后果是：工具退回默认值，于是默认的取值冒充了模型想表达的
+    取值——不报错、也没有痕迹。这比一次可见的失败糟得多。
+    """
+    registry = _registry_with(
+        {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string"},
+                "look_back_days": {"type": "integer", "default": 7},
+            },
+            "required": ["ticker"],
+        },
+        lambda **kw: "ok",
+    )
+    with pytest.raises(ValueError) as excinfo:
+        registry.invoke("demo_tool", ticker="600519.SH", look_back=5)
+
+    message = str(excinfo.value)
+    assert "unknown arguments" in message
+    assert "look_back_days" in message, "错误信息要点名正确的参数名"
+    assert registry.last_dropped_arguments == (), "拒绝的调用不应记录为已丢弃"
+
+
+def test_missing_required_is_reported_even_when_a_foreign_key_is_present():
+    """缺必需参数时报"缺失"——它比"有个参数不认识"更接近要修的东西。"""
+    registry = _registry_with(
+        {
+            "type": "object",
+            "properties": {"ticker": {"type": "string"}},
+            "required": ["ticker"],
+        },
+        lambda **kw: "ok",
+    )
+    with pytest.raises(ValueError, match="missing required"):
+        registry.invoke("demo_tool", symbol="600519.SH")
+
+
+def test_dropped_arguments_reset_between_calls():
+    """上一次的丢弃记录不得残留到下一次（否则读到的诊断是错的）。"""
+    registry = _registry_with(
+        {
+            "type": "object",
+            "properties": {"ticker": {"type": "string"}},
+            "required": ["ticker"],
+        },
+        lambda **kw: "ok",
+    )
+    registry.invoke("demo_tool", ticker="600519.SH", symbol="X")
+    assert registry.last_dropped_arguments == ("symbol",)
+
+    registry.invoke("demo_tool", ticker="600519.SH")
+    assert registry.last_dropped_arguments == (), "干净的调用后应清空"

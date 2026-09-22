@@ -42,6 +42,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
@@ -390,6 +391,237 @@ def _evidence_items_from_json(rendered: str, *, source_key: str, as_of: str) -> 
     return tuple(items)
 
 
+# ── 表格 → 证据（Phase 2） ────────────────────────────────────────────────
+#
+# **本函数推翻了一条既有决定**，先把冲突讲清楚。
+#
+# `_evidence_items_from_json` 的 docstring 写着「表格不做解析——从散文里抠
+# '标签=数字' 极易错配，而错配的证据比没有证据糟得多」。那份顾虑针对的是
+# **散文**；而实测这两类表是**严格 Markdown 表格**：
+#
+#     get_fundamentals     22 行 × 10 列，列数不一致的行 **0**
+#     get_balance_sheet    14 行 × 18 列，列数不一致的行 **0**
+#
+# 有分隔行、列数逐行一致，所以"错配"在机械上可防——与"从散文里抠"是两回事。
+# 因此这里做的是**带护栏的解析**：任一条护栏不满足就**整张表放弃**，
+# 保持空证据（诚实优先的那条原则没有被推翻，只是适用范围收窄了）。
+#
+# 错配为什么危险：错配的证据会被校验器**接受**（数字确实出现在所引证据里），
+# 这是比弃权更隐蔽的正确性漏洞。所以 G1/G2 的否证测试是本模块的核心交付物。
+
+# 单元格里这些值都**不是事实**，一律不产出证据。
+_NOT_A_FACT = frozenset({"", "nan", "none", "null", "n/a", "na", "-", "--", "—"})
+
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
+
+# 报告期形态：`20260630` / `2026-06-30` / `2026Q2` / `2026-Q2`
+_PERIOD_COMPACT_RE = re.compile(r"^(19|20)\d{2}(0[1-9]|1[0-2])([0-3]\d)$")
+_PERIOD_DASH_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_PERIOD_QUARTER_RE = re.compile(r"^(\d{4})-?Q([1-4])$")
+
+# 一行的"标签列"最多看前两列：财务报表的表头形如
+#     | 选项 | 指标 | 20260630 | ...        （get_fundamentals）
+#     | 报告日 | 流动资产 | 货币资金 | ...   （get_balance_sheet）
+# 两种形态的标签列数都 ≤ 2。
+_LABEL_COLUMNS = 2
+
+
+def _parse_period(cell: str) -> str:
+    """把单元格里的报告期归一成 `YYYY-MM-DD`；不是报告期就返回空串。"""
+    text = str(cell or "").strip()
+    match = _PERIOD_DASH_RE.match(text)
+    if match:
+        return text
+    match = _PERIOD_COMPACT_RE.match(text)
+    if match:
+        return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    match = _PERIOD_QUARTER_RE.match(text)
+    if match:
+        # 季度末是**推断**，不是原样搬运——所以这里只认能直接落地的形态。
+        # `2026-Q2` 这类不产出 as_of（宁可少一条证据，不要一个猜出来的时点）。
+        return ""
+    return ""
+
+
+def _split_table_row(line: str) -> list[str]:
+    """切开一行 Markdown 表格，去掉首尾的空单元格。"""
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|"):
+        body = body[:-1]
+    return [cell.strip() for cell in body.split("|")]
+
+
+def _cell_as_number(cell: str) -> float | None:
+    """单元格 → 数值。**只做原样搬运**，不换算、不推断（G3）。
+
+    `nan` / 空 / `-` 不是事实，返回 None（G2）。
+    千分位逗号是显示格式，去掉它不改变数值语义。
+    """
+    text = str(cell or "").strip()
+    if text.lower() in _NOT_A_FACT:
+        return None
+    try:
+        return float(text.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _table_blocks(rendered: str) -> list[list[list[str]]]:
+    """切出所有**规整的** Markdown 表格（G1）。
+
+    规整 = 至少 2 行（表头 + 分隔行）、含分隔行、且**所有行列表数一致**。
+    任一条不满足就丢弃整张表——不"部分解析"，因为列错位会把 A 指标的值
+    安到 B 指标上，而那正是本模块最要防的事。
+    """
+    blocks: list[list[list[str]]] = []
+    current: list[str] = []
+
+    def flush() -> None:
+        if len(current) < 2:
+            return
+        rows = [_split_table_row(line) for line in current]
+        widths = {len(row) for row in rows}
+        if len(widths) != 1:
+            # 列数不一致 → 整张表放弃（G1）
+            return
+        if not any(_TABLE_SEP_RE.match(line) for line in current):
+            return
+        blocks.append(rows)
+
+    for line in str(rendered or "").splitlines():
+        if _TABLE_ROW_RE.match(line):
+            current.append(line)
+            continue
+        flush()
+        current = []
+    flush()
+    return blocks
+
+
+def _evidence_items_from_table(
+    rendered: str, *, source_key: str, as_of: str = ""
+) -> tuple[EvidenceItem, ...]:
+    """把**规整的** Markdown 表格转成可引用证据（Phase 2）。
+
+    支持两种朝向，都按实际渲染形态识别：
+
+    * **表头是报告期**（`get_fundamentals`）：
+          | 选项   | 指标     | 20260630 | 20260331 | ...
+          | 常用指标 | 归母净利润 | 4.45169e+10 | ...
+      指标名取第二列（有"选项"分组时忽略分组列），一期一条证据。
+
+    * **首列是报告期**（`get_balance_sheet` / `get_income_statement`）：
+          | 报告日   | 流动资产 | 货币资金 | ...
+          | 20260630 | nan     | 5.35188e+10 | ...
+      表头是指标名，一行一期，每个有值的单元格一条证据。
+
+    G5 的取舍：按**报告期由新到旧**填充额度。财务数据里"最新一期"是语义上
+    最常被问到的，所以新的一期优先占满 `_MAX_EVIDENCE_ITEMS`，剩余额度再给
+    上一期。这样条数有硬上限，且截断发生在最不常用的那一端。
+    """
+    text = str(rendered or "")
+    if "|" not in text:
+        return ()
+
+    items: list[EvidenceItem] = []
+
+    for rows in _table_blocks(text):
+        # 分隔行（`|---|---|`）不是数据行
+        data_rows = [
+            row
+            for row in rows
+            if not all(
+                set(cell) <= set(":- ") and cell for cell in row
+            )
+        ]
+        if len(data_rows) < 2:
+            continue
+        header = data_rows[0]
+        body = data_rows[1:]
+
+        # ── 朝向 A：首列是报告期 ──
+        first_col_periods = [_parse_period(row[0]) for row in body if row]
+        if body and all(first_col_periods) and any(first_col_periods):
+            # 表头里的标签列（通常只有"报告日"一列）之后都是指标名
+            for row in body:
+                period = _parse_period(row[0])
+                if not period:
+                    continue
+                for index in range(1, min(len(row), len(header))):
+                    value = _cell_as_number(row[index])
+                    if value is None:
+                        continue
+                    field = str(header[index] or "").strip()
+                    if not field:
+                        continue
+                    if len(items) >= _MAX_EVIDENCE_ITEMS:
+                        break
+                    items.append(
+                        EvidenceItem(
+                            id=f"E{len(items) + 1}",
+                            field=f"{field}（{period}）",
+                            value=value,
+                            unit="yuan",
+                            source_key=source_key,
+                            # G4：时点取**报告期**，不是查询日
+                            as_of=period,
+                        )
+                    )
+            continue
+
+        # ── 朝向 B：表头是报告期 ──
+        header_periods = {index: _parse_period(cell) for index, cell in enumerate(header)}
+        period_columns = {i: p for i, p in header_periods.items() if p}
+        if not period_columns:
+            continue
+        # 指标名所在列 = 报告期列之前、最靠右的那个有文字标签的列。
+        # `get_fundamentals` 里是第二列（`指标`），第一列是分组（`选项`）。
+        label_index = max(
+            (i for i in range(min(len(header), max(period_columns))) if not header_periods.get(i)),
+            default=None,
+        )
+        if label_index is None:
+            continue
+        # 报告期由新到旧（G5）。**期优先**：先把最新一期铺满所有指标，再用
+        # 剩余额度给上一期。
+        #
+        # 为什么不是"指标优先"：额度只有 40 条，而 `get_fundamentals` 有 22 个
+        # 指标 × 8 期。若按指标优先，前 5 个指标的 8 期就把额度吃光，
+        # 用户问「营业成本多少」时那个指标**根本没有证据**——明明表里有。
+        # 期优先保证最新一期的**每个**指标都被覆盖，截断发生在最老的期限上
+        # （最不常被问的那一端）。
+        #
+        # 与朝向 A 的语义也一致：那边天然就是期优先（一行一期）。
+        ordered = sorted(period_columns.items(), key=lambda kv: kv[1], reverse=True)
+        for column, period in ordered:
+            for row in body:
+                if len(row) <= max(label_index, column):
+                    continue
+                metric = str(row[label_index] or "").strip()
+                if metric.lower() in _NOT_A_FACT:
+                    continue
+                value = _cell_as_number(row[column])
+                if value is None:
+                    continue
+                if len(items) >= _MAX_EVIDENCE_ITEMS:
+                    break
+                items.append(
+                    EvidenceItem(
+                        id=f"E{len(items) + 1}",
+                        field=f"{metric}（{period}）",
+                        value=value,
+                        unit="yuan",
+                        source_key=source_key,
+                        as_of=period,  # G4
+                    )
+                )
+
+    return tuple(items)
+
+
 def make_data_tools() -> tuple[ToolSpec, ...]:
     """构造**工具面**上的 11 个数据工具 ToolSpec（19 减掉退役的 8 个）。
 
@@ -423,10 +655,17 @@ def make_data_tools() -> tuple[ToolSpec, ...]:
                 )
             # JSON 型输出转成可引用证据；失败文案一律不产出证据（里面即使有数字
             # 也不是事实）。表格/散文型输出保持空证据——诚实优先于覆盖率。
-            evidence = (
-                ()
-                if failed
-                else _evidence_items_from_json(
+            # 证据抽取按 **JSON → 表格 → 文本** 顺序尝试，全部不匹配才保持空证据。
+            #
+            # 每一步都比上一步更"敢"：JSON 有明确结构；Markdown 表格有分隔行与
+            # 逐行一致的列数（G1 保证不错位）；裸文本这一步目前只有 `get_zt_pool`
+            # 那种固定格式，且**格式不匹配就不产出**。
+            #
+            # 失败文案一律不产出证据（里面即使有数字也不是事实）。
+            if failed:
+                evidence = ()
+            else:
+                evidence = _evidence_items_from_json(
                     rendered,
                     source_key=_decl.category,
                     # 实时类工具没有日期参数，但数据自带时点（`quote_time`）。
@@ -434,7 +673,14 @@ def make_data_tools() -> tuple[ToolSpec, ...]:
                     # 无从回答——用数据自己的时点比用"今天"更诚实。
                     as_of=as_of or _as_of_from_payload(rendered),
                 )
-            )
+                if not evidence:
+                    evidence = _evidence_items_from_table(
+                        rendered,
+                        source_key=_decl.category,
+                        # 表格里每条证据的 as_of 由**报告期**决定（G4），
+                        # 这里的入参只是兜底：取不到报告期就不产出该行。
+                        as_of=as_of,
+                    )
             return ToolResult(
                 data={
                     "rendered": rendered,
@@ -461,8 +707,9 @@ def make_data_tools() -> tuple[ToolSpec, ...]:
                 title=decl.name,
                 description=(
                     f"既有分析管道使用的数据工具 {decl.name}（vendor 类别：{decl.category}）。"
-                    "返回 vendor 文本；结构化（JSON）输出会同时产出可引用证据，"
-                    "表格型输出则只给文本、不含可引用数值。"
+                    "返回 vendor 文本；结构化（JSON）与**规整的 Markdown 表格**输出都会"
+                    "同时产出可引用证据（表格的证据逐字取自单元格，时点取报告期）；"
+                    "散文型输出不含可引用数值。"
                 ),
                 input_schema=decl.schema,
                 output_contract=OUTPUT_CONTRACT,

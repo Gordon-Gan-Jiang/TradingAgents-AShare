@@ -339,10 +339,24 @@ def test_data_tool_validates_arguments(monkeypatch):
             "get_global_news", curr_date="2026-03-04", look_back_days="三十",
         )
 
-    with pytest.raises(ValueError, match="unknown arguments"):
-        registry.invoke(
-            _SPECIMEN, ticker="600519.SH", curr_date="2026-03-04", look_back=5
-        )
+    # 拼写错误必须被拒——**不能**静默丢弃后退回默认值。
+    # `get_fundamentals` 的声明参数是 `ticker` / `curr_date`，所以 `currdate`
+    # 与 `ticker_x` 都是明显的拼错（前缀关系 / 编辑距离小）。
+    # 静默丢掉它们的后果是"问的是 A、执行的是默认的 B"，且毫无痕迹。
+    for mistyped in ({"currdate": "2026-03-04"}, {"ticker_x": "600519.SH"}):
+        with pytest.raises(ValueError, match="unknown arguments"):
+            registry.invoke(_SPECIMEN, ticker="600519.SH", **mistyped)
+
+    # 但**与任何声明参数都不同源**的外来键只是被丢弃，不让整次调用失败。
+    # 实测（2026-09-22，问题「贵州茅台市盈率多少」）规划器给出的参数是
+    # ticker + curr_date（齐全且正确）+ 一个多带出来的 symbol；原有硬拒让整次
+    # 调用抛 ValueError → 0 条证据 → 用户看到「本轮无可用证据」。
+    # 模型因为"多给了一个信息"而受罚，而且这是必然重演的行为。
+    result = registry.invoke(
+        _SPECIMEN, ticker="600519.SH", curr_date="2026-03-04", symbol="600519.SH"
+    )
+    assert result is not None, "外来键不该让整次调用失败"
+    assert registry.last_dropped_arguments == ("symbol",), "丢弃必须在 trace 里可见"
 
 
 # ══════════════════════════════════════════════════════════════════════════

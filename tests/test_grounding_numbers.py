@@ -195,3 +195,60 @@ def test_scalars_of_extracts_numeric_evidence_values():
     assert 0.583 in values
     # 文本类证据不产生标量（它不能被「数值断言」引用错配）
     assert "broad_contraction" not in values
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 科学计数法必须是一个数，而不是「尾数 + 指数」两个数
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 财务报表（`get_fundamentals` / `get_balance_sheet` / `get_income_statement`）
+# 的**原始渲染文本里全是** `4.45169e+10` 这种写法：
+#
+#     | 常用指标 | 归母净利润 |   4.45169e+10 |   2.72425e+10 | ...
+#
+# 模型的上下文里就有它，所以"照抄"是最自然的引用方式。而在加这个分支之前：
+#
+#     extract_numbers('4.45169e+10') -> [4.45169, 10.0]
+#
+# 两个数都不等于 4.45169e10，于是**最忠实的那种引用反而被判 `unsourced_number`**。
+# 同类的等价写法当时是能过的（`445.17 亿` → 44517000000），所以这条假阳性
+# 只惩罚照抄原文的模型——与「引用机制被读成数据」那一类假阳性同源。
+
+
+def test_scientific_notation_is_one_number_not_mantissa_plus_exponent():
+    """尾数与指数必须合成一个数；拆成两个就永远对不上。"""
+    from tradingagents.grounding.numbers import extract_numbers
+
+    tokens = extract_numbers("4.45169e+10")
+    assert len(tokens) == 1, f"科学计数法应是一个数，实得 {[(t.raw, t.value) for t in tokens]}"
+    assert tokens[0].value == 4.45169e10
+
+
+def test_scientific_notation_parses_exactly_like_float():
+    """解析值必须与 `float()` 逐位一致，不能有自造的浮点毛刺。
+
+    反例：`尾数 * 10**指数` 会把 `5.35188e+10` 算成 `53518800000.00001`，
+    而证据侧存的是 `float('5.35188e+10')` 的精确值——两侧会有细微差异。
+    """
+    from tradingagents.grounding.numbers import extract_numbers
+
+    for literal in ("4.45169e+10", "5.35188e+10", "4.0469e+08", "1.2E-3", "2.5e10"):
+        value = extract_numbers(literal)[0].value
+        assert value == float(literal), f"{literal}: 解析 {value!r} != float() {float(literal)!r}"
+
+
+def test_scientific_notation_handles_sign_and_lowercase_e():
+    from tradingagents.grounding.numbers import extract_numbers
+
+    assert extract_numbers("-3.5e+09")[0].value == -3.5e9
+    assert extract_numbers("1.2e-3")[0].value == 1.2e-3
+
+
+def test_non_scientific_numbers_are_unchanged():
+    """加这个分支不得改变既有形态的解析结果。"""
+    from tradingagents.grounding.numbers import extract_numbers
+
+    assert [t.value for t in extract_numbers("44516900000.0")] == [44516900000.0]
+    assert [t.value for t in extract_numbers("445.17 亿")] == [44517000000.0]
+    assert [t.value for t in extract_numbers("1.23%")] == [1.23]
+    assert extract_numbers("2026-06-30") == ()

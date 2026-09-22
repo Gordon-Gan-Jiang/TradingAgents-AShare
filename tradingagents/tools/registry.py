@@ -29,6 +29,55 @@ from .spec import ToolResult, ToolSpec
 
 logger = logging.getLogger(__name__)
 
+
+def _edit_distance_within(a: str, b: str, limit: int = 2) -> bool:
+    """编辑距离是否 ≤ limit（带上限的 Levenshtein，够用且不必引入依赖）。"""
+    if abs(len(a) - len(b)) > limit:
+        return False
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        current = [i]
+        for j, cb in enumerate(b, start=1):
+            current.append(
+                min(
+                    previous[j] + 1,  # 删
+                    current[j - 1] + 1,  # 增
+                    previous[j - 1] + (ca != cb),  # 改
+                )
+            )
+        if min(current) > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+
+def _looks_like_a_typo_of(key: str, properties: Any) -> bool:
+    """`key` 是否像某个已声明参数的拼写错误（而不是一个无关的外来键）。
+
+    分辨这两者是有意义的，因为它们的正确处理方式相反：
+
+    * `look_back` 想写 `look_back_days` → **拒绝**。静默丢弃会让工具退回默认值，
+      于是默认的"7 天"冒充了模型想表达的"5 天"——不报错、也没痕迹。
+    * 问市盈率时多带的 `symbol`（工具要的是 `ticker`）→ **丢弃**。它与任何声明
+      参数都不同源，丢掉不改变这次调用的语义；而硬拒会让整次调用失败、
+      用户只看到「本轮无可用证据」。
+
+    判据：前缀关系（含互为前缀）或编辑距离 ≤ 2。
+    """
+    lowered = key.lower()
+    for declared in properties:
+        other = str(declared).lower()
+        if lowered == other:
+            continue
+        if lowered.startswith(other) or other.startswith(lowered):
+            # 前缀关系：`look_back` / `look_back_days`、`date` / `date_range`。
+            # 太短的公共前缀不算（`date` 与 `data` 不是同一个东西）。
+            if min(len(lowered), len(other)) >= 4:
+                return True
+        if _edit_distance_within(lowered, other, limit=2):
+            return True
+    return False
+
 # JSON Schema 基础类型 → Python 类型。只覆盖工具实际会用到的子集，
 # 保持校验确定性、零外部依赖。
 _TYPE_MAP: dict[str, tuple[type, ...]] = {
@@ -51,6 +100,9 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._specs: dict[str, ToolSpec] = {}
+        # 最近一次 `validate` 丢弃的未声明参数。留着是为了让"提示词里出现了假参数名"
+        # 这类回归仍然可观测——丢弃它本身是对的，静默丢弃才是问题。
+        self.last_dropped_arguments: tuple[str, ...] = ()
 
     def register(self, spec: ToolSpec) -> None:
         if spec.name in self._specs:
@@ -98,19 +150,75 @@ class ToolRegistry:
         return [spec.as_descriptor() for spec in self.synchronous()]
 
     def validate(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """按声明 schema 校验并填充默认值。"""
+        """按声明 schema 校验并填充默认值。
+
+        **多给的参数被丢弃，而不是让整次调用失败。**
+
+        原本这里是硬拒：`unknown = [...] ; if unknown: raise`。它抓到过一个真 bug
+        （`routing.py:194` 记着：曾经按 `symbol`/`as_of` 硬猜参数名，于是每次调用
+        都被拒），所以这个拒绝本身有价值，**不能静默取消**。
+
+        但它的代价与收益不成比例。实测（2026-09-22，问题「贵州茅台市盈率多少」）
+        规划器给出的参数是：
+
+            {"ticker": "600519.SH", "curr_date": "2026-09-22", "symbol": "600519.SH"}
+                                    ↑ 必需参数齐全且正确            ↑ 多给的一个等价别名
+
+        结果整次调用抛 `ValueError: unknown arguments: ['symbol']` → 工具 0 条证据
+        → 用户看到「本轮无可用证据」。**模型因为多给了一个信息而受罚**，而且是一次
+        必然重演的行为（LLM 天然会把上下文里的 `symbol` 一并带上）。
+
+        为什么丢弃它不会掩盖错标的风险：所有**标识性**参数（`ticker` / `symbols` /
+        `board_name` / `date` / `curr_date`）在各自 schema 里都是 `required` 或没有
+        可静默替换的默认值；带默认值的只有 `freq` / `sector_type` / `period` /
+        `limit` 这类范围旋钮。所以"丢掉了想表达标的的那个键"不可能静默发生——
+        它必然表现为 `missing required arguments`，那正是准确的诊断。
+        """
         spec = self.require(name)
+        self.last_dropped_arguments = ()  # 每次校验都重置，避免读到上一次的残留
         schema = spec.input_schema
         properties: dict[str, Any] = schema.get("properties", {})
         required: list[str] = list(schema.get("required", []))
 
         unknown = [key for key in arguments if key not in properties]
-        if unknown:
-            raise ValueError(f"unknown arguments for {name}: {unknown}")
-
         missing = [key for key in required if key not in arguments]
+        # 必需项缺失时先报缺失：它比"有个参数不认识"更接近用户要修的东西。
         if missing:
-            raise ValueError(f"missing required arguments for {name}: {missing}")
+            detail = f"missing required arguments for {name}: {missing}"
+            if unknown:
+                detail += f"（另有未声明的参数被忽略：{unknown}）"
+            raise ValueError(detail)
+
+        # 区分两种"多给的参数"——它们的正确处理方式相反：
+        #
+        #   * **拼错**（`look_back` 想写 `look_back_days`）：必须拒绝。
+        #     静默丢弃会让工具退回默认值，于是"7 天"冒充了模型想表达的"5 天"——
+        #     一个不会报错、也没有痕迹的错误结果。
+        #   * **外来键**（问市盈率时把上下文里的 `symbol` 一并带上）：应当丢弃。
+        #     它与任何已声明参数都不同源，丢掉不改变这次调用的语义。
+        #
+        # 判据用"名字近似"来区分：前缀关系或编辑距离很小 = 像拼错。
+        typo = [key for key in unknown if _looks_like_a_typo_of(key, properties)]
+        if typo:
+            candidates = [
+                declared
+                for declared in properties
+                if _looks_like_a_typo_of(typo[0], {declared: properties[declared]})
+            ]
+            raise ValueError(
+                f"unknown arguments for {name}: {typo}"
+                f"（像已声明参数的拼写错误，应改为：{candidates}）"
+            )
+
+        if unknown:
+            # 保住诊断信号：丢弃这件事必须在 trace / 日志里看得见，
+            # 否则"提示词里出现了假参数名"这类回归又变成不可观测。
+            self.last_dropped_arguments = tuple(unknown)
+            logger.warning(
+                "工具 %s 收到未声明的参数 %s，已忽略（必需参数齐全、且不像拼写错误）",
+                name,
+                unknown,
+            )
 
         resolved: dict[str, Any] = {}
         for key, prop in properties.items():

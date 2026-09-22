@@ -101,18 +101,30 @@ def test_evidence_ids_are_unique_and_sequential(monkeypatch):
     assert all(i.startswith("E") for i in ids)
 
 
-def test_table_text_output_does_not_invent_evidence(monkeypatch):
-    """表格/散文型输出**不**硬编证据：错配的标签-数字比没有证据更糟。
+def test_well_formed_table_now_yields_evidence_by_verbatim_transfer(monkeypatch):
+    """**规整**的 Markdown 表格现在产出证据——这是 Phase 2 推翻的旧决定。
 
-    样本从 `get_stock_data` 换成 `get_fundamentals`（在册的散文型工具，同样带
-    日期参数）；判据不变——非结构化文本不得凭空生成证据。
+    原文（`data.py` 的 `_evidence_items_from_json` docstring）是「表格不做解析」，
+    理由是"从**散文**里抠'标签=数字'极易错配，而错配的证据比没有证据糟得多"。
+
+    Phase 2 把适用范围收窄为：**有分隔行且所有行列表数一致的 Markdown 表格**
+    可以解析（护栏 G1–G5，任一条不满足就整张表放弃）。这份 fixture 恰好就是
+    规整表格（首列是日期、含分隔行、三列逐行一致），所以产出证据是**正确**行为：
+    `开盘=9.60` 与该行该列逐字一致，没有错位。
+
+    错位才是要防的事，所以本测试只钉"搬运是否忠实"，护栏的否证测试在下面。
     """
     table = "| 日期 | 开盘 | 收盘 |\n|---|---|---|\n| 2026-09-19 | 9.60 | 9.80 |\n"
     spec = _tool("get_fundamentals", monkeypatch=monkeypatch, rendered=table)
     result = spec.handler(ticker="600519.SH", curr_date="2026-09-19")
 
-    assert result.evidence == (), "非结构化文本不得凭空生成证据"
     assert result.data.get("rendered") == table, "原始文本仍要保留（分析图依赖逐字一致）"
+    got = {item.field: item.value for item in result.evidence}
+    assert got == {"开盘（2026-09-19）": 9.6, "收盘（2026-09-19）": 9.8}, (
+        f"表格搬运必须逐字对应，实得 {got}"
+    )
+    # G4：时点取行里的日期，不是查询日
+    assert {item.as_of for item in result.evidence} == {"2026-09-19"}
 
 
 def test_vendor_failure_text_yields_no_evidence(monkeypatch):

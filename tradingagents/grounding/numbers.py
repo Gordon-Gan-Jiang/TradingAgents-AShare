@@ -76,6 +76,15 @@ _PERIOD_LOOKAHEAD = r"(?![\d]|\s*(?:日|天|周|月|年|个(?:交易日|月|星�
 _NUMBER_RE = re.compile(
     r"(?<![\d.,])"
     r"(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)"
+    # 科学计数法**必须和尾数同一个匹配**，否则 `4.45169e+10` 会被拆成
+    # `4.45169` 与 `10` 两个数——两个都不等于 4.45169e10，于是模型**照抄供应商
+    # 原文**写出来的数字被判 `unsourced_number`。实测（2026-09-22）：
+    #     extract_numbers('4.45169e+10') -> [4.45169, 10.0]
+    # 而财务报表（`get_fundamentals` / `get_balance_sheet` / `get_income_statement`）
+    # 的**原始渲染文本里全是这种写法**，模型的上下文里就有它，照抄是自然行为。
+    # 同类的正确写法当时是能过的（`445.17 亿` → 44517000000），所以这条假阳性
+    # 只惩罚"最忠实"的那种引用。
+    r"(?:([eE][+-]?\d+))?"
     r"(\s*万亿|\s*亿|\s*万|\s*千)?"
     r"(\s*%)?"
     + _PERIOD_LOOKAHEAD
@@ -123,11 +132,24 @@ def extract_numbers(text: str) -> tuple[NumberToken, ...]:
     tokens: list[NumberToken] = []
     for match in _NUMBER_RE.finditer(masked):
         raw = match.group(0).strip()
-        literal, multiplier, percent = match.group(1), match.group(2), match.group(3)
+        literal, exponent, multiplier, percent = (
+            match.group(1),
+            match.group(2),
+            match.group(3),
+            match.group(4),
+        )
         try:
             value = float(literal.replace(",", ""))
         except ValueError:  # pragma: no cover — 正则已保证可解析
             continue
+        if exponent:
+            # 科学计数法：整体交给 `float` 解析，**不要**自己 `尾数 * 10**指数`——
+            # 那样会引入浮点毛刺（`5.35188e+10` 变成 `53518800000.00001`），
+            # 而证据侧是 `float('5.35188e+10')` 的精确值，两侧会有细微差异。
+            try:
+                value = float(f"{literal.replace(',', '')}{exponent}")
+            except (ValueError, OverflowError):  # pragma: no cover
+                continue
         if multiplier:
             value *= _MULTIPLIERS[multiplier.strip()]
         tokens.append(NumberToken(raw=raw, value=value, is_percent=bool(percent)))
