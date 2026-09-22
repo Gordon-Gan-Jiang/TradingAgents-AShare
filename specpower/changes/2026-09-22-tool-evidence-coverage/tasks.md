@@ -149,6 +149,20 @@ dict/list**"——不碰散文，不存在把正常文案误判的路径；`{"qu
 
 ## Phase 3 — 半结构化文本解析器
 
+> **状态：3.1 已完成，3.2 已裁定（2026-09-22）。** 实测：
+>
+> | 工具 | 结果 | 依据 |
+> |---|---|---|
+> | `get_zt_pool` | **6–7 条证据** | anchor 是**我们自己写的字面量**（`providers/cn_akshare_provider.py` 的 `f"{date} 涨停家数：{count}"`） |
+> | `get_board_fund_flow` | **30 条证据** | 靠"排名 1..N 连续 + 表头宽度等于数据行宽度"自证 |
+> | `get_board_spot` / `get_board_rank` | **保持空证据** | 列里夹着 `leader`（股票名）这类非数字中间列，无法验证列对齐 |
+> | `get_board_hist` / `get_hot_stocks_xq` / `get_realtime_quotes` / `get_global_news` | **保持空证据** | 实测全部 `degraded=True`（连接被拒 / JSON 失败 / 限流），是真故障 |
+>
+> 端到端（真实后端）：`get_zt_pool` → completed/拒绝 0，「截至2026-09-22，涨停家数为
+> 63只，其中1连板39只…[E1][E2]」；`get_board_fund_flow` → completed/拒绝 0，
+> 「房地产今日主力净流入-净额最高，为3203957000.0 [E2]」。
+
+
 | # | 任务 | 验收 |
 |---|---|---|
 | 3.1 | `get_zt_pool` 形态（`2026-09-21 涨停家数：103` + 连板分布列表）写定向解析 | 真实文案 → 至少产出 `涨停家数` 一条数值证据，`as_of` 取文本里的日期 |
