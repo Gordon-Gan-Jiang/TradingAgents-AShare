@@ -1034,8 +1034,21 @@ def build_llm_completer(*, user_id: str | None = None, model_profile_id: str | N
     base_url = config.get("backend_url")
     # api_key 必须显式传入：`OpenAIClient` 只从 kwargs 透传它，否则会退到
     # OPENAI_API_KEY 环境变量——档案里的 Key 形同不存在。
+    #
+    # `max_tokens` 给**对话路径**的输出封顶。实测延迟 ≈ 输出 token × 5 ms、
+    # 模型调用占回合延迟 93–98%（`docs/agent-status.md` §4），封顶是把尾部
+    # （曾观测到 16100 token 的回合）压下来的唯一直接手段。
+    # **只在对话路径设**：报告生成等长输出路径不走这里，行为完全不变。
+    # `None` = 不传该参数 = 与改动前一致（可用 `TA_ANSWER_MAX_TOKENS=0` 关掉）。
+    from tradingagents.agent.answer_config import answer_max_tokens
+
+    answer_cap = answer_max_tokens()
     llm = create_llm_client(
-        provider, model, base_url=base_url, api_key=config.get("api_key")
+        provider,
+        model,
+        base_url=base_url,
+        api_key=config.get("api_key"),
+        **({"max_tokens": answer_cap} if answer_cap is not None else {}),
     ).get_llm()
 
     def complete(prompt: str):

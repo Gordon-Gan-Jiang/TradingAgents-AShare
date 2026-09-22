@@ -115,7 +115,13 @@ class OpenAIClient(BaseLLMClient):
             llm_kwargs["base_url"] = self.base_url
 
         # Pass remaining keys
-        for key in ("api_key", "callbacks", "reasoning_effort"):
+        #
+        # `max_tokens` 必须列在这里才能真的生效。它此前**不在**白名单里，于是
+        # 调用方就算传了也会被静默丢弃——"配了却不生效"是最难查的一类问题。
+        # 对话路径用它给输出长度封顶（实测延迟 ≈ 输出 token × 5 ms，见
+        # `docs/agent-status.md` §4）；**不传**时行为与以前完全一致（走 provider
+        # 默认值），所以报告生成等长输出路径不受影响。
+        for key in ("api_key", "callbacks", "reasoning_effort", "max_tokens"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
