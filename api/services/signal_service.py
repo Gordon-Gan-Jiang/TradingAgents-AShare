@@ -184,6 +184,11 @@ def verdict_payload(result: ProbeResult, *, persisted_id: str | None = None) -> 
         "signal_version": result.signal_version,
         "applied_gates": list(result.applied_gates),
         "unavailable": list(result.unavailable),
+        # 输入为**模型估计**的维度必须随判定一起出去：估计能改变 state（实测
+        # 600519：加自算筹码后 margin 0.400→0.114，触发结构弃权），若不标注，
+        # 用户看到的是一个"由估计驱动的结论"，却以为它由数据驱动——
+        # 这正是本平台最不容忍的失败形态，只是发生在判定层而非回答层。
+        "estimated_dimensions": list(getattr(result, "estimated_dimensions", ()) or ()),
         "falsifiers": [
             {
                 "observable": f.observable,
