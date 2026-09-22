@@ -167,7 +167,7 @@ def render(payload: dict) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="黄金集基线报告")
+    parser = argparse.ArgumentParser(description="黄金集报告（标题会标明口径：规则路径 / 规划层）")
     parser.add_argument("--json", type=Path, default=None, help="把原始结果写到该路径")
     parser.add_argument("--compare", type=Path, default=None, help="与历史 JSON 对比")
     parser.add_argument("--fail-under", type=float, default=None, help="规划准确率门槛（CI 用）")
@@ -185,7 +185,11 @@ def main() -> int:
     payload = run(verbose=args.verbose, with_planner=args.with_planner)
     metrics = payload["metrics"]
 
-    print("黄金集基线")
+    # 标题必须带口径。此前这里写的是无口径的"黄金集基线"，于是
+    # 一份"规划层"的数字和一份"规则路径"的数字在终端上长得一模一样——
+    # 与报告标题写死"Phase 0"是同一类问题（P/M6）。
+    _mode_label = "规划层启用（生产口径）" if args.with_planner else "规则路径（离线）"
+    print(f"黄金集 · {_mode_label}")
     print(f"  覆盖率        {_fmt(metrics['coverage'])}")
     print(f"  规划准确率    {_fmt(metrics['planning_accuracy'])}")
     print(f"  工具召回率    {_fmt(metrics['tool_recall'])}")
