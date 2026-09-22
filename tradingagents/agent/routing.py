@@ -674,6 +674,7 @@ def parse_plan(
         return None
 
     steps: list[PlanStep] = []
+    seen_steps: set[tuple[str, str]] = set()
     for raw in raw_steps:
         if not isinstance(raw, Mapping):
             return None
@@ -684,6 +685,15 @@ def parse_plan(
         arguments = raw.get("arguments") or {}
         if not isinstance(arguments, Mapping):
             return None
+        # 去重：同工具 + 同参数的重复步骤是纯浪费（实测规划器把
+        # `report_consensus_read` 连排两次）。不去重的话，一次对话会打两遍同一网络请求，
+        # 证据也会重复占用引用编号。
+        import json as _json
+
+        fingerprint = (tool, _json.dumps(dict(arguments), sort_keys=True, ensure_ascii=False))
+        if fingerprint in seen_steps:
+            continue
+        seen_steps.add(fingerprint)
         steps.append(
             PlanStep(tool=tool, arguments=dict(arguments), reason=str(raw.get("reason") or ""))
         )

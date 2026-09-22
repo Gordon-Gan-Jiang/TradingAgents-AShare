@@ -136,3 +136,33 @@ def test_intent_vocabulary_matches_the_golden_set():
     from tests.golden.harness import INTENTS
 
     assert set(PLAN_INTENTS) == set(INTENTS)
+
+
+def test_duplicate_steps_are_deduplicated():
+    """同工具同参数的重复步骤必须去掉——重复是纯浪费。
+
+    实测：规划器把 `report_consensus_read` 连排两次（`c01 600519 和 300750 哪个好`）。
+    不去重的话一次对话会打两遍同一网络请求，证据也会重复占用引用编号。
+    """
+    plan = parse_plan(
+        _payload(steps=[
+            {"tool": "get_realtime_quotes", "arguments": {"symbols": ["600519.SH"]}},
+            {"tool": "get_realtime_quotes", "arguments": {"symbols": ["600519.SH"]}},
+            {"tool": "signal_washout_probe", "arguments": {"symbol": "600519.SH"}},
+        ]),
+        known_tools=KNOWN,
+    )
+    assert plan is not None
+    assert [s.tool for s in plan.steps] == ["get_realtime_quotes", "signal_washout_probe"]
+
+
+def test_same_tool_with_different_arguments_is_kept():
+    """同工具不同参数是**合法**的（例如逐只判定），不能被误去重。"""
+    plan = parse_plan(
+        _payload(steps=[
+            {"tool": "signal_washout_probe", "arguments": {"symbol": "600519.SH"}},
+            {"tool": "signal_washout_probe", "arguments": {"symbol": "300750.SZ"}},
+        ]),
+        known_tools=KNOWN,
+    )
+    assert plan is not None and len(plan.steps) == 2

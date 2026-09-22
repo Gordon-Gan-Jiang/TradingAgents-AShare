@@ -154,9 +154,10 @@ def main() -> int:
         print(f"报告已写入 {REPORT_PATH.relative_to(ROOT)}")
 
     if args.json:
+        # **保留 probes**：它是"多调了哪些工具/精度损失来自哪里"的唯一原始依据。
+        # 曾经把它过滤掉，结果要分析精确率时只能重跑 50 次 LLM 调用。
         args.json.write_text(
-            json.dumps({k: v for k, v in payload.items() if k != "probes"}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"JSON 已写入 {args.json}")
 
