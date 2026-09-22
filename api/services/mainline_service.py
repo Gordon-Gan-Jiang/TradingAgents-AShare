@@ -30,6 +30,27 @@ from api.database import (
 
 _UTC = timezone.utc
 
+
+class MainlineDataUnavailable(RuntimeError):
+    """基准/板块数据不可用，**无法**评估 T+1 兑现——必须让调用方看见。
+
+    ## 为什么它是一个独立的异常，而不是 `return []`
+
+    `evaluate_t1_for_report` 此前把两种语义完全不同的情况压成同一个空列表：
+
+    * **报告日之后暂无前瞻数据** —— 合法等待，下次重试即可。不该报警。
+    * **基准陈旧 / 抓不到** —— 故障。必须让人看见。
+
+    混在一起的实际代价（实测）：基准缓存冻结在 2026-08-31，于是每份 9 月报告都
+    走进"合法等待"的样子，而真相是缓存坏了两周多——`mainline_t1_outcomes`
+    0 行，且没有任何地方说得出为什么。
+
+    抛异常而不是返回特殊值，是因为两个调用方**都已经**有 `except` 分支会把
+    `type(exc).__name__: msg` 记进各自的 skipped/failed 列表——
+    用既有结构就能获得可见性，不需要发明新协议。
+    """
+
+
 # 主线任务默认 10 分钟超时（可用 TA_MAINLINE_JOB_TIMEOUT 覆盖，单位秒）
 MAINLINE_JOB_TIMEOUT_SECONDS = int(os.getenv("TA_MAINLINE_JOB_TIMEOUT", "600"))
 
@@ -725,15 +746,34 @@ def evaluate_t1_for_report(
 
     try:
         bench = fetch_benchmark_close(ak_module, cache=True)
-    except Exception:
-        bench = pd.Series(dtype=float)
+        bench_last = str(bench.index[-1]) if len(bench) else None
+    except Exception as exc:  # noqa: BLE001 — 转成可声明的领域异常
+        raise MainlineDataUnavailable(
+            f"基准（沪深300）取数失败，无法评估 T+1 兑现：{type(exc).__name__}: {str(exc)[:80]}"
+        ) from exc
+
+    if bench_last is None:
+        raise MainlineDataUnavailable("基准（沪深300）为空序列，无法评估 T+1 兑现")
+
+    # 基准必须**至少覆盖报告日**，否则连基准点都定不下来。
+    # 这正是"缓存陈旧"造成的真实故障态：缓存冻结在 2026-08-31，而报告日在 9 月，
+    # 于是 check_date 恒 <= trade_date，被误当成"还没有前瞻数据"，静默不产出。
+    if bench_last < trade_date:
+        raise MainlineDataUnavailable(
+            f"基准数据陈旧：末日 {bench_last} 早于报告日 {trade_date}，无法评估 T+1 兑现"
+        )
 
     le = bench.index[bench.index <= (as_of_date or trade_date)]
     if len(le) == 0:
-        return []
+        raise MainlineDataUnavailable(
+            f"基准数据没有 <= {as_of_date or trade_date} 的日期（末日 {bench_last}）"
+        )
     check_date = str(le[-1])
     if check_date <= trade_date:
-        return []  # 需要至少一个交易日的前瞻数据
+        # **合法等待**：基准是新鲜的，只是报告日之后还没有交易日可供前瞻。
+        # 这与上面的"数据不可用"是两件事，不能混成同一个返回值——混掉就是本轮
+        # 静默失败的根因（见 tests/test_mainline_t1_visibility.py）。
+        return []
 
     bench_ret: Optional[float] = None
     try:
@@ -844,6 +884,11 @@ def refresh_t1_outcomes(db: Session, *, user_id: Optional[str] = None, as_of_dat
             outs = evaluate_t1_for_report(db, _to_dict(r), as_of_date=as_of_date)
             if outs:
                 evaluated += 1
+            else:
+                # **记账必须没有空洞**：此前的写法只有 `if outs: evaluated += 1`，
+                # 空结果既不计 evaluated 也不进 skipped —— 这份报告凭空消失，
+                # 而"消失"恰好是基准陈旧那个故障的表现（详见 MainlineDataUnavailable）。
+                skipped.append({"id": r.id, "reason": "no forward data yet"})
         except Exception as exc:
             skipped.append({"id": r.id, "reason": f"{type(exc).__name__}: {str(exc)[:80]}"})
     return {"evaluated_reports": evaluated, "skipped": skipped}
