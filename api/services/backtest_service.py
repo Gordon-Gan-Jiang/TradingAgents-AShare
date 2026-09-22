@@ -298,8 +298,14 @@ def submit(
 ) -> str:
     """Submit a backtest job. Returns job_id."""
     job_id = uuid4().hex
+    # **不要**在 kwargs 里再传 `job_id`：`_set(job_id, **kwargs)` 的第一个位置参数
+    # 已经是它，重复传会直接
+    # `TypeError: _set() got multiple values for argument 'job_id'` ——提交 100% 失败。
+    #
+    # 这条路径此前没有任何测试真的执行过（工具层的用例打的是端口的桩，端口实现又是
+    # 闭包里的三行），所以"提交回测"一直是坏的，只在真实对话里才暴露：工具如实回报
+    # `回测任务提交失败（TypeError）`，而用户看到的是"无可用证据"。
     _set(job_id,
-         job_id=job_id,
          user_id=user_id,
          symbol=symbol,
          start_date=start_date,

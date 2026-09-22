@@ -334,7 +334,7 @@ def build_registry(user_id: str | None = None) -> Any:
             """
             row = backtest_service.get_job(job_id)
             if row:
-                return row
+                return _describe_backtest_job(row)
             from api.main import _get_daily_product_run, _get_job
 
             row = _get_job(job_id)
@@ -826,6 +826,47 @@ def build_registry(user_id: str | None = None) -> Any:
         announcements_port=build_announcements_port(),
         index_fetcher=lazy_index_quotes,
     )
+
+
+def _describe_backtest_job(row: Mapping[str, Any]) -> dict[str, Any]:
+    """回测任务记录 → 轮询工具能读的形状，并**把逐日错误说出来**。
+
+    ## 实测（② 真实提交一次回测）
+
+    1 个交易日、管道因无可用模型 Key 立刻抛错，任务仍在 5 秒后报 `completed`，
+    而 `poll_async_job` 给出的全部信息是：
+
+        任务 91058cb0…｜状态 completed｜started_at …｜finished_at …
+
+    `_run_backtest` 对每个交易日的异常是**逐条捕获**进 `records[i]["error"]` 的，
+    所以"completed"表达的是"循环跑完了"，不是"回测成功了"。用户看到"已完成"
+    却什么都没有——"跑完了 ≠ 跑成功"。
+
+    这里不去改 `status` 的既有语义（前端与其它调用方都读它），而是把进度与出错
+    情况放进 `message`：`poll_async_job` 本来就会把 message 渲染进证据。
+    """
+    payload = dict(row)
+    records = list(payload.get("records") or [])
+    total = int(payload.get("total_dates") or 0)
+    done = int(payload.get("completed_dates") or 0)
+    failed = sum(1 for r in records if isinstance(r, Mapping) and r.get("error"))
+
+    parts = [f"{done}/{total} 个交易日已完成" if total else "未采样到交易日"]
+    if failed:
+        # 逐条错误的**首个**作为样例：只说"有错"而不给原因，用户仍然无从判断。
+        sample = next(
+            str(r.get("error")) for r in records
+            if isinstance(r, Mapping) and r.get("error")
+        )
+        parts.append(f"其中 {failed} 天出错（例如：{sample[:120]}）")
+    stats = payload.get("stats") or {}
+    if stats.get("total_signals") is not None:
+        parts.append(f"可评估信号 {stats.get('total_signals')} 个")
+    if payload.get("error"):
+        parts.append(f"任务错误：{str(payload['error'])[:120]}")
+
+    payload["message"] = "；".join(parts)
+    return payload
 
 
 def build_tool_digest(registry: Any) -> str:
