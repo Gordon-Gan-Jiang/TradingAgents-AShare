@@ -69,8 +69,14 @@ DEFAULT_CONFIG = {
         # CN market microstructure data (fund flow, billboards, sentiment)
         # Prefer direct Eastmoney HTTP (free) to reduce AkShare wrapper breakages.
         "cn_market_data": "cn_sina_moneyflow,cn_eastmoney_http,cn_akshare,cn_baostock",
-        # CN sector/board data (mainline analysis) — AkShare is the only full source for M1.
-        "cn_board_data": "cn_akshare",
+        # CN sector/board data (mainline analysis).
+        # 实测（2026-09-23）东财那条路在本机不通（走系统代理 ProxyError、强制直连
+        # RemoteDisconnected），而单源的代价不是"慢一点"，而是**整个板块维度一起
+        # 变成数据源故障**（get_board_spot / get_board_rank / get_board_hist 同时没数）。
+        # 新浪行业快照实测可用（49 个板块），与 cn_market_data 的既有裁决一致：
+        # 新浪优先、东财兜底。新浪只覆盖 get_board_spot 的 industry；
+        # 其余（concept、多周期排行、板块历史）由 provider 显式声明未覆盖后交给东财。
+        "cn_board_data": "cn_sina_moneyflow,cn_akshare",
     },
     # Per-tool vendor override (highest priority). Useful for stabilizing fragile endpoints.
     "tool_vendors": {

@@ -275,10 +275,22 @@ def test_board_tools_category_registered():
         assert get_category_for_method(method) == "cn_board_data"
 
 
-def test_route_to_vendor_board_spot_hits_akshare():
+def test_route_to_vendor_board_spot_falls_back_to_akshare_when_sina_is_unavailable():
+    """新浪这条源拿不到时，路由必须落到东财（akshare）。
+
+    `cn_board_data` 现在是新浪优先、东财兜底，所以"东财真的被调用"这件事只有在
+    **新浪不可用**的前提下才成立——这里把新浪的取数打掉来构造这个前提。
+    不构造前提的话，这个测试会去**真打新浪的线上接口**（实测 ~3 秒）：
+    断言虽然还成立（两条路都输出"行业板块涨幅榜"），但它已经不再验证东财路径了，
+    而且变成一条依赖外网的测试。
+    """
     from tradingagents.dataflows.interface import route_to_vendor
+    from tradingagents.dataflows.providers import cn_sina_moneyflow_provider as sina_module
 
     with patch.object(
+        sina_module, "http_get_text",
+        side_effect=ConnectionError("sina unavailable"),
+    ), patch.object(
         CnAkshareProvider, "_ak",
         return_value=SimpleNamespace(stock_board_industry_spot_em=MagicMock(return_value=_spot_raw())),
     ):

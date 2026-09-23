@@ -1641,7 +1641,12 @@ class CnAkshareProvider(BaseMarketDataProvider):
             df = fetch_board_hist_df(self._ak(), board_name, sector_type)
             return format_board_hist_table(df, board_name, sector_type=sector_type)
         except Exception as exc:
-            return f"板块历史行情获取失败：{type(exc).__name__}: {exc}"
+            # 「无替代源」是给**"为什么没有兜底"**的答案：板块日线历史在本平台只有
+            # 东财一个源（新浪不提供板块历史，同花顺板块指数没有接进这个工具），
+            # 所以用户读到的应当是"只能等东财恢复"，而不是一句光秃秃的错误、
+            # 让人以为是路由漏了下一个源。若将来接入同花顺板块指数
+            # （`fetch_ths_board_index_df`），这句话要同步改。
+            return f"板块历史行情获取失败（无替代源）：{type(exc).__name__}: {exc}"
 
     def get_board_cons(self, board_name: str, sector_type: str = "industry") -> str:
         """获取板块成分股列表，用于主线内选股。board_name 为板块名。"""

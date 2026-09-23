@@ -45,6 +45,53 @@ def resolve_proxies() -> dict[str, str] | None:
     return None
 
 
+def http_get_text(
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    retry: HttpRetry = HttpRetry(),
+    direct: bool = False,
+) -> str:
+    """GET 纯文本 with retry + exponential backoff.
+
+    存在理由：新浪的行业板块快照返回的是**一句 JS 赋值**
+    （`var S_Finance_bankuai_sinaindustry = {...};`），不是 JSON——
+    `http_get_json` 里的 `resp.json()` 必然抛错，但 HTTP 200 与响应体本身都是好的。
+    所以「取文本」必须是一个独立入口，而不是让调用方各自 `requests.get` 一遍：
+    这个助手与 `http_get_json` 共享 `resolve_proxies()` / `HttpRetry` /
+    `raise_for_status` 的语义，于是「要不要走系统代理」「重试几次」这类全局约定
+    依然只有一份（实测这台机器上走系统代理与直连的失败形状完全不同，见上）。
+    """
+    last_exc: Exception | None = None
+    for attempt in range(retry.attempts):
+        try:
+            kwargs: dict[str, Any] = {
+                "params": params,
+                "headers": headers,
+                "timeout": retry.timeout_s,
+            }
+            proxies = resolve_proxies()
+            if proxies:
+                kwargs["proxies"] = proxies
+            elif direct:
+                kwargs["proxies"] = dict(_DIRECT_SENTINEL)
+            resp = requests.get(url, **kwargs)
+            resp.raise_for_status()
+            # 用 `resp.text`（而不是自己 decode）：编码由响应头/requests 的嗅探决定，
+            # 与 akshare 走同一个端点时的行为一致——实测该端点声明 gbk 且解码正确。
+            return resp.text
+        except Exception as exc:
+            last_exc = exc
+            if attempt < retry.attempts - 1:
+                time.sleep(retry.base_sleep_s * (2**attempt))
+                continue
+            raise RuntimeError(
+                f"http_get_text failed after retries: {type(exc).__name__}: {exc}"
+            ) from exc
+    raise RuntimeError(f"http_get_text failed: {last_exc}")
+
+
 def http_get_json(
     url: str,
     *,
