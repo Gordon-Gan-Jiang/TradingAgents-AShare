@@ -912,6 +912,44 @@ def _spec_layer(registry: Any, name: str) -> str:
     return str(getattr(spec, "plan_layer", "") or "")
 
 
+# 分句结束符：截断必须收在这些字符上。
+_CLAUSE_ENDINGS = "。！？；」）"
+# 窗口内找不到句读时，最多向后多收这么多字符去找一个句读。
+_DIGEST_CLAUSE_EXTEND_CHARS = 24
+
+
+def _trim_to_clause(text: str, cap: int) -> str:
+    """把 `text` 截到 `cap` 以内，并**收在句读上**。
+
+    ## 为什么宁可短一点也不读残句
+
+    残句比短句更糟：它看上去是完整的语义，实际被砍掉了限定条件。实测 42 条摘要
+    里有 22 条断在字中间——`…（vendor 类别：board_data）。返回 v` 停在半个词上，
+    `…、逐维度证据、以及必须跟` 停在半个分句上。规划器读着这样的清单做选择。
+
+    ## 找不到句读时
+
+    向后多收一点，也要收在句读上：宁可略超上限，也不读残句。超出的幅度有上限
+    （`_DIGEST_CLAUSE_EXTEND_CHARS`），避免一句超长的背景说明把整条摘要撑起来。
+    实测只有 1 条走这条路（`get_income_statement` 的句读落在第 64 字，而标题窗口
+    是 60）；真的连后面都没有句读时才退回硬截。
+    """
+    if len(text) <= cap:
+        return text.strip()
+    window = text[:cap]
+    cut = max(window.rfind(ch) for ch in _CLAUSE_ENDINGS)
+    if cut >= 0:
+        return window[: cut + 1].strip()
+
+    forward = min(
+        (i for ch in _CLAUSE_ENDINGS for i in (text.find(ch, cap),) if i >= 0),
+        default=-1,
+    )
+    if forward < 0 or forward - cap > _DIGEST_CLAUSE_EXTEND_CHARS:
+        return window.strip()
+    return text[: forward + 1].strip()
+
+
 def _digest_text(spec: Any) -> str:
     """一条工具摘要的正文：短标题 + **完整保留**的用法提示 + 参数清单。"""
     description = str(getattr(spec, "description", "") or "")
@@ -922,10 +960,10 @@ def _digest_text(spec: Any) -> str:
         # 标题只留到用法提示之前（更长的前半段是背景说明，对选择无贡献），
         # 用法提示整段保留——那才是"该调哪个"的依据。
         title = head[:cut].strip()
-        usage = head[cut : cut + _DIGEST_USAGE_CHARS]
+        usage = _trim_to_clause(head[cut:], _DIGEST_USAGE_CHARS)
         body = f"{title} {usage}".strip()
     else:
-        body = head[:_DIGEST_TITLE_CHARS].strip()
+        body = _trim_to_clause(head, _DIGEST_TITLE_CHARS)
     # 参数清单排在最后：先回答"该调哪个"，再回答"该怎么调"。
     return f"{body}｜参数：{_digest_arguments(spec)}"
 
@@ -986,6 +1024,12 @@ _DIGEST_TITLE_CHARS = 60
 _DIGEST_USAGE_CHARS = 90
 # 默认值最多显示这么多字符；超出的截断（参数名不受影响）。
 _DIGEST_DEFAULT_CHARS = 12
+# 摘要总长上限（**棘轮**）。实测：加参数清单前 5540 字符，加后 7074（+28%）。
+# 这条上限的作用不是"卡住今天"，而是让**下一次增长变成一个显式决定**：摘要随
+# 每次规划调用进模型，是每轮都要付的成本（中位回合延迟 26.7s，已在 15s 线外），
+# 而"顺手多渲染一点"这类漂移只有在某天问"延迟为什么涨了"时才会暴露，
+# 那时已查不出是哪次改动涨的。
+_DIGEST_MAX_CHARS = 8000
 
 
 def build_planner(*, user_id: str | None = None) -> Callable[[str], Any] | None:

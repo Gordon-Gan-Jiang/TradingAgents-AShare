@@ -247,6 +247,69 @@ def test_digest_says_explicitly_when_a_tool_takes_no_argument():
         assert segment.startswith("无"), f"{name} 不接收参数却没写明：{segment}"
 
 
+# ── 摘要的预算与断句 ──────────────────────────────────────────────────────
+#
+# 摘要是**每轮都要付的成本**：42 条工具清单随每次规划调用进模型。它涨一截，
+# 成本与延迟就涨一截（实测中位回合延迟 26.7s，已在 15s 验收线之外）。参数清单
+# 让摘要从 5540 涨到 7074 字符（+28%）——这是有理由的涨价，但**下一次涨价应当
+# 是一个显式决定**，而不是没人察觉的漂移。
+#
+# 断句是另一头：摘要被截断时若停在字中间（实测 22 条里有 7 条停在句中、15 条
+# 停在词中，例如 `…（vendor 类别：board_data）。返回 v`），读到的就是一个残句。
+# 残句比短句更糟——它看上去像完整的语义，而实际上被切掉了限定条件。
+
+
+def _digest_row(digest: str, name: str) -> str | None:
+    return next(
+        (row for row in digest.splitlines() if row.startswith(f"- {name} ")), None
+    )
+
+
+def test_digest_stays_within_its_declared_budget():
+    """摘要体积必须有一个**显式声明**的上限。
+
+    没有上限时，"顺手多渲染一点"累积到某一天才会以"延迟为什么涨了"的形式
+    暴露，而那时已经查不出是哪次改动涨的。上限是棘轮：放宽它可以，但要改这个
+    常量、并在评审里说明理由。
+    """
+    digest = chat_service.build_tool_digest(chat_service.build_registry("golden"))
+
+    assert len(digest) <= chat_service._DIGEST_MAX_CHARS, (
+        f"摘要 {len(digest)} 字符，超出声明上限 {chat_service._DIGEST_MAX_CHARS}"
+    )
+    # 棘轮必须咬得住：把上限改成任意大数等于没有上限。
+    assert chat_service._DIGEST_MAX_CHARS <= 12000, "上限宽到失去约束意义"
+
+
+def test_digest_never_truncates_text_mid_clause():
+    """被截断的摘要行必须收在句读上，不许断在字中间。
+
+    判据只作用于**真的被截断**的行：源文本没超过窗口的行不适用（它们本来就
+    完整）。断在字中间会让规划器读到一个残句——"自述**；窗口内没有样本时会
+    显式声明。scope 决" 这种结尾，看上去像句子，实际被砍掉了限定条件。
+    """
+    registry = chat_service.build_registry("golden")
+    digest = chat_service.build_tool_digest(registry)
+    boundaries = ("。", "！", "？", "；", "」", "）")
+
+    offenders: list[str] = []
+    for name in registry.names():
+        row = _digest_row(digest, name)
+        assert row is not None, f"{name} 不在摘要里"
+        head = ((registry.get(name).description or "").splitlines() or [""])[0]
+        marker = "用于回答"
+        if marker in head:
+            source, cap = head[head.index(marker) :], chat_service._DIGEST_USAGE_CHARS
+        else:
+            source, cap = head, chat_service._DIGEST_TITLE_CHARS
+        if len(source) <= cap:
+            continue  # 没被截断
+        if not row.split("｜参数：")[0].rstrip().endswith(boundaries):
+            offenders.append(f"{name}（结尾：…{row.split('｜参数：')[0][-18:]}）")
+
+    assert not offenders, "这些行的摘要断在字中间：\n  " + "\n  ".join(offenders)
+
+
 # ── 规划提示词的选择纪律 ──────────────────────────────────────────────────
 #
 # 工具摘要只解决"看不看得清"，提示词还要解决"该不该多选"。实测规划器在
