@@ -27,7 +27,32 @@ NUMERIC_UNITS = frozenset({"ratio", "pct", "yuan", "count", "days"})
 
 @dataclass(frozen=True)
 class Coverage:
-    """本轮工具调用覆盖到的与未覆盖到的数据维度。"""
+    """本轮工具调用覆盖到的与未覆盖到的数据维度。
+
+    **两个字段说的是两件事，同一个维度可以同时出现在两边——这不是矛盾：**
+
+    * `available` 说的是**取数通路**：这个源被问到了、且通路是健康的。
+    * `unavailable` 说的是**这个维度的数据**：没拿到，或拿到了但不可引用。
+
+    因此 `available=('trade_ledger',)` +
+    `unavailable=('trade_ledger（没有已录入的交易流水）',)` 是一个**合法**声明
+    （"工具是好的，只是你还没有流水"），不是自相矛盾。实测（2026-09-23，42 个
+    同步工具全量调用）有 11 个工具是这个形状，是刻意设计。
+
+    这层区分是产品语义，与 `degraded` 一起构成判据：
+
+    * 没有记录 → `available` 含源键、`degraded=False`：模型该说"尚未录入"；
+    * 读取失败 → `available` 为空、`degraded=True`：真取不到。
+
+    把"没有记录"讲成"数据源故障"会让用户以为平台坏了，反过来把"故障"讲成
+    "没有记录"会让用户以为自己没录。守这条的是
+    `tests/test_l1_read_tools.py::test_trade_ledger_no_trades_keeps_the_source_available`
+    的 docstring，以及 `tests/test_l1_decision_tools.py` /
+    `tests/test_portfolio_risk_tool.py` 里同形的共 9 条测试。
+
+    **不要**把 `available ∩ unavailable = ∅` 当不变量立起来（我一度想这么改：它会让
+    上述 9 条测试全红，并把这两种情况在 coverage 上变得一模一样）。
+    """
 
     available: tuple[str, ...] = ()
     unavailable: tuple[str, ...] = ()

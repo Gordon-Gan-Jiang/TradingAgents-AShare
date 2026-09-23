@@ -325,13 +325,20 @@ def test_healthy_data_declares_no_fault():
 # 而 `_coverage_for` 此前**只看"是不是失败文案"**，对"有没有产出证据"完全无感，
 # 于是这一类返回被表述成：
 #
-#     available=('fundamental_data',)   ← 声称该源可用
-#     unavailable=()                    ← 声称没有未覆盖项
+#     available=('fundamental_data',)   ← 通路健康，这一条**是对的**
+#     unavailable=()                    ← 问题在这里：什么都不说
 #     evidence=()                       ← 却一条证据都没有
 #
 # 用户看到的是一个**没有任何解释的空结果**，而平台其实收到了数据、只是那些数据
 # 无法被引用。这与上一节 `{}` 的 bug 是同一条原则（"拿不到 ≠ 没有"），只是更难
 # 发现：载荷非空，所以连"空载荷"那道闸门都穿不过去。
+#
+# **注意 `available` 不是要改的那一项**：它的语义是"取数通路健康"，不是"产出了
+# 可引用数据"。我最初把这里误判成"声称该源可用"是错的，还据此想把
+# `available ∩ unavailable = ∅` 立成不变量——那会抹掉本仓库刻意保留的
+# 「你没录入」与「数据源坏了」之分
+# （见 `test_trade_ledger_no_trades_keeps_the_source_available` 的 docstring）。
+# 真正缺的只有 `unavailable` 那一句话。
 #
 # 实测（trace 库 753 个回合，2026-09-21～23）这些工具在**成功**返回下的零证据
 # 占比：get_global_news 18/23、get_zt_pool 15/22、get_balance_sheet 11/17、
@@ -339,7 +346,7 @@ def test_healthy_data_declares_no_fault():
 #
 # 为什么是"声明"而不是"硬编证据"：本文件开篇第 2 条原则写着"表格/散文型输出不
 # 硬编证据：宁可为空（诚实），也不要把标签与数字错配"。这条原则不变——变的是
-# **那份诚实的空必须可见**，而不是伪装成"该源可用且一切正常"。
+# **那份诚实的空必须可见**，而不是留下一片沉默。
 
 PROSE_RETURN = (
     "贵州茅台（600519）今日小幅震荡，成交量较前一交易日略有萎缩，"
@@ -370,12 +377,43 @@ def test_prose_return_is_not_a_failure_but_must_be_declared(monkeypatch):
     )
 
 
-def test_prose_declaration_does_not_claim_the_source_is_available():
-    """声明不可引用时，不得同时声称该源可用——那是自相矛盾。"""
+def test_prose_declaration_keeps_the_source_available():
+    """散文不是故障：**通路健康**这一点要保住，声明的是"这个维度不可引用"。
+
+    `available` 的语义是"取数通路健康"，不是"产出了可引用数据"——这条语义在本
+    仓库是刻意的，且被 9 条测试守着（`test_trade_ledger_no_trades_keeps_the_source_available`
+    的 docstring 说得最清楚：「把'没有记录'讲成'数据源故障'会让用户以为平台坏了」）。
+    所以"散文"这一格保留 `available`，只把该说的那句话写进 `unavailable`；
+    同一个源同时出现在两个列表里因此不是矛盾：前者说通路，后者说数据。
+
+    我最初把这里写成 `available=()`，那会让"源答了但内容不可引用"与"源根本取不到"
+    在 coverage 上变得一模一样——正是这条语义要避免的。
+    """
     from tradingagents.tools.data import DATA_TOOL_DECLS, _coverage_for
 
     decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_global_news")
     coverage = _coverage_for(decl, rendered=PROSE_RETURN, has_evidence=False)
 
-    assert coverage.available == (), "没有可引用证据就不能声称该源可用"
-    assert coverage.unavailable, "同时必须给出原因"
+    assert coverage.available == (decl.category,), "散文不是故障，通路是健康的"
+    assert coverage.unavailable, "但必须声明这个维度不可引用，否则是静默空"
+    declared = coverage.unavailable[0]
+    assert decl.category in declared, "要点名是哪个源"
+    assert "可引用" in declared, "要说清是「没有可引用数值」，不能与数据源故障混为一谈"
+    assert "故障" not in declared, "这不是故障，措辞不得误导用户去重试"
+
+
+def test_prose_and_failure_are_distinguishable_from_coverage_alone():
+    """反向：两种情况的 coverage 必须**能分辨**（这正是 `available` 的用处）。"""
+    from tradingagents.tools.data import DATA_TOOL_DECLS, _coverage_for
+
+    decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_global_news")
+    prose = _coverage_for(decl, rendered=PROSE_RETURN, has_evidence=False)
+    failure = _coverage_for(
+        decl,
+        rendered="Error fetching global news: Too Many Requests. Rate limited.",
+        has_evidence=False,
+    )
+
+    assert prose.available and not failure.available, "源答没答，靠 available 分辨"
+    assert "故障" in failure.unavailable[0]
+    assert "故障" not in prose.unavailable[0]

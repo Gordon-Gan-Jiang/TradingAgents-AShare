@@ -1144,6 +1144,20 @@ def _coverage_for(
     的解析链与 `tests/test_data_tool_evidence.py` 开篇第 2 条原则）。这条原则不变，
     变的是**那份诚实的空必须可见**——不能伪装成"该源可用且一切正常"。
 
+    **`available` 的语义是"取数通路健康"，不是"产出了可引用数据"**（这一条我最初
+    弄反了）。所以散文分支保留 `available=(category,)`：源确实答了、通路没坏，
+    只是它给的东西不可引用。本仓库对这条语义是**刻意**的，且已有多处测试守着——
+    `available` 与 `degraded` 一起区分「你没录入」与「数据源坏了」：
+
+    * 没有记录：`available` 含源键、`degraded=False`（工具是好的）；
+    * 读取失败：`available` 为空、`degraded=True`（真取不到）。
+
+    见 `tests/test_l1_read_tools.py::test_trade_ledger_no_trades_keeps_the_source_available`
+    的 docstring（"把'没有记录'讲成'数据源故障'会让用户以为平台坏了"），以及
+    `tests/test_l1_decision_tools.py` / `tests/test_portfolio_risk_tool.py` 里同形的 8 条。
+    同一个源同时出现在 `available` 与 `unavailable` 里因此**不是**矛盾：前者说的是
+    "通路"，后者说的是"这个维度的数据"。
+
     `has_evidence` 刻意**没有默认值**：它决定这个函数最重要的一个分支，给它一个
     默认就等于给未来的调用点留一条"忘记传、静默退回旧行为"的路——而旧行为正是
     这次要修的 bug。
@@ -1165,8 +1179,9 @@ def _coverage_for(
         declared = f"{decl.category}（数据源故障：{note}）" if note else decl.category
         return Coverage(available=(), unavailable=(declared,))
     if not has_evidence:
-        # 拿到了、但不是能引用的东西。措辞刻意与"数据源故障"分开：这不是故障，
-        # 让人去"重试/换问法"是误导；该说的是"这段文本没法被引用"。
+        # 拿到了、但不是能引用的东西。**保留 available**（通路是健康的），只声明
+        # 这个维度不可引用。措辞刻意与"数据源故障"分开：这不是故障，让人去
+        # "重试/换问法"是误导；该说的是"这段文本没法被引用"。
         declared = f"{decl.category}（有返回，但输出不含可引用数值）"
-        return Coverage(available=(), unavailable=(declared,))
+        return Coverage(available=(decl.category,), unavailable=(declared,))
     return Coverage(available=(decl.category,), unavailable=())
