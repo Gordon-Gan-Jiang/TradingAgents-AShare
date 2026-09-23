@@ -147,6 +147,106 @@ def test_digest_puts_decision_tools_before_raw_data_tools():
     )
 
 
+# ── 参数清单：规划器不能靠猜参数名 ────────────────────────────────────────
+#
+# 摘要只给"名字 + 用法提示"时，模型知道该调哪个工具，却不知道那个工具要什么参数。
+# 实测代价（2026-09-21～22 的 41 个回合）：规划器按语感拼参数名——
+# `get_board_spot` 给 `board_name`（真名 `sector_type`）、`index_quote_read` 给
+# `symbols`（真名 `codes`）、`get_board_hist` 给 `period`（真名 `board_name`）——
+# 每次都被注册表拒掉，用户看到的是「本轮无可用证据」。
+#
+# 注册表后来学会了"丢弃不相干的外来键、只拒绝像拼写错误的键"，这让那些调用
+# **不再失败**，但代价是参数被静默丢弃、工具退回默认值（`get_board_spot` 于是
+# 永远按 `sector_type="industry"` 取数）。**容错是止血，不是治疗**——治疗是让
+# 模型一开始就看见真名。
+
+
+def _digest_rows() -> dict[str, str]:
+    """把摘要解析成 {工具名: 该行}，供参数契约断言使用。"""
+    digest = chat_service.build_tool_digest(chat_service.build_registry("golden"))
+    rows: dict[str, str] = {}
+    for row in digest.splitlines():
+        if row.startswith("- "):
+            rows[row[2:].split(" ", 1)[0]] = row
+    return rows
+
+
+def _argument_segment(row: str) -> str:
+    """取摘要行里的参数清单段；没有这一段就是缺契约。"""
+    assert "参数：" in row, f"摘要行里没有参数清单：{row}"
+    return row.split("参数：", 1)[1]
+
+
+def test_digest_renders_argument_name_for_every_declared_parameter():
+    """每个已声明参数的**真名**都必须出现在摘要里。
+
+    真名是模型唯一能用来拼调用的凭据。给不出真名，模型只能按语感猜；而猜错的
+    后果不是报错（注册表会容错丢弃），而是**静默退回默认值**——一个不报错、
+    也不留痕迹的错结果。
+    """
+    registry = chat_service.build_registry("golden")
+    rows = _digest_rows()
+
+    missing: list[str] = []
+    for name in registry.names():
+        schema = getattr(registry.get(name), "input_schema", None) or {}
+        segment = _argument_segment(rows[name])
+        for arg in (schema.get("properties") or {}):
+            if arg not in segment:
+                missing.append(f"{name}.{arg}")
+
+    assert not missing, f"摘要没给出这些参数的真名：{missing[:12]}"
+
+
+def test_digest_marks_required_arguments_as_required():
+    """必填与可选必须区分开。
+
+    把 `as_of`（有默认值）当可选没问题；把 `symbol` 当可选就会得到
+    `missing required arguments` 而让整次调用失败——两者在摘要里长得一样时，
+    模型没有依据做这个区分。
+    """
+    registry = chat_service.build_registry("golden")
+    rows = _digest_rows()
+
+    wrong: list[str] = []
+    for name in registry.names():
+        schema = getattr(registry.get(name), "input_schema", None) or {}
+        required = set(schema.get("required") or [])
+        segment = _argument_segment(rows[name])
+        for arg in (schema.get("properties") or {}):
+            marked = f"{arg}(必填)" in segment
+            if arg in required and not marked:
+                wrong.append(f"{name}.{arg} 是必填却没标")
+            elif arg not in required and marked:
+                wrong.append(f"{name}.{arg} 不是必填却标了必填")
+
+    assert not wrong, f"必填标记与 schema 不符：{wrong[:12]}"
+
+
+def test_digest_says_explicitly_when_a_tool_takes_no_argument():
+    """无参数工具必须写明"无"。
+
+    `get_board_fund_flow` / `get_hot_stocks_xq` 不接受任何参数，而它们恰好是
+    当前最稳的两个板块类工具。不写"无"，模型会按"板块类工具总得有个板块名"的
+    语感给它们编一个参数出来。
+    """
+    registry = chat_service.build_registry("golden")
+    rows = _digest_rows()
+    no_argument = [
+        name
+        for name in registry.names()
+        if not (
+            (getattr(registry.get(name), "input_schema", None) or {}).get("properties")
+            or {}
+        )
+    ]
+
+    assert no_argument, "工具面里应当存在无参数工具，否则这条契约没有意义"
+    for name in no_argument:
+        segment = _argument_segment(rows[name]).strip()
+        assert segment.startswith("无"), f"{name} 不接收参数却没写明：{segment}"
+
+
 # ── 规划提示词的选择纪律 ──────────────────────────────────────────────────
 #
 # 工具摘要只解决"看不看得清"，提示词还要解决"该不该多选"。实测规划器在

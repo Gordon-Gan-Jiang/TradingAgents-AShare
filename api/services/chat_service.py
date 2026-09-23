@@ -878,7 +878,7 @@ def build_tool_digest(registry: Any) -> str:
     它一旦失真（截断、缺分层、顺序随意），落点就不再是"模型判断力不够"，而是
     "给它的清单不对"。单独成函数才能被度量与测试。
 
-    ## 三条渲染规则（都由实测踩坑得出）
+    ## 四条渲染规则（都由实测踩坑得出）
 
     1. **不许截断掉用法提示**。当时全部 50 个工具里有 25 个的 `description` 带
        "用于回答「…」"，其中 14 个落在第 60 字之后。旧实现取"第一行前 60 字"，
@@ -891,6 +891,10 @@ def build_tool_digest(registry: Any) -> str:
        抽象层级上，于是同一个问题既调判定又调它底下的原始数据。
     3. **判断类工具排在取数原语前面**。清单是有位置权重的：把"能直接回答"的
        L1 放前面、把同义的 vendor 取数工具压到最后，选择明显更稳。
+    4. **每个工具都要给出参数真名**（以及"无参数"本身）。知道"该调哪个"不等于
+       知道"该怎么调"：实测规划器按语感拼出 `board_name`（真名 `sector_type`）
+       这类名字，注册表虽然会丢弃外来键而不再报错，但参数被静默丢弃、工具退回
+       默认值——调用成功、语义却不是模型想表达的那个。详见 `_digest_arguments`。
     """
     rows: list[str] = []
     order = {"L1": 0, "L3": 1, "L2": 2}
@@ -909,7 +913,7 @@ def _spec_layer(registry: Any, name: str) -> str:
 
 
 def _digest_text(spec: Any) -> str:
-    """一条工具摘要的正文：短标题 + **完整保留**的用法提示。"""
+    """一条工具摘要的正文：短标题 + **完整保留**的用法提示 + 参数清单。"""
     description = str(getattr(spec, "description", "") or "")
     head = (description.splitlines() or [""])[0]
     marker = "用于回答"
@@ -919,13 +923,69 @@ def _digest_text(spec: Any) -> str:
         # 用法提示整段保留——那才是"该调哪个"的依据。
         title = head[:cut].strip()
         usage = head[cut : cut + _DIGEST_USAGE_CHARS]
-        return f"{title} {usage}".strip()
-    return head[:_DIGEST_TITLE_CHARS].strip()
+        body = f"{title} {usage}".strip()
+    else:
+        body = head[:_DIGEST_TITLE_CHARS].strip()
+    # 参数清单排在最后：先回答"该调哪个"，再回答"该怎么调"。
+    return f"{body}｜参数：{_digest_arguments(spec)}"
+
+
+# 默认值缺失的哨兵：`default=None` 是合法默认值，不能用 None 表示"没有默认值"。
+_NO_DEFAULT = object()
+
+
+def _digest_arguments(spec: Any) -> str:
+    """渲染参数清单：**真名** + 必填标记 + 短默认值。
+
+    ## 为什么必须把参数名给规划器
+
+    摘要原先只给"名字 + 用法提示"：模型知道该调哪个工具，却不知道那个工具收什么
+    参数，只能按语感拼。实测（2026-09-21～22 的 41 个回合）它给 `get_board_spot`
+    拼过 `board_name`（真名 `sector_type`）、给 `index_quote_read` 拼过 `symbols`
+    （真名 `codes`）、给 `get_board_hist` 拼过 `period`（真名 `board_name`）。
+
+    注册表后来学会丢弃不相干的外来键，于是这些调用**不再失败**——但代价是参数被
+    静默丢弃、工具退回默认值：`get_board_spot` 从此永远按 `sector_type="industry"`
+    取数。**容错是止血，治疗是让它在拼之前就看见真名。**
+
+    ## 为什么无参数必须写"无"
+
+    `get_board_fund_flow` / `get_hot_stocks_xq` 一个参数都不收，而它们恰好是当前
+    最稳的两个板块类工具。不写"无"，模型会按"板块类工具总得有个板块名"的语感
+    给它们编一个参数出来。
+
+    ## 默认值只给短的
+
+    默认值是"这个参数可以省略"的依据；但 `as_of` 这类默认值是长字符串，写进摘要
+    是纯开销。超过 `_DIGEST_DEFAULT_CHARS` 的一律截断——摘要预算有限，而**参数名**
+    才是这条契约真正要保住的东西。
+    """
+    schema = getattr(spec, "input_schema", None) or {}
+    properties = schema.get("properties") or {}
+    if not properties:
+        return "无"
+    required = set(schema.get("required") or [])
+
+    parts: list[str] = []
+    for arg, rule in properties.items():
+        if arg in required:
+            parts.append(f"{arg}(必填)")
+            continue
+        rule = rule if isinstance(rule, Mapping) else {}
+        default = rule.get("default", _NO_DEFAULT)
+        if default is _NO_DEFAULT:
+            parts.append(f"{arg}(可选)")
+        else:
+            text = str(default)
+            parts.append(f"{arg}(可选={text[:_DIGEST_DEFAULT_CHARS]})")
+    return "、".join(parts)
 
 
 # 标题栏长度：只做"防止单行过长"，不承担信息取舍（取舍在用法提示上）。
 _DIGEST_TITLE_CHARS = 60
 _DIGEST_USAGE_CHARS = 90
+# 默认值最多显示这么多字符；超出的截断（参数名不受影响）。
+_DIGEST_DEFAULT_CHARS = 12
 
 
 def build_planner(*, user_id: str | None = None) -> Callable[[str], Any] | None:
