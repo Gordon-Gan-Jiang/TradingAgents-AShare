@@ -102,6 +102,10 @@ class ToolRegistry:
         self._specs: dict[str, ToolSpec] = {}
         # 最近一次 `validate` 丢弃的未声明参数。留着是为了让"提示词里出现了假参数名"
         # 这类回归仍然可观测——丢弃它本身是对的，静默丢弃才是问题。
+        #
+        # 语义是"**最近一次调用**"，不是累积账本：每次 `validate` 开头都会重置。
+        # 消费方必须在 `invoke` 返回后**立刻**取走，否则读到的是别的调用的记录
+        # （见 `tradingagents/agent/loop.py::_dropped_arguments`）。
         self.last_dropped_arguments: tuple[str, ...] = ()
 
     def register(self, spec: ToolSpec) -> None:
@@ -213,6 +217,14 @@ class ToolRegistry:
         if unknown:
             # 保住诊断信号：丢弃这件事必须在 trace / 日志里看得见，
             # 否则"提示词里出现了假参数名"这类回归又变成不可观测。
+            #
+            # 消费点（**此前并不存在**——上面这句话曾是一句空话，
+            # `last_dropped_arguments` 全仓库只有测试读它）：
+            #   * `tradingagents/agent/loop.py::_dropped_arguments` 把它写进回合
+            #     trace 的步骤字段 `dropped_arguments`，随 trace 落库；
+            #   * 下面这行 warning。
+            # 守着这两条的是
+            # `tests/test_agent_loop.py::test_dropped_arguments_are_visible_in_the_turn_trace`。
             self.last_dropped_arguments = tuple(unknown)
             logger.warning(
                 "工具 %s 收到未声明的参数 %s，已忽略（必需参数齐全、且不像拼写错误）",

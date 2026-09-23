@@ -579,3 +579,55 @@ def test_degraded_text_does_not_leak_internal_reason_codes():
 
     assert "unsourced_number" not in result.answer
     assert "找不到出处" in result.answer, "原因码要换成人话，信息不丢"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 参数被**静默丢弃**也必须留下观测
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `ToolRegistry.validate` 对"不像拼写错误的外来参数"选择**丢弃而不是报错**：让
+# 调用继续（工具照常返回数据），而不是因为规划器猜错一个参数名就整轮失败。
+#
+# 这个取舍是对的，但它把一个错误从"响亮的失败"变成了"安静的错答案"——工具用
+# **默认参数**取数、`ok=True`、证据条数看着正常，只有"用户想要的筛选条件没生效"
+# 这一层语义丢了。于是唯一能发现它的地方就是 trace。
+#
+# 而在此之前，`registry.py` 的 docstring 写着"丢弃这件事必须在 trace / 日志里
+# 看得见"，实际上 `last_dropped_arguments` 全仓库只有一个测试读它、**生产代码零
+# 消费**：承诺落了空。下面的测试就是那个消费点。
+#
+# 实测背景（trace 库 753 个回合，2026-09-21～23）：41 个回合出现"规划器猜参数名"
+# 的记录，注册表在 2026-09-22 20:01 学会丢弃之后，这些调用**不再失败**——于是
+# 它们从"可见的失败"变成了"不可见的静默降级"。
+
+
+def test_dropped_arguments_are_visible_in_the_turn_trace():
+    """被丢弃的参数名必须进 trace。
+
+    否则这类错误与"工具本来就没返回东西"在事后排查里完全无法区分：两者都是
+    `ok=True` 加一个不完整的证据集。
+    """
+    result, _ = _run(
+        QueueModel([_grounded_answer]),
+        request=_request(
+            plan_source="llm",
+            planned_steps=(
+                {
+                    "tool": "signal_washout_probe",
+                    "arguments": {
+                        "symbol": "600519.SH",
+                        "as_of": "2026-01-16",
+                        # 刻意用"不像拼写错误"的外来键：这正是注册表选择丢弃而
+                        # 不是报错的那一类（像拼写错误的会被拒并提示候选）。
+                        "board_name": "白酒",
+                    },
+                },
+            ),
+        ),
+    )
+
+    step = next(s for s in result.steps if s.get("tool") == "signal_washout_probe")
+    assert step["ok"] is True, "容错路径：调用本身仍然成功"
+    assert step.get("dropped_arguments") == ["board_name"], (
+        f"被丢弃的参数没进 trace，这个错误就再也查不出来了：{step}"
+    )

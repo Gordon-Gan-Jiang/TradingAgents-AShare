@@ -1244,6 +1244,28 @@ def _apply_before_tool(
     return call
 
 
+def _dropped_arguments(registry: Any) -> list[str]:
+    """本次调用中被注册表**静默丢弃**的参数名（见 `ToolRegistry.validate`）。
+
+    ## 为什么必须立刻读
+
+    `last_dropped_arguments` 在每次 `validate` 开头都会被重置。它是"上一次调用"
+    的观测，不是累积账本——必须在 `invoke` 返回后**立刻**取走，否则读到的是下
+    一个工具的记录（或者被清空）。
+
+    ## 为什么这个观测值得进 trace
+
+    注册表对"不像拼写错误的外来参数"选择丢弃而不是报错：调用照常成功、`ok=True`、
+    证据条数看着也正常，只有"用户想要的筛选条件没生效"这一层语义丢了。这类错误
+    与"工具本来就没返回东西"在事后排查里**完全无法区分**，除非调用时就记下来。
+
+    `registry.py` 的 docstring 声明过"丢弃这件事必须在 trace / 日志里看得见"，
+    而在这次改动之前，`last_dropped_arguments` 在全仓库只有测试读它、
+    **生产代码零消费**。
+    """
+    return list(getattr(registry, "last_dropped_arguments", ()) or ())
+
+
 def _apply_after_tool(middleware: Sequence[Any], ctx: TurnContext, call: ToolCall, result: ToolResult) -> ToolResult:
     for mw in middleware:
         hook = getattr(mw, "after_tool", None)
@@ -1388,16 +1410,21 @@ def run_turn(
                 sink.emit(ToolDone(tool=call.tool, ok=False, detail=f"{type(exc).__name__}: {exc}"))
                 # 失败步骤也要记真实耗时：记 0 会读成"瞬时失败"，而实际上
                 # 失败前往往已经把超时预算耗掉了——那正是排查时最需要看到的信息。
-                ctx.steps.append(
-                    {
-                        "tool": call.tool,
-                        "arguments": dict(call.arguments),
-                        "ok": False,
-                        "elapsed_ms": int((clock.now() - started) * 1000),
-                        "evidence_count": 0,
-                        "detail": f"{type(exc).__name__}: {exc}",
-                    }
-                )
+                failed_step = {
+                    "tool": call.tool,
+                    "arguments": dict(call.arguments),
+                    "ok": False,
+                    "elapsed_ms": int((clock.now() - started) * 1000),
+                    "evidence_count": 0,
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+                # 失败路径同样要记：注册表可能**先丢弃了外来参数、再在 handler 里
+                # 失败**，此时"参数被丢掉"正是故障原因的一部分——不记就只剩一个
+                # 结果码，看不出计划里的参数与工具实际收到的参数不一致。
+                dropped = _dropped_arguments(registry)
+                if dropped:
+                    failed_step["dropped_arguments"] = dropped
+                ctx.steps.append(failed_step)
                 continue
 
             if not isinstance(result, ToolResult):
@@ -1425,20 +1452,24 @@ def run_turn(
                     evidence_count=len(result.evidence),
                 )
             )
-            ctx.steps.append(
-                {
-                    "tool": call.tool,
-                    "arguments": dict(call.arguments),
-                    "ok": True,
-                    "elapsed_ms": elapsed_step_ms,
-                    "evidence_count": len(result.evidence),
-                    # **证据编号**，不只是条数：只记条数回答不了"哪条证据是哪个工具
-                    # 给的"，于是"证据能否被引用"这条链在第一步就断了。留编号才能把
-                    # 工具 → 证据 → 回答里的 refs 连起来复核。
-                    "evidence_ids": [item.id for item in result.evidence],
-                    "degraded": bool(getattr(result, "degraded", False)),
-                }
-            )
+            step_record = {
+                "tool": call.tool,
+                "arguments": dict(call.arguments),
+                "ok": True,
+                "elapsed_ms": elapsed_step_ms,
+                "evidence_count": len(result.evidence),
+                # **证据编号**，不只是条数：只记条数回答不了"哪条证据是哪个工具
+                # 给的"，于是"证据能否被引用"这条链在第一步就断了。留编号才能把
+                # 工具 → 证据 → 回答里的 refs 连起来复核。
+                "evidence_ids": [item.id for item in result.evidence],
+                "degraded": bool(getattr(result, "degraded", False)),
+            }
+            # 被静默丢弃的参数名。只在非空时写这个键：trace 每轮都落库，42 个步骤
+            # 各带一个空列表是纯噪声，而"键不存在"本身就等于"没有丢弃"。
+            dropped = _dropped_arguments(registry)
+            if dropped:
+                step_record["dropped_arguments"] = dropped
+            ctx.steps.append(step_record)
 
         # ── 合并证据与覆盖声明 ────────────────────────────────────────────
         merged = ToolResult(data={}, as_of=request.as_of)
