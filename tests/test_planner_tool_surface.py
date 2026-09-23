@@ -310,6 +310,38 @@ def test_digest_never_truncates_text_mid_clause():
     assert not offenders, "这些行的摘要断在字中间：\n  " + "\n  ".join(offenders)
 
 
+# ── 每个工具都必须说明"用于回答什么" ──────────────────────────────────────
+#
+# 摘要是规划器的全部世界观。一个说不出"用于回答什么"的工具，在摘要里只剩名字
+# 加一句内部说明，规划器只能按名字的字面意思猜。
+#
+# 实测这一类的主体是 11 个 vendor 取数工具：它们此前的描述是**同一句话**，只有
+# 名字不同（"既有分析管道使用的数据工具 get_xxx（vendor 类别：yyy）。返回 vendor
+# 文本…"），而摘要里同时出现 11 条这样的行。规划器要在其中选一个，手里的唯一
+# 依据就是名字本身。
+#
+# 契约落在**摘要行**上而不是描述字段上：描述写得好但没进摘要，等于没写
+# （这正是"截断砍掉用法提示"那次事故的形态）。含异步的 L3 工具在内——L3 也需要
+# 说明"什么情况下该提交这个任务"。
+
+
+def test_every_tool_tells_the_planner_what_question_it_answers():
+    registry = chat_service.build_registry("golden")
+    digest = chat_service.build_tool_digest(registry)
+
+    missing: list[str] = []
+    for name in registry.names():
+        row = _digest_row(digest, name)
+        assert row is not None, f"{name} 不在摘要里"
+        if "用于回答" not in row:
+            missing.append(name)
+
+    assert not missing, (
+        "这些工具没让规划器看到「用于回答什么」，只能靠名字猜：\n  "
+        + "\n  ".join(missing)
+    )
+
+
 # ── 规划提示词的选择纪律 ──────────────────────────────────────────────────
 #
 # 工具摘要只解决"看不看得清"，提示词还要解决"该不该多选"。实测规划器在

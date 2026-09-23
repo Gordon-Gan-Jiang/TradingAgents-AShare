@@ -159,6 +159,53 @@ DATA_TOOL_DECLS: tuple[DataToolDecl, ...] = (
 )
 
 
+# ── 规划层用法提示（11 个 vendor 工具）─────────────────────────────────────
+#
+# 摘要（`api/services/chat_service.py::build_tool_digest` 的产物）是规划器的
+# **全部世界观**。这 11 个工具此前的描述是同一句话、只有名字不同——"既有分析
+# 管道使用的数据工具 get_xxx（vendor 类别：yyy）。返回 vendor 文本…"——于是
+# 摘要里同时出现 11 条几乎同义的行，规划器要在其中选一个，唯一依据就是名字本身。
+#
+# 这里给每个工具一句"用于回答什么"。它是这 11 条之间**唯一的区分信息**。
+#
+# ## 为什么与 `DataToolDecl` 分开放
+#
+# `DataToolDecl` 是 **vendor 调用**的契约：参数顺序、schema、数据源类别。而
+# "该在什么情况下选它"是**规划层**的关切。混在一起会让"改提示词"看起来像
+# "改调用"，而两者的评审标准完全不同（前者看工具选得准不准，后者看调用对不对）。
+#
+# ## 缺一条会怎样
+#
+# `tests/test_planner_tool_surface.py` 里"每个工具都必须让规划器看到用于回答
+# 什么"的契约会失败——这是有意的：缺提示的工具等于逼规划器靠名字猜。
+_DATA_TOOL_USAGE: Mapping[str, str] = {
+    "get_realtime_quotes": "用于回答「600519 现在多少钱」「这几只票现价多少」",
+    "get_fundamentals": "用于回答「这家公司市盈率多少」「市值多大」",
+    "get_income_statement": "用于回答「这家公司营收、净利润多少」",
+    "get_balance_sheet": "用于回答「这家公司资产、负债与股东权益情况」",
+    "get_global_news": "用于回答「最近有什么全球/宏观新闻」",
+    "get_zt_pool": "用于回答「今天有多少只涨停」「涨停板情绪如何」",
+    "get_board_spot": "用于回答「今天哪些板块在涨」「板块涨幅排名」",
+    "get_board_rank": "用于回答「哪个板块涨幅最高」「板块强弱排行」",
+    "get_board_hist": "用于回答「这个板块最近几天的走势」",
+    "get_board_fund_flow": "用于回答「哪个板块资金流入最多」「板块主力净流入排名」",
+    "get_hot_stocks_xq": "用于回答「雪球上哪些股票最热」",
+}
+
+
+def _usage_head(decl: DataToolDecl) -> str:
+    """描述的开头：用法提示；缺条目时退回旧的类别说明（**不崩、也不留空**）。
+
+    退回是为了"少一条用法提示"不会让整个工具面装配失败——那种失败会把一次
+    措辞疏漏升级成服务不可用。至于"少一条"本身该不该被放过，由契约测试回答：
+    `test_every_tool_tells_the_planner_what_question_it_answers` 会红。
+    """
+    usage = _DATA_TOOL_USAGE.get(decl.name)
+    if usage:
+        return f"{usage}。"
+    return f"既有分析管道使用的数据工具 {decl.name}（vendor 类别：{decl.category}）。"
+
+
 # ── 已从工具面退役的 8 个（声明保留，仅为分析图委托可解析）─────────────────
 #
 # **不要因为它们在文件里就重新注册。** 退役理由是它们返回散文且 `evidence=()`，
@@ -957,7 +1004,7 @@ def make_data_tools() -> tuple[ToolSpec, ...]:
                 name=decl.name,
                 title=decl.name,
                 description=(
-                    f"既有分析管道使用的数据工具 {decl.name}（vendor 类别：{decl.category}）。"
+                    f"{_usage_head(decl)}"
                     "返回 vendor 文本；结构化（JSON）与**规整的 Markdown 表格**输出都会"
                     "同时产出可引用证据（表格的证据逐字取自单元格，时点取报告期）；"
                     "散文型输出不含可引用数值。"

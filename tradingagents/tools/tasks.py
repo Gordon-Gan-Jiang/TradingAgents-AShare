@@ -317,6 +317,7 @@ def make_task_tools(tasks: TaskPort) -> tuple[ToolSpec, ...]:
         title="提交回测任务（异步）",
         description=(
             "提交一次**分钟级**的回测任务，立即返回任务号。"
+            "用于回答「这只票按持有 N 天回测胜率多少」「帮我分钟级回测一下」。"
             "拿到任务号后用 poll_async_job 轮询进度与结果。"
             "这是异步协议：不得在回答中声称已得到回测结论。"
         ),
@@ -350,7 +351,8 @@ def make_task_tools(tasks: TaskPort) -> tuple[ToolSpec, ...]:
         title="轮询任务状态",
         description=(
             "按任务号读取后台任务的当前状态（含进度、错误与完成后的结果）。"
-            "用于异步任务的续接。任务号不存在时会显式声明。"
+            "用于回答「刚才那个任务跑完了吗」——异步任务的结果只能靠它取回。"
+            "任务号不存在时会显式声明。"
         ),
         input_schema={
             "type": "object",
@@ -605,6 +607,7 @@ def make_task_tools(tasks: TaskPort) -> tuple[ToolSpec, ...]:
                 title="提交全文研报生成（异步）",
                 description=(
                     "提交一次**分钟级**的深度分析（多分析师管道 → 全文研报），立即返回任务号。"
+                    "用于回答「给我一份这只票的深度研报」「多分析师怎么看这只票」。"
                     "拿到任务号后用 poll_async_job 轮询。这是异步协议："
                     "不得在回答中声称已得到研报结论。"
                 ),
@@ -648,6 +651,7 @@ def make_task_tools(tasks: TaskPort) -> tuple[ToolSpec, ...]:
                 title="提交每日复盘（异步）",
                 description=(
                     "提交一次**分钟级**的每日复盘批跑（选池 + 逐标的深度分析），立即返回批跑号。"
+                    "用于回答「帮我做今天的复盘」「今天该重点看哪些票」。"
                     "拿到批跑号后用 poll_async_job 轮询。这是异步协议："
                     "不得在回答中声称已得到复盘结论。"
                 ),
@@ -702,7 +706,9 @@ def make_task_tools(tasks: TaskPort) -> tuple[ToolSpec, ...]:
                 title="提交模型对比（异步）",
                 description=(
                     "提交一次**分钟级**的多模型对比（同一标的、同一输入快照，每个模型各出一个任务），"
-                    "立即返回实验号与各模型任务号。拿到任务号后用 poll_async_job 轮询。"
+                    "立即返回实验号与各模型任务号。"
+                    "用于回答「哪个模型在这只票上更准」「把几个模型放一起比一比」。"
+                    "拿到任务号后用 poll_async_job 轮询。"
                     "这是异步协议：不得在回答中声称已得到对比结论。"
                 ),
                 input_schema={
