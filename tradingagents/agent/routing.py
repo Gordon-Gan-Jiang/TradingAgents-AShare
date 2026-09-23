@@ -215,6 +215,30 @@ MARKET_LEVEL_TOOLS: tuple[str, ...] = (
 DEFAULT_MARKET_TOOL = "get_board_spot"
 DEFAULT_FACTUAL_TOOL = "get_realtime_quotes"
 
+# 需标的工具的**市况级对应工具**：无标的时用它兜底，而不是一律 `DEFAULT_MARKET_TOOL`。
+#
+# 缺陷（2026-09-23 实测，黄金集登记）：问句「最近有什么新闻」（**不含任何代码**）
+# 实测被计划成 `get_board_spot`：
+#
+#     plan_factual_tool('最近有什么新闻', has_symbol=False)  → 'get_board_spot'
+#     probe('最近有什么新闻').tools                          → ('get_board_spot',)
+#
+# 根因是"需标的 → 兜底"这一步**不看问句主题**：规则表把「新闻/公告/消息面」指向
+# `data_symbol_news`，而它在 `SYMBOL_REQUIRED_TOOLS` 里（无标的不许选），于是直接
+# 落 `DEFAULT_MARKET_TOOL`。用户问新闻，拿到的是板块涨幅榜——而且工具**调用了**、
+# 看起来"查过了"，比不查更误导。
+#
+# 落点本来就在同一张市况工具表里：`get_global_news` 不需要标的。所以缺的不是能力，
+# 而是这张"需标的 → 市况级对应"的表。
+#
+# **只登记真有市况级对应工具的工具**：没有对应工具的不登记，仍走 `DEFAULT_MARKET_TOOL`。
+# 例：`announcements_read`（公告）没有全局版，无标的的公告问句今天仍落到板块行情
+# ——那是同一个缺陷的另一半，这里**如实留着不动**：给它随便指一个工具，就是拿另一个
+# 问题的数据回答这个问题（`RETIRED_CAPABILITY_HINTS` 那段讲的正是这件事）。
+SYMBOL_TOOL_MARKET_FALLBACK: Mapping[str, str] = {
+    "data_symbol_news": "get_global_news",
+}
+
 
 # 参数名必须**从工具自己的 schema 推导**，不能猜：实测各工具并不统一
 # （`get_realtime_quotes` 要 `symbols`（列表）、`get_fundamentals` 要 `ticker`、
@@ -277,6 +301,11 @@ def plan_factual_tool(text: str, *, has_symbol: bool) -> str:
     无标的时**绝不**选需要代码的工具：那是一次注定失败的调用，还会让回答
     看起来"查过了但没有数据"，比不查更误导。
 
+    命中需标的工具而问句无标的时，落点是它的**市况级对应工具**
+    （`SYMBOL_TOOL_MARKET_FALLBACK`，如新闻 → `get_global_news`），只有确实没有
+    对应工具的语义才退到最泛的 `DEFAULT_MARKET_TOOL`。修前这里不看主题、一律
+    退到 `DEFAULT_MARKET_TOOL`，于是「最近有什么新闻」被计划成 `get_board_spot`。
+
     返回 `NO_FACTUAL_TOOL`（空串）表示**本平台没有能回答它的工具**——该能力
     已从工具面退役，且没有等价的活工具。这与"规则没匹配上"必须分开：后者才该
     落到 `DEFAULT_*` 兜底。执行层见到空串**不做兜底替换**，而是落成空计划让
@@ -292,7 +321,13 @@ def plan_factual_tool(text: str, *, has_symbol: bool) -> str:
     if matched is not None:
         if has_symbol:
             return matched
-        return matched if matched not in SYMBOL_REQUIRED_TOOLS else DEFAULT_MARKET_TOOL
+        if matched in SYMBOL_REQUIRED_TOOLS:
+            # 无标的不许选需代码的工具：那是一次注定失败的调用。但兜底**不能不看
+            # 问句主题**——有市况级对应工具（如新闻 → `get_global_news`）就用它，
+            # 确实没有对应工具的才落最泛的市场级兜底。
+            # 实测（修前）：「最近有什么新闻」→ `get_board_spot`，答非所问。
+            return SYMBOL_TOOL_MARKET_FALLBACK.get(matched, DEFAULT_MARKET_TOOL)
+        return matched
 
     # 没有活规则匹配。这里先问一句"是不是问了一件已退役的能力"：
     # 是 → 没有落点（弃权）；不是 → 走既有的最泛兜底（"600519 怎么样" → 报价）。

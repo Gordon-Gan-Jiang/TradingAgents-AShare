@@ -97,6 +97,42 @@ def test_default_tools_are_registered(production_names):
     assert not missing, f"DEFAULT_* 兜底指向了不在册的工具：{missing}"
 
 
+def test_symbol_to_market_fallback_targets_are_registered_and_market_level(
+    production_names,
+):
+    """`SYMBOL_TOOL_MARKET_FALLBACK` 的两端都必须是**在册的真名**，且落点必须是市场级。
+
+    这张表决定"命中需标的工具、问句却没有标的"时去哪个工具——实测修前的行为是
+    「最近有什么新闻」→ `get_board_spot`（答非所问）。这张表是那个缺陷的修法，
+    因此它自己也要被同一套约束盯住：
+
+    * 键必须是 `SYMBOL_REQUIRED_TOOLS` 里的工具（否则这条兜底永远不会被触发，
+      下一个人会以为它生效了）；
+    * 值必须在 `MARKET_LEVEL_TOOLS` 里（否则无标的时又被指向一个需代码的工具，
+      回到"必然失败的调用"）；
+    * 两端都要在册（不在册 = 静默落回 `DEFAULT_*` 兜底，正是这次修掉的形态）。
+    """
+    from tradingagents.agent.routing import (
+        MARKET_LEVEL_TOOLS,
+        SYMBOL_REQUIRED_TOOLS,
+        SYMBOL_TOOL_MARKET_FALLBACK,
+    )
+
+    assert SYMBOL_TOOL_MARKET_FALLBACK, "映射表不该是空的（新闻是已确认的一条）"
+
+    for source, target in SYMBOL_TOOL_MARKET_FALLBACK.items():
+        assert source in SYMBOL_REQUIRED_TOOLS, (
+            f"{source!r} 不是需标的工具，这条兜底永远不会被触发"
+        )
+        assert target in MARKET_LEVEL_TOOLS, (
+            f"{source!r} 的市况级对应 {target!r} 不在 MARKET_LEVEL_TOOLS 里——"
+            "无标的时会被指向一个非市场级工具"
+        )
+        assert source != target
+    missing = sorted(set(SYMBOL_TOOL_MARKET_FALLBACK.values()) - production_names)
+    assert not missing, f"市况级对应工具不在册：{missing}"
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 反向：退役能力必须真的"没有落点"
 # ══════════════════════════════════════════════════════════════════════════

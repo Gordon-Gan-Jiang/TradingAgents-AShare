@@ -397,3 +397,67 @@ def test_report_questions_are_light_tier(text):
             return type("R", (), {"symbol": "600519.SH", "symbols": (), "candidates": ()})()
 
     assert RuleTierClassifier(_Resolver()).classify(text).tier == TIER_LIGHT
+
+
+# ── 无标的的新闻问句必须有落点：全局新闻，不是板块行情 ──────────────────────
+
+
+def test_symbolless_news_question_lands_on_global_news():
+    """「最近有什么新闻」没有标的，落点必须是**同表的** `get_global_news`。
+
+    实测（修前，2026-09-23）：
+
+        plan_factual_tool('最近有什么新闻', has_symbol=False) -> 'get_board_spot'
+        probe('最近有什么新闻').tools                       -> ('get_board_spot',)
+
+    用户问新闻，拿到的是板块涨幅榜——而且工具**调用了**、看起来"查过了"，
+    比不查更误导。
+
+    根因在 `plan_factual_tool` 的兜底：命中 `data_symbol_news`（在
+    `SYMBOL_REQUIRED_TOOLS` 里）而问句无标的时，一律返回 `DEFAULT_MARKET_TOOL`，
+    **不看问句主题**。而 `MARKET_LEVEL_TOOLS` 里本就有不需要标的的
+    `get_global_news`——缺的不是能力，是"需标的工具 → 市况级对应工具"这一张表。
+    """
+    from tests.golden.harness import probe
+    from tradingagents.agent.routing import plan_factual_tool
+
+    assert plan_factual_tool("最近有什么新闻", has_symbol=False) == "get_global_news"
+    # 端到端（与黄金集同一条驱动路径）：不是只改规则函数的分支，而是真的计划出它
+    assert probe("最近有什么新闻").tools == ("get_global_news",)
+    assert probe("最近有什么新闻").servable is True
+
+
+def test_symbol_news_question_still_plans_the_symbol_tool():
+    """回归护栏：**带标的**的新闻问句仍走 `data_symbol_news`，不得被顺手换掉。
+
+    个股新闻（"600519 最近有什么新闻"）本来就该按标的取数——全局新闻答不了
+    "这只股票最近怎么了"。修无标的的兜底时若把匹配结果一起改写，就是把对的换成错的。
+    """
+    from tests.golden.harness import probe
+    from tradingagents.agent.routing import plan_factual_tool
+
+    for text in ("600519 最近有什么新闻", "000001.SZ 最近有什么新闻"):
+        assert plan_factual_tool(text, has_symbol=True) == "data_symbol_news"
+        assert probe(text).tools == ("data_symbol_news",)
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # 其它无标的问句的行为**不得变**：映射表只登记"有市况级对应工具"的语义，
+        # 没登记的仍走原兜底（板块行情），这里把现状钉住以免改动外溢。
+        ("今天板块涨幅怎么样", "get_board_spot"),
+        ("今天的涨停板有多少只", "get_zt_pool"),
+        ("今天上证指数多少点", "index_quote_read"),
+        ("600519 怎么样", "get_board_spot"),
+    ],
+)
+def test_other_symbolless_questions_keep_their_fallback(text, expected):
+    """本次改动只解决"无标的的新闻"，别的一律不变。
+
+    「600519 怎么样」在这里是**无标的**（代码没能解析出标的）的对照：它没有任何
+    规则命中，走的仍是通用兜底 `DEFAULT_MARKET_TOOL`，不该被这次改动碰到。
+    """
+    from tradingagents.agent.routing import plan_factual_tool
+
+    assert plan_factual_tool(text, has_symbol=False) == expected
