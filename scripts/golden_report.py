@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from collections import Counter
@@ -88,15 +89,43 @@ def _normalize_bound(value: str | None) -> str | None:
     * 裸日期补 `00:00:00`。`--until` 是**排他**上界，于是 `--until 2026-09-23`
       正好排除 09-23 全天，`--since 2026-09-23 --until 2026-09-23` 的组合语义
       才与人的直觉一致（两个相邻窗口拼起来 = 全集且不重叠）。
+
+    **第三件事是校验格式**，它此前缺失，代价是实测出来的（2026-09-23）：传
+    `--since not-a-date` 时文本被原样拿去比较，而逐字符比较下 `'n'`(0x6e) >
+    `'2'`(0x32)，于是条件恒不成立、**筛出 0 条回合**，脚本输出
+    「窗口内一条回合都没有，无法度量」并照常写出报告。
+
+    那是个**误导**：用户打错了一个日期，读到的却是"这个库/这个窗口没数据"，
+    而真相是参数非法。本仓库把"把没测到渲染成没问题"列为最贵的失败形态
+    （见 `tests/test_quality_gates.py` 的 M6），"把参数错渲染成没数据"是同一类。
+    所以非法格式在这里**直接报错**，不静默变成空窗口。
     """
     if value is None:
         return None
     text = str(value).strip().replace("T", " ")
     if not text:
         return None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?: \d{2}:\d{2}(?::\d{2})?)?", text):
+        raise ValueError(
+            f"时间窗边界格式不对：{value!r}。"
+            "应为 UTC 的 YYYY-MM-DD 或 YYYY-MM-DDTHH:MM（也接受空格分隔）"
+        )
     if len(text) == 10:
         text += " 00:00:00"
     return text
+
+
+def _window_bound_arg(value: str) -> str:
+    """argparse 用的边界类型：把 `ValueError` 转成正常的参数报错（退出码 2）。
+
+    这层包装是为了**不出现 Python 栈**——非法参数应当由 argparse 报错，
+    栈会让人以为脚本坏了，而不是以为自己打错了。
+    """
+    try:
+        _normalize_bound(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return value
 
 
 def _steps_of(raw: object) -> list[dict]:
@@ -441,7 +470,7 @@ def main() -> int:
     parser.add_argument("--fail-under", type=float, default=None, help="规划准确率门槛（CI 用）")
     parser.add_argument(
         "--fail-under-recall", type=float, default=None,
-        help="工具召回率门槛（CI 用）。离线（规则路径）实测 66.7%，规划层启用时 96.2%——"
+        help="工具召回率门槛（CI 用）。离线（规则路径）实测 66.7%%，规划层启用时 96.2%%——"
              "两个口径的基线不同，门槛必须跟着当前口径走，否则闸门要么常红要么形同虚设",
     )
     parser.add_argument("--verbose", action="store_true")
@@ -451,9 +480,11 @@ def main() -> int:
     # 时间窗：两个真实 trace 度量（零证据率 / 参数丢弃率）的取样范围。
     # **边界是 UTC**——`chat_turn_traces.created_at` 存的是 UTC（见模块 docstring）。
     # `--since` 含、`--until` 不含，所以两个相邻窗口拼起来正好是全集。
-    parser.add_argument("--since", default=None, metavar="UTC",
+    # `type=_window_bound_arg` 负责把非法格式挡在入口：不加它的话，打错的日期会
+    # 被当成"空窗口"，报告写「一条回合都没有，无法度量」——把参数错说成没数据。
+    parser.add_argument("--since", default=None, metavar="UTC", type=_window_bound_arg,
                         help="真实 trace 度量窗口下界（含）。UTC，如 2026-09-23T14:32")
-    parser.add_argument("--until", default=None, metavar="UTC",
+    parser.add_argument("--until", default=None, metavar="UTC", type=_window_bound_arg,
                         help="真实 trace 度量窗口上界（**不含**）。UTC，如 2026-09-24")
     args = parser.parse_args()
 
