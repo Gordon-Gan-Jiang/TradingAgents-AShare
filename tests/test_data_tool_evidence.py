@@ -249,7 +249,7 @@ def test_empty_payload_does_not_claim_the_source_is_available():
     from tradingagents.tools.data import DATA_TOOL_DECLS, _coverage_for
 
     decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_realtime_quotes")
-    coverage = _coverage_for(decl, rendered="{}")
+    coverage = _coverage_for(decl, rendered="{}", has_evidence=False)
 
     assert coverage.available == (), "空载荷不得声称数据源可用"
     # `unavailable` 的元素是"类别名（说明）"整串，所以这里要查**子串**，
@@ -278,7 +278,7 @@ def test_vendor_failure_declares_the_diagnosis_not_just_the_category():
 
     decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_global_news")
     rendered = "Error fetching global news: Too Many Requests. Rate limited. Try after a while."
-    coverage = _coverage_for(decl, rendered=rendered)
+    coverage = _coverage_for(decl, rendered=rendered, has_evidence=False)
 
     assert coverage.available == (), "故障时不得声称源可用"
     declared = coverage.unavailable[0]
@@ -303,7 +303,79 @@ def test_healthy_data_declares_no_fault():
     from tradingagents.tools.data import DATA_TOOL_DECLS, _coverage_for
 
     decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_zt_pool")
-    coverage = _coverage_for(decl, rendered="2026-09-21 涨停家数：103\n连板分布：\n1    82\n")
+    coverage = _coverage_for(
+        decl,
+        rendered="2026-09-21 涨停家数：103\n连板分布：\n1    82\n",
+        has_evidence=True,
+    )
 
     assert coverage.available == (decl.category,)
     assert coverage.unavailable == (), "正常数据不得声明故障"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 「拿到了、但没有可引用数值」也必须声明——静默空的主生成点
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 前两节处理的是"**没拿到**"（空载荷、故障文案）。这一节处理第三种情况，
+# 也是生产里最常见的一种：
+#
+#     vendor 正常返回了一段散文 → 不是失败 → 但也抽不出可引用数值
+#
+# 而 `_coverage_for` 此前**只看"是不是失败文案"**，对"有没有产出证据"完全无感，
+# 于是这一类返回被表述成：
+#
+#     available=('fundamental_data',)   ← 声称该源可用
+#     unavailable=()                    ← 声称没有未覆盖项
+#     evidence=()                       ← 却一条证据都没有
+#
+# 用户看到的是一个**没有任何解释的空结果**，而平台其实收到了数据、只是那些数据
+# 无法被引用。这与上一节 `{}` 的 bug 是同一条原则（"拿不到 ≠ 没有"），只是更难
+# 发现：载荷非空，所以连"空载荷"那道闸门都穿不过去。
+#
+# 实测（trace 库 753 个回合，2026-09-21～23）这些工具在**成功**返回下的零证据
+# 占比：get_global_news 18/23、get_zt_pool 15/22、get_balance_sheet 11/17、
+# get_income_statement 11/17、get_board_fund_flow 11/18、get_fundamentals 11/39。
+#
+# 为什么是"声明"而不是"硬编证据"：本文件开篇第 2 条原则写着"表格/散文型输出不
+# 硬编证据：宁可为空（诚实），也不要把标签与数字错配"。这条原则不变——变的是
+# **那份诚实的空必须可见**，而不是伪装成"该源可用且一切正常"。
+
+PROSE_RETURN = (
+    "贵州茅台（600519）今日小幅震荡，成交量较前一交易日略有萎缩，"
+    "市场情绪整体偏谨慎，机构观点分歧有所加大。"
+)
+
+
+def test_prose_return_is_not_a_failure_but_must_be_declared(monkeypatch):
+    """散文不是失败，但"不可引用"必须说出来。"""
+    from tradingagents.tools.data import _looks_like_vendor_failure
+
+    assert not _looks_like_vendor_failure(PROSE_RETURN), (
+        "散文是正常返回，判成失败会让能用的文本被丢掉"
+    )
+
+    tool = _tool("get_fundamentals", monkeypatch=monkeypatch, rendered=PROSE_RETURN)
+    result = tool.handler(ticker="600519.SH", curr_date="2026-01-16")
+
+    assert result.evidence == (), "散文不得被硬编成证据（原则 2 不变）"
+    assert not result.degraded, "这不是数据源故障，不得标 degraded"
+    assert result.coverage.unavailable, (
+        "拿到了数据却一条都不可引用，必须声明；否则这个空结果没有任何解释"
+    )
+    declared = " ".join(result.coverage.unavailable)
+    assert "fundamental_data" in declared, "要点名是哪个源"
+    assert "散文" in declared or "可引用" in declared, (
+        f"说明要说清是「没有可引用数值」，而不是含糊的不可用：{declared!r}"
+    )
+
+
+def test_prose_declaration_does_not_claim_the_source_is_available():
+    """声明不可引用时，不得同时声称该源可用——那是自相矛盾。"""
+    from tradingagents.tools.data import DATA_TOOL_DECLS, _coverage_for
+
+    decl = next(d for d in DATA_TOOL_DECLS if d.name == "get_global_news")
+    coverage = _coverage_for(decl, rendered=PROSE_RETURN, has_evidence=False)
+
+    assert coverage.available == (), "没有可引用证据就不能声称该源可用"
+    assert coverage.unavailable, "同时必须给出原因"

@@ -263,16 +263,26 @@ def test_empty_vendor_output_is_treated_as_unavailable():
 
 
 def test_successful_vendor_output_claims_available():
+    """能产出证据的返回 → 声称该源可用（且不标降级）。
+
+    标本此前是**缺分隔行**的两行表，而证据抽取要求表格有分隔行（抽取器靠列数
+    逐行一致保证不错位）——于是它实际测的是"非失败即可用"这条旧口径，而那正是
+    "静默空"的生成点。口径已收紧为"有可引用证据才算可用"，标本也要换成真的
+    可引用数据；测试的意图（健康输出 → 声明可用）不变。
+    """
     import tradingagents.tools.data as data_module
 
     saved = data_module.call_vendor
-    data_module.call_vendor = lambda *a, **k: "| date | close |\n| 2026-03-04 | 10.0 |"
+    data_module.call_vendor = lambda *a, **k: (
+        "| date | close |\n| --- | --- |\n| 2026-03-04 | 10.0 |"
+    )
     try:
         spec = {s.name: s for s in data_module.make_data_tools()}["get_fundamentals"]
         result = spec.handler(ticker="600519.SH", curr_date="2026-03-04")
     finally:
         data_module.call_vendor = saved
 
+    assert result.evidence, "标本本身必须真的能产出证据，否则测的是旧口径"
     assert result.coverage.available == ("fundamental_data",)
     assert result.degraded is False
 

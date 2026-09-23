@@ -257,6 +257,10 @@ def test_legacy_tool_arg_order_is_preserved(monkeypatch):
 # 继续用退役工具做样本会让测试依赖一个不在工具面上的东西。
 _SPECIMEN = "get_fundamentals"
 _SPECIMEN_ARGS = {"ticker": "600519.SH", "curr_date": "2026-03-04"}
+# 真的能被抽成证据的返回：表格**必须有分隔行**（抽取器靠列数逐行一致保证不错位，
+# 见 `evidence_from_rendered` 的 G1 约束）。缺分隔行的两行表看着像数据，
+# 但一条证据也产不出来。
+_CITABLE_TABLE = "| date | close |\n| --- | --- |\n| 2026-03-04 | 10.0 |"
 
 
 def _spec(name, monkeypatch, rendered="表格内容"):
@@ -288,8 +292,18 @@ def test_prose_vendor_is_explicitly_marked_non_citable(monkeypatch):
 
 
 def test_data_tool_declares_coverage(monkeypatch):
-    spec = _spec(_SPECIMEN, monkeypatch)
+    """**真的可引用**的正常返回 → 声称该源可用、且无未覆盖项。
+
+    标本必须真的可引用。这里此前用的是默认占位符 `rendered="表格内容"`——四个
+    汉字，抽不出任何证据——于是它断言的其实是"非失败即可用"这条旧口径，而那
+    正是"静默空"的生成点（工具声称该源可用、没有未覆盖项，却一条证据都没有）。
+    `_coverage_for` 现在要求调用方给出 `has_evidence`，这条测试的意图
+    （健康输出 → 声明可用）不变，变的只是标本从"看着像数据"换成"真的是数据"。
+    """
+    spec = _spec(_SPECIMEN, monkeypatch, rendered=_CITABLE_TABLE)
     result = spec.handler(**_SPECIMEN_ARGS)
+
+    assert result.evidence, "标本本身必须真的能产出证据，否则这条测试测的是旧口径"
     assert result.coverage.available
     assert result.coverage.unavailable == ()
 

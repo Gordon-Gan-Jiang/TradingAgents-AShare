@@ -988,7 +988,7 @@ def make_data_tools() -> tuple[ToolSpec, ...]:
                     "category": _decl.category,
                 },
                 evidence=evidence,
-                coverage=_coverage_for(_decl, rendered),
+                coverage=_coverage_for(_decl, rendered, has_evidence=bool(evidence)),
                 as_of=as_of,
                 freshness=freshness,
                 degraded=failed,
@@ -1118,12 +1118,35 @@ def _vendor_failure_note(rendered: Any) -> str:
 
 
 def _coverage_for(
-    decl: DataToolDecl, rendered: Any = None, *, failure_note: str | None = None
+    decl: DataToolDecl,
+    rendered: Any = None,
+    *,
+    failure_note: str | None = None,
+    has_evidence: bool,
 ):
     """按 vendor 的**实际返回**声明覆盖。
 
     修复审计 A3：原实现恒返回 `available=(category,)`，于是 vendor 返回
     "cn_akshare is temporarily unavailable ... all failed" 时，工具仍声称该源可用。
+
+    `has_evidence` 修的是同一类错误的**第三种形态**（前两种是"空载荷"与"故障
+    文案"）：vendor 正常返回了一段散文 → 不是失败 → 但也抽不出可引用数值。
+    旧实现只看"是不是失败文案"，对"有没有产出证据"完全无感，于是这类返回被表述成
+    `available=(category,)` + `unavailable=()` + 证据 0 条：平台声称该源可用、
+    没有未覆盖项，却一条数据都给不出来。用户看到的是一个**没有任何解释的空结果**。
+
+    实测（trace 库 753 个回合，2026-09-21～23）成功返回下的零证据占比：
+    `get_global_news` 18/23、`get_zt_pool` 15/22、`get_balance_sheet` 11/17、
+    `get_income_statement` 11/17、`get_board_fund_flow` 11/18、`get_fundamentals` 11/39。
+
+    **为什么是声明而不是硬编证据**：散文里没有"标签-数值"的可靠对应，硬编会把
+    标签与数字错配，而错误证据比没有证据糟得多（见 `evidence_from_rendered`
+    的解析链与 `tests/test_data_tool_evidence.py` 开篇第 2 条原则）。这条原则不变，
+    变的是**那份诚实的空必须可见**——不能伪装成"该源可用且一切正常"。
+
+    `has_evidence` 刻意**没有默认值**：它决定这个函数最重要的一个分支，给它一个
+    默认就等于给未来的调用点留一条"忘记传、静默退回旧行为"的路——而旧行为正是
+    这次要修的 bug。
     """
     from tradingagents.grounding.types import Coverage
 
@@ -1140,5 +1163,10 @@ def _coverage_for(
         # 与人的阅读都还成立。
         note = failure_note if failure_note is not None else _vendor_failure_note(rendered)
         declared = f"{decl.category}（数据源故障：{note}）" if note else decl.category
+        return Coverage(available=(), unavailable=(declared,))
+    if not has_evidence:
+        # 拿到了、但不是能引用的东西。措辞刻意与"数据源故障"分开：这不是故障，
+        # 让人去"重试/换问法"是误导；该说的是"这段文本没法被引用"。
+        declared = f"{decl.category}（有返回，但输出不含可引用数值）"
         return Coverage(available=(), unavailable=(declared,))
     return Coverage(available=(decl.category,), unavailable=())
