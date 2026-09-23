@@ -136,6 +136,56 @@ def test_vendor_failure_text_yields_no_evidence(monkeypatch):
     assert result.degraded is True, "vendor 明确说不可用时应标 degraded"
 
 
+def test_xueqiu_parse_failure_is_declared_with_its_diagnosis(monkeypatch):
+    """雪球热搜解析失败必须**带原因**声明，不能静默为空。
+
+    这是 W2 的交付项之一，此前**没有任何测试守着**（行为在，护栏不在）。实测
+    （2026-09-23，真实网络）雪球端点返回的是反爬 HTML 而不是 JSON，于是
+    `ak.stock_hot_follow_xq` 抛 `JSONDecodeError`，provider 把它渲染成
+    `雪球热搜数据获取失败：JSONDecodeError: …`。本用例把线上那一段原样搬进来，
+    断言它走的是"故障声明"这条路，而不是"成功但零证据"。
+
+    **这条不是先红后绿的 TDD 用例**：行为已经在生产验证过（探针实测
+    `unavailable=['…雪球热搜数据获取失败：JSONDecodeError…']`、`degraded=True`），
+    这里做的是**把它钉住**——因为"静默空"正是本轮要消灭的坏形状，而它对
+    每一个 vendor 工具都可能复发。
+
+    顺带记录一个**已确认不是 bug 的观察**（免得下一个人像我一样想当然去"修"）：
+    声明的源键是粗粒度的 `board_data`，而时效契约里雪球是独立注册的
+    `hot_stocks_xq`。我一度以为这是"把雪球归错源"的缺陷，实测后发现**全部 11 个
+    vendor 工具**声明的源键都不在契约里（`fundamental_data` / `news_data` /
+    `core_stock_apis` …），是系统性的粗粒度标签方案；而 `tools/data.py` 的注释也
+    写明这些散文型工具**本就该标 unknown**（"把「未验证」当「最新」会让下游不降级"）。
+    改它会动摇时效口径，不在本期范围。
+    """
+    live_text = (
+        "雪球热搜数据获取失败：JSONDecodeError: Expecting value: "
+        "line 1 column 1 (char 0)"
+    )
+    spec = _tool("get_hot_stocks_xq", monkeypatch=monkeypatch, rendered=live_text)
+    result = spec.handler()
+
+    assert result.evidence == (), "反爬 HTML 里没有事实，不得产出证据"
+    assert result.degraded is True, "解析失败必须标降级"
+    declared = " ".join(result.coverage.unavailable)
+    assert declared, "失败必须声明；静默空是本轮要消灭的坏形状"
+    assert "JSONDecodeError" in declared, (
+        "必须带上真实诊断，否则用户分不清「解析失败」与「这边没有数据」"
+    )
+
+
+def test_xueqiu_empty_result_is_also_declared(monkeypatch):
+    """雪球返回"暂不可用"（`df` 为空那条分支）同样要声明，不能当成"没有热搜"。"""
+    spec = _tool(
+        "get_hot_stocks_xq", monkeypatch=monkeypatch, rendered="雪球热搜数据暂不可用。"
+    )
+    result = spec.handler()
+
+    assert result.evidence == ()
+    assert result.degraded is True
+    assert result.coverage.unavailable, "拿不到就要说拿不到"
+
+
 def test_json_rows_become_one_evidence_per_row(monkeypatch):
     """行式 JSON（榜单类）每行一条证据，便于逐一引用。"""
     rows = json.dumps(
