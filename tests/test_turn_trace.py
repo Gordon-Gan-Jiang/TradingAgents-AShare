@@ -72,6 +72,58 @@ def test_trace_round_trip_keeps_plan_and_steps():
     assert row["created_at"], "要有时间戳才能按时间排查"
 
 
+def test_dropped_arguments_survive_the_round_trip():
+    """被丢弃的参数必须能从库里查回来——它是 W4 那条"参数丢弃率"的唯一数据源。
+
+    `loop.py` 往步骤里写这个字段（`c112775`），但"写进了步骤 dict"不等于"落进了库"：
+    `trace_service` 中间还有一层 JSON 裁剪（`_clip`），而它此前**没有任何测试**
+    证明这个新键能穿过。若穿不过去，W4-T1 的指标会永远读成 0%，而"0% 丢弃率"
+    看起来恰恰像"问题解决了"——这是最坏的一种失败：**指标失效伪装成指标达标**。
+
+    反向断言同样重要：没丢参数的步骤**不得**凭空长出这个键。那条指标的判据是
+    "键不存在 == 没有丢弃"，若裁剪层给每个步骤补一个空列表，判据就反过来了。
+    """
+    from api.services import trace_service
+
+    user_id = _user()
+    trace_id = trace_service.save_turn_trace(
+        conversation_id="conv-dropped",
+        user_id=user_id,
+        text="今天哪些板块在涨",
+        tier="medium",
+        status="completed",
+        steps=[
+            {
+                "tool": "get_board_spot",
+                "arguments": {"board_name": "玻璃行业"},  # 规划器猜错的参数名
+                "ok": True,
+                "elapsed_ms": 120,
+                "evidence_count": 0,
+                "dropped_arguments": ["board_name"],
+            },
+            {
+                "tool": "get_realtime_quotes",
+                "arguments": {"symbols": ["600519.SH"]},
+                "ok": True,
+                "elapsed_ms": 90,
+                "evidence_count": 11,
+            },
+        ],
+        tool_calls=("get_board_spot", "get_realtime_quotes"),
+    )
+    assert trace_id
+
+    row = trace_service.get_turn_trace(user_id=user_id, trace_id=trace_id)
+    steps = row["steps"]
+
+    assert steps[0]["dropped_arguments"] == ["board_name"], (
+        "丢了参数这件事必须能从库里查回来，否则丢弃率指标没有数据源"
+    )
+    assert "dropped_arguments" not in steps[1], (
+        "没丢参数的步骤不得凭空长出这个键——「键不存在 == 没有丢弃」是判据本身"
+    )
+
+
 def test_failed_step_is_visible_with_detail():
     """失败步骤必须能看出"哪一步空了、为什么"。"""
     from api.services import trace_service
