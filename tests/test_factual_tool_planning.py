@@ -461,3 +461,108 @@ def test_other_symbolless_questions_keep_their_fallback(text, expected):
     from tradingagents.agent.routing import plan_factual_tool
 
     assert plan_factual_tool(text, has_symbol=False) == expected
+
+
+# ── 无标的的板块问句必须能走到流程（闸门漏掉的那一类）──────────────────────
+
+
+def test_symbolless_board_question_is_servable_and_plans_board_spot():
+    """「今天哪些板块在涨」= `get_board_spot` **自己声明的用途**，不该被 400 追问。
+
+    实测（修前，2026-09-23）：
+
+        build_turn_request('今天哪些板块在涨')                    -> None（HTTP 400 追问"请输入代码"）
+        looks_like_market_level_factual('今天哪些板块在涨')        -> False
+        plan_factual_tool('今天哪些板块在涨', has_symbol=False)    -> 'get_board_spot'
+
+    注意最后一行：**规则层早就选对了工具**，卡点在它之前的闸门。闸门要求问句命中
+    `_LIGHT_MARKERS`，而表里收的是「涨幅」——「哪些板块**在涨**」一个标记都不命中，
+    又没有标的，于是被当成"你没说清楚"。用户看到的是一句"请输入具体的股票代码"，
+    而平台本就有不需要标的的板块快照（`get_board_spot`，其规划器摘要原样写着
+    「用于回答『今天哪些板块在涨』」）。工具承诺了一个路由送不到的能力。
+
+    判据仍然是闸门 docstring 写明的那条：**问句指向一个真的存在的、不需要标的的
+    工具**。这里补的是漏掉的"板块类市况问句"这一种措辞，不是把闸门放宽。
+    """
+    from api.services import chat_service
+    from tests.golden.harness import probe
+    from tradingagents.agent.routing import looks_like_market_level_factual
+
+    assert looks_like_market_level_factual("今天哪些板块在涨") is True
+
+    body = chat_service.ChatRequest(messages=[{"role": "user", "content": "今天哪些板块在涨"}])
+    request = chat_service.build_turn_request(body, user_id="u1")
+    assert request is not None, "板块问句不该被 400 追问标的"
+    assert request.market_level is True
+
+    # 端到端（黄金集同一条驱动路径）
+    assert probe("今天哪些板块在涨").tools == ("get_board_spot",)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # 平台**没有**能回答它们的工具（需要 P2 的主线/情绪工具），仍必须追问：
+        # 这条断言是"别把闸门拆了"的护栏——放宽的是板块措辞，不是整个闸门。
+        "今天大盘怎么样",
+        "现在市场情绪如何",
+        # 研判型问句：`get_board_spot` 答的是"哪些板块在涨"，不是轮动逻辑。
+        # 放它进来就是拿板块涨幅榜回答一个研判问题（**答非所问**）。
+        "板块轮动怎么看",
+        "行业景气度如何",
+    ],
+)
+def test_questions_without_a_symbolless_landing_spot_still_clarify(text):
+    """没有不需要标的的落点的问句，**仍然**走 400 追问这条路径。
+
+    修前它们全都是 400；放宽闸门后必须一个都没变。否则就是把"缺少能力"的追问，
+    换成了"有工具但答的是另一个问题"的假答案——后者更糟。
+    """
+    from api.services import chat_service
+    from tradingagents.agent.routing import looks_like_market_level_factual
+
+    assert looks_like_market_level_factual(text) is False
+    body = chat_service.ChatRequest(messages=[{"role": "user", "content": text}])
+    assert chat_service.build_turn_request(body, user_id="u1") is None, (
+        f"{text!r} 本平台没有不需要标的的落点，仍应诚实追问"
+    )
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # 本来就过闸门的市场级问句：计划工具必须一个都不变。
+        ("今天板块涨幅怎么样", "get_board_spot"),
+        ("今天的涨停板有多少只", "get_zt_pool"),
+        ("今天上证指数多少点", "index_quote_read"),
+        # 上一轮修好的那条：无标的的新闻仍落全局新闻，不能被本轮改动碰回去。
+        ("最近有什么新闻", "get_global_news"),
+    ],
+)
+def test_already_servable_market_questions_keep_their_tools(text, expected):
+    """既有的市场级问句行为不变（含上一轮的新闻修复）。"""
+    from tests.golden.harness import probe
+
+    observed = probe(text)
+    assert observed.servable is True
+    assert observed.tools == (expected,)
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # 带标的的路径完全不受影响：闸门只在**解析不出标的时**才被问到
+        # （`chat_service.build_turn_request` 的 `if symbol is None` 分支），
+        # 所以这两条走的是各自的规则命中。
+        ("600519 所属板块今天涨幅多少", "get_board_spot"),
+        ("600519 最近有什么新闻", "data_symbol_news"),
+    ],
+)
+def test_symbol_scoped_questions_are_unaffected(text, expected):
+    """带标的问句的规划不变（黄金集 f09 就是这一形态）。"""
+    from tests.golden.harness import probe
+
+    observed = probe(text)
+    assert observed.servable is True
+    assert observed.symbols == ("600519.SH",)
+    assert observed.tools == (expected,)

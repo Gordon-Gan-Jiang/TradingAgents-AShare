@@ -83,12 +83,25 @@ def _patch_map(monkeypatch):
     )
 
 
+# 规则路径**服务不了**的一句自然语言：下面几条测试需要一个"规则失败"的问句作载体，
+# 它必须真的没有不需要标的的落点——否则测的就不是"规划层把路打开"，而是"规则已经
+# 能服务了"。
+#
+# 这个载体换过一次（2026-09-23）：原来是「最近哪个板块最强」，闸门补上板块类措辞后
+# 它被规则路径接下了（计划 `get_board_spot`、`build_turn_request` 不再返回 None），
+# 三条"退回规则路径"的断言因此同时变红。现在换成「现在市场情绪如何」——它要的是
+# P2 的市场主线/情绪工具（`market_mainline_view`，今天不在工具面上），规则路径仍然
+# 服务不了。**等它也能被服务时这几条会再次变红，那时请再换一个载体**，别把断言放宽
+# 成"或非 None"：那等于把"规划失败必须降级、不能中断回合"这条性质测没了。
+_RULES_CANNOT_SERVE = "现在市场情绪如何"
+
+
 def test_without_planner_behaviour_is_unchanged(monkeypatch):
-    """不注入规划器 = 今天的行为：解析不出标的一律返回 None（路由转 400）。"""
+    """不注入规划器 = 今天的行为：解析不出标的、也没有市况级落点的问句返回 None。"""
     from api.services import chat_service
 
     _patch_map(monkeypatch)
-    assert chat_service.build_turn_request(_body("最近哪个板块最强"), user_id="u1") is None
+    assert chat_service.build_turn_request(_body(_RULES_CANNOT_SERVE), user_id="u1") is None
 
 
 def test_planner_is_only_called_when_rules_fail(monkeypatch):
@@ -121,7 +134,7 @@ def test_planner_opens_the_natural_language_path(monkeypatch):
         return Plan(intent="market_view", tier="light", market_level=True, confidence=0.8)
 
     request = chat_service.build_turn_request(
-        _body("最近哪个板块最强"), user_id="u1", planner=_planner
+        _body(_RULES_CANNOT_SERVE), user_id="u1", planner=_planner
     )
     assert request is not None, "规划层给出的落点应当被采纳"
     assert request.plan_source == "llm"
@@ -155,7 +168,7 @@ def test_planner_failure_degrades_instead_of_breaking_the_turn(monkeypatch):
         raise TimeoutError("planner slow")
 
     assert chat_service.build_turn_request(
-        _body("最近哪个板块最强"), user_id="u1", planner=_boom
+        _body(_RULES_CANNOT_SERVE), user_id="u1", planner=_boom
     ) is None
 
 
@@ -164,7 +177,7 @@ def test_planner_returning_none_falls_back(monkeypatch):
 
     _patch_map(monkeypatch)
     assert chat_service.build_turn_request(
-        _body("最近哪个板块最强"), user_id="u1", planner=lambda text: None
+        _body(_RULES_CANNOT_SERVE), user_id="u1", planner=lambda text: None
     ) is None
 
 
