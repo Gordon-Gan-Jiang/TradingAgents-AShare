@@ -1,15 +1,15 @@
 import { useMemo, useState } from 'react'
 import { ChevronDown, ChevronUp, Scale, ShieldAlert, Swords, Waves } from 'lucide-react'
+import {
+    metricTone,
+    needsParticipationWarning,
+    participationLabel,
+    strengthTone,
+} from '@/components/consensusDisplay'
 import type { ConsensusSummary } from '@/types'
 
 interface ConsensusCardProps {
     summary?: ConsensusSummary | null
-}
-
-function metricTone(value: number): string {
-    if (value >= 75) return 'text-emerald-600 dark:text-emerald-400'
-    if (value >= 45) return 'text-amber-600 dark:text-amber-400'
-    return 'text-rose-600 dark:text-rose-400'
 }
 
 export default function ConsensusCard({ summary }: ConsensusCardProps) {
@@ -50,14 +50,46 @@ export default function ConsensusCard({ summary }: ConsensusCardProps) {
                         <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium ${executionTone}`}>
                             执行模式：{summary.execution_mode_label}
                         </span>
+                        {participationLabel(summary) && (
+                            <span
+                                className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-medium ${
+                                    needsParticipationWarning(summary)
+                                        ? 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300'
+                                        : 'border-slate-200 text-slate-600 dark:border-slate-700 dark:text-slate-300'
+                                }`}
+                                title={
+                                    needsParticipationWarning(summary)
+                                        ? '参与的分析师过少时，「共识强度」只说明投票的少数人意见一致，不代表面板共识很强；执行模式也不会给出「直接执行」。'
+                                        : '真正计入加权投票的分析师，占出报告分析师的比例。'
+                                }
+                            >
+                                {participationLabel(summary)}
+                            </span>
+                        )}
                         {summary.horizon_conflict && (
                             <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
                                 短中线存在分歧
                             </span>
                         )}
                         {(summary.unparsed_analyst_n ?? 0) > 0 && (
-                            <span className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300">
-                                {summary.unparsed_analyst_n} 份报告解析失败，未计入共识
+                            <span
+                                className="inline-flex items-center rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-700 dark:border-rose-500/20 dark:bg-rose-500/10 dark:text-rose-300"
+                                title={
+                                    summary.recovered_analyst_n === undefined
+                                        ? '该报告生成于修复之前：此数字只统计缺少 VERDICT 块，可能把方向写在 ANALYST_JSON 里的报告也算作失败；重新生成报告即可按新口径统计。'
+                                        : 'VERDICT 与 ANALYST_JSON 两个机读块都没有给出方向，因此未计入加权投票。'
+                                }
+                            >
+                                {summary.unparsed_analyst_n} 份报告未计入共识
+                                {summary.recovered_analyst_n === undefined ? '（旧口径）' : '（未给出方向）'}
+                            </span>
+                        )}
+                        {(summary.recovered_analyst_n ?? 0) > 0 && (
+                            <span
+                                className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300"
+                                title="这些报告没有 VERDICT 块，方向取自 ANALYST_JSON 块，仍然计入共识"
+                            >
+                                {summary.recovered_analyst_n} 份方向取自 ANALYST_JSON
                             </span>
                         )}
                     </div>
@@ -69,7 +101,12 @@ export default function ConsensusCard({ summary }: ConsensusCardProps) {
                             <Waves className="h-3.5 w-3.5" />
                             共识强度
                         </div>
-                        <div className={`mt-1 text-2xl font-bold ${metricTone(summary.consensus_strength)}`}>{summary.consensus_strength}</div>
+                        <div
+                            className={`mt-1 text-2xl font-bold ${strengthTone(summary)}`}
+                            title="只衡量「投票的分析师彼此有多一致」；参与人数见上方参与度标签。"
+                        >
+                            {summary.consensus_strength}
+                        </div>
                     </div>
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/60">
                         <div className="flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">

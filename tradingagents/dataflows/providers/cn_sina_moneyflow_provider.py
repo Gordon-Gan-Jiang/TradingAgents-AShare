@@ -9,6 +9,7 @@ import pandas as pd
 from ..trade_calendar import cn_today_str
 from ._http_utils import HttpRetry, http_get_json, http_get_text
 from .cn_market_only_base import CnMarketOnlyProvider
+from .errors import SourceEmpty, SourceUnavailable, SourceUnsupported
 
 _SINA_BOARD_FLOW_URL = (
     "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
@@ -72,6 +73,20 @@ _SINA_BOARD_SPOT_NOT_COVERED = ("换手率", "上涨家数", "下跌家数", "�
 _SINA_BOARD_SPOT_SECTOR_TYPES = ("industry",)
 
 
+def _num_or_nan(v: Any) -> float:
+    """数值转换；取不到返回 NaN（**不是 0**，见审计 §4.12）。
+
+    这里用 NaN 而不是 None，是因为调用方会把这些值拼进 DataFrame 做排序/求和，
+    NaN 会被 pandas 自动跳过，而 0 会被当成一个真实的观测值参与计算。
+    """
+    if v is None or isinstance(v, bool):
+        return float("nan")
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def fetch_sina_industry_board_fund_flow_df() -> pd.DataFrame:
     """Fetch Sina industry board fund-flow rankings (fenlei=0).
 
@@ -91,7 +106,7 @@ def fetch_sina_industry_board_fund_flow_df() -> pd.DataFrame:
         retry=HttpRetry(attempts=4, base_sleep_s=0.5, timeout_s=10.0),
     )
     if not isinstance(obj, list) or not obj:
-        raise NotImplementedError("sina board fund flow empty")
+        raise SourceEmpty("sina board fund flow empty")
 
     rows: list[dict[str, Any]] = []
     for item in obj:
@@ -100,24 +115,28 @@ def fetch_sina_industry_board_fund_flow_df() -> pd.DataFrame:
         name = str(item.get("name") or "").strip()
         if not name:
             continue
+        # `float(x or 0)` 会把「字段缺失」写成「净流入恰好为 0」（审计 §4.12）。
+        # 取不到就是 NaN，让 pandas 的聚合/排名天然忽略它，而不是把它当成一个
+        # 真实观测值参与排序。
         rows.append(
             {
                 "名称": name,
-                "今日涨跌幅": float(item.get("avg_changeratio") or 0),
-                "今日主力净流入-净额": float(item.get("netamount") or 0),
-                "今日主力净流入-净占比": float(item.get("ratioamount") or 0),
+                "今日涨跌幅": _num_or_nan(item.get("avg_changeratio")),
+                "今日主力净流入-净额": _num_or_nan(item.get("netamount")),
+                "今日主力净流入-净占比": _num_or_nan(item.get("ratioamount")),
             }
         )
     if not rows:
-        raise NotImplementedError("sina board fund flow parse failed")
+        raise SourceUnavailable("sina board fund flow parse failed")
     return pd.DataFrame(rows)
 
 
 @dataclass(frozen=True)
 class _MoneyflowRow:
     date: str  # YYYY-MM-DD
-    main_net_yuan: float
-    total_net_yuan: float
+    # `None` = 该字段本次取不到（**不是 0**，见审计 §4.12）
+    main_net_yuan: float | None
+    total_net_yuan: float | None
 
 
 def _parse_sina_board_spot_payload(text: str) -> pd.DataFrame:
@@ -130,13 +149,13 @@ def _parse_sina_board_spot_payload(text: str) -> pd.DataFrame:
     start = text.find("{")
     end = text.rfind("}")
     if start < 0 or end <= start:
-        raise NotImplementedError("sina industry board spot payload has no object")
+        raise SourceUnavailable("sina industry board spot payload has no object")
     try:
         obj = json.loads(text[start : end + 1])
     except ValueError as exc:
-        raise NotImplementedError(f"sina industry board spot not parsable: {exc}") from exc
+        raise SourceUnavailable(f"sina industry board spot not parsable: {exc}") from exc
     if not isinstance(obj, dict) or not obj:
-        raise NotImplementedError("sina industry board spot empty")
+        raise SourceEmpty("sina industry board spot empty")
 
     rows: list[dict[str, str]] = []
     for value in obj.values():
@@ -149,7 +168,7 @@ def _parse_sina_board_spot_payload(text: str) -> pd.DataFrame:
             continue
         rows.append(dict(zip(_SINA_BOARD_SPOT_FIELDS, fields)))
     if not rows:
-        raise NotImplementedError("sina industry board spot parse failed")
+        raise SourceUnavailable("sina industry board spot parse failed")
     return pd.DataFrame(rows)
 
 
@@ -176,7 +195,7 @@ def fetch_sina_industry_board_spot_df(sector_type: str = "industry") -> pd.DataF
             f"Unknown sector_type={sector_type!r}, expected 'industry' or 'concept'"
         )
     if sector_type not in _SINA_BOARD_SPOT_SECTOR_TYPES:
-        raise NotImplementedError(
+        raise SourceUnsupported(
             f"cn_sina_moneyflow 未覆盖 sector_type={sector_type!r}："
             f"新浪板块快照只提供行业（{_SINA_BOARD_SPOT_URL}，实测 49 个板块）；"
             "概念板块的划分与东财不同源、不可互换，交由下一个数据源处理"
@@ -303,17 +322,25 @@ class CnSinaMoneyflowProvider(CnMarketOnlyProvider):
 
         m = re.search(r"(\d{6})", (symbol or "").strip())
         if not m:
-            raise NotImplementedError(f"cn_sina_moneyflow only supports 6-digit symbols, got: {symbol}")
+            raise SourceUnsupported(f"cn_sina_moneyflow only supports 6-digit symbols, got: {symbol}")
         code = m.group(1)
         prefix = "sh" if code.startswith(("5", "6", "9")) else "sz"
         return f"{prefix}{code}"
 
     @staticmethod
-    def _safe_float(v: Any) -> float:
+    def _safe_float(v: Any) -> float | None:
+        """数值转换；**取不到时返回 None，不返回 0.0**（审计 §4.12）。
+
+        同步修掉 `fetch_sina_industry_board_fund_flow_df` 里的同形状写法
+        ——那里更直接：`float(item.get("netamount") or 0)`，字段缺失直接变 0。
+        """
+        if v is None or isinstance(v, bool):
+            return None
         try:
-            return float(v)
-        except Exception:
-            return 0.0
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if f != f else f  # NaN 也是"取不到"
 
     def _fetch_rows(self, symbol: str) -> list[_MoneyflowRow]:
         code = self._normalize(symbol)
@@ -330,7 +357,7 @@ class CnSinaMoneyflowProvider(CnMarketOnlyProvider):
         }
         obj = http_get_json(url, params=params, headers=headers, retry=self.RETRY)
         if not isinstance(obj, list) or not obj:
-            raise NotImplementedError(f"sina moneyflow empty for {symbol}")
+            raise SourceEmpty(f"sina moneyflow empty for {symbol}")
 
         rows: list[_MoneyflowRow] = []
         for it in obj:
@@ -347,7 +374,7 @@ class CnSinaMoneyflowProvider(CnMarketOnlyProvider):
                 )
             )
         if not rows:
-            raise NotImplementedError(f"sina moneyflow parse failed for {symbol}")
+            raise SourceUnavailable(f"sina moneyflow parse failed for {symbol}")
         return rows
 
     # ── CN market tool ──
@@ -419,7 +446,7 @@ class CnSinaMoneyflowProvider(CnMarketOnlyProvider):
 
         按"宁可少支持一个工具，也不许编数据"：显式声明未覆盖，路由继续找东财。
         """
-        raise NotImplementedError(
+        raise SourceUnsupported(
             "cn_sina_moneyflow 未覆盖 get_board_rank：新浪板块资金流只有「当日」一个"
             f"截面（MoneyFlow.ssl_bkzj_bk），没有 3/5/10 日维度，无法兑现 period={period!r} 契约；"
             "同期同数据请走 get_board_fund_flow。交由下一个数据源处理。"
@@ -431,7 +458,7 @@ class CnSinaMoneyflowProvider(CnMarketOnlyProvider):
         不许拿个股行情或别的板块的日线冒充：板块历史的成分口径与个股完全不同，
         混用会让"板块历史走势"这句话背后的东西随源改变。板块历史当前只有东财一个源。
         """
-        raise NotImplementedError(
+        raise SourceUnsupported(
             f"cn_sina_moneyflow 未覆盖 get_board_hist：新浪不提供板块日线历史"
             f"（「{board_name}」/{sector_type}）；板块历史当前只有东财一个源。"
         )

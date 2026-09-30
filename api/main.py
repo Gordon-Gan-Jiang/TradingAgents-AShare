@@ -181,6 +181,8 @@ _auto_daily_product_task: Optional[asyncio.Task] = None
 _auto_daily_ops_task: Optional[asyncio.Task] = None
 _strategy_feedback_task: Optional[asyncio.Task] = None
 _auto_t1_eval_task: Optional[asyncio.Task] = None
+# 交易日 09:00 的数据源可用性探测（结果见 /data-sources 页面）
+_data_source_probe_task: Optional[asyncio.Task] = None
 _scheduled_analysis_max_concurrency = int(os.getenv("TA_SCHEDULED_ANALYSIS_MAX_CONCURRENCY", "10"))
 _scheduled_analysis_semaphore: Optional[asyncio.Semaphore] = None
 _scheduled_analysis_queue_lock: Optional[asyncio.Lock] = None
@@ -648,6 +650,73 @@ async def _strategy_feedback_loop() -> None:
             await asyncio.to_thread(_strategy_feedback_tick)
         except Exception as e:
             logger.error("[StrategyFeedback] Error: %s", e)
+
+
+def _data_source_probe_tick() -> None:
+    """交易日 09:00 探测一轮数据源可用性（默认开启）。
+
+    **为什么是开盘前 09:00**：这一刻上一交易日的行情/财报已经完整，而当日数据
+    还没产生——探测结果能干净地区分"源坏了"与"今天还没数据"，不会自己制造
+    假故障（这是 15:00 之后或盘中探测做不到的）。
+
+    探测刻意走**真实取数**而不是连通性检查；串行执行以避开免费源的限流。
+    判定逻辑（含"今天跑过没有"）都在 `data_source_probe_service` 里，这里只负责
+    触发与记录，方便那部分被单测覆盖。
+
+    Env knobs:
+      TA_DATA_SOURCE_PROBE_ENABLED       0/false/no 关闭（默认开启）
+      TA_DATA_SOURCE_PROBE_AT            探测时刻 HH:MM（默认 09:00）
+      TA_DATA_SOURCE_PROBE_INTERVAL_SEC  巡检间隔秒（默认 120）
+    """
+    from api.database import SessionLocal
+    from api.services import data_source_probe_service as probe
+
+    db = SessionLocal()
+    try:
+        due, reason = probe.should_run_scheduled_probe(db)
+        if not due:
+            # 只有真正异常的原因才值得记日志；"今天跑过了"每 2 分钟刷一次会淹掉日志。
+            if reason not in ("already-ran-today", "before-scheduled-time"):
+                logger.debug("[DataSourceProbe] skip reason=%s", reason)
+            return
+
+        summary = probe.run_probe(db, trigger=probe.TRIGGER_SCHEDULED)
+        _log(
+            f"[DataSourceProbe] completed status={summary.status} "
+            f"ok={summary.ok_count} degraded={summary.degraded_count} "
+            f"failed={summary.failed_count} unsupported={summary.unsupported_count} "
+            f"duration={summary.duration_ms}ms"
+        )
+        # 失败要显式告警：本次事故的教训就是"某源不可用"从来没有浮出水面。
+        if summary.failed_count:
+            failed = [
+                f"{o.source}.{o.tool}({o.error_kind})"
+                for o in summary.outcomes
+                if o.status == probe.STATUS_FAILED
+            ]
+            logger.warning(
+                "[DataSourceProbe] %s 个数据源探测失败：%s",
+                summary.failed_count,
+                ", ".join(failed[:10]),
+            )
+    finally:
+        db.close()
+
+
+async def _data_source_probe_loop() -> None:
+    from api.services import data_source_probe_service as probe
+
+    interval = probe.probe_interval_seconds()
+    _log(
+        f"[DataSourceProbe] Started (interval={interval:.0f}s, at={probe.probe_at()}, "
+        f"enabled={probe.probe_enabled()})."
+    )
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await asyncio.to_thread(_data_source_probe_tick)
+        except Exception as e:
+            logger.error("[DataSourceProbe] Error: %s", e)
 
 
 # date → bool: already ran auto T+1 eval for that date
@@ -1156,13 +1225,11 @@ async def _warm_stock_map() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown."""
-    global _scheduler_task, _stock_map_warm_task, _mainline_scheduler_task, _tracking_alert_task, _recommendation_push_task, _auto_daily_product_task, _auto_daily_ops_task, _strategy_feedback_task, _auto_t1_eval_task, _scheduled_analysis_semaphore, _scheduled_analysis_queue_lock, _executor, _light_executor, _market_executor
-    if getattr(_executor, "_shutdown", False):
-        _executor = ThreadPoolExecutor(max_workers=int(os.getenv("TA_MAX_WORKERS", "2")))
-    if getattr(_light_executor, "_shutdown", False):
-        _light_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="api-light")
-    if getattr(_market_executor, "_shutdown", False):
-        _market_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="market")
+    global _scheduler_task, _stock_map_warm_task, _mainline_scheduler_task, _tracking_alert_task, _recommendation_push_task, _auto_daily_product_task, _auto_daily_ops_task, _strategy_feedback_task, _auto_t1_eval_task, _data_source_probe_task, _scheduled_analysis_semaphore, _scheduled_analysis_queue_lock, _executor, _light_executor, _market_executor
+    # 执行器若被上一轮 lifespan 停过机就重建（自愈逻辑见 _live_executor 的说明）
+    _get_executor()
+    _get_light_executor()
+    _get_market_executor()
     init_db()
     _log("Database initialized.")
     with _jobs_lock:
@@ -1239,9 +1306,19 @@ async def lifespan(app: FastAPI):
                 % mainline_reset
             )
     # Pre-load trade calendar (uses mini_racer/V8 which is not thread-safe)
-    from tradingagents.dataflows.trade_calendar import _load_cn_trade_dates
-    _load_cn_trade_dates()
-    _log("Trade calendar pre-loaded.")
+    # 这只是一次**预热**（纯优化），不是启动前置条件：日历取不到时
+    # `_load_cn_trade_dates` 会抛 TradingCalendarUnavailable（审计 §4.13），
+    # 但绝不能让整个应用启动失败——真正的交易日查询会各自显式报错。
+    try:
+        from tradingagents.dataflows.trade_calendar import _load_cn_trade_dates
+
+        _load_cn_trade_dates()
+        _log("Trade calendar pre-loaded.")
+    except Exception as _cal_exc:
+        _log(
+            "Trade calendar pre-load failed (%s: %s); 交易日相关查询将显式报错，"
+            "不会按工作日推断。" % (type(_cal_exc).__name__, _cal_exc)
+        )
     # Stock map 走 akshare，可能阻塞数十秒。后台预热，避免卡住 /healthz 与登录接口。
     # Warm-start from the on-disk cache first (fast, local) so the first requests
     # after a restart already resolve Chinese names instead of waiting on AkShare.
@@ -1255,6 +1332,7 @@ async def lifespan(app: FastAPI):
     _auto_daily_ops_task = asyncio.create_task(_auto_daily_ops_loop())
     _strategy_feedback_task = asyncio.create_task(_strategy_feedback_loop())
     _auto_t1_eval_task = asyncio.create_task(_auto_t1_eval_loop())
+    _data_source_probe_task = asyncio.create_task(_data_source_probe_loop())
     async with run_mcp_lifespan(_mcp_asgi):
         yield
     _log("Shutting down: Cleaning up resources...")
@@ -1276,6 +1354,8 @@ async def lifespan(app: FastAPI):
         _strategy_feedback_task.cancel()
     if _auto_t1_eval_task:
         _auto_t1_eval_task.cancel()
+    if _data_source_probe_task:
+        _data_source_probe_task.cancel()
     _executor.shutdown(wait=False, cancel_futures=True)
     _light_executor.shutdown(wait=False, cancel_futures=True)
     _market_executor.shutdown(wait=False, cancel_futures=True)
@@ -1324,10 +1404,13 @@ app.add_middleware(
 # 对话式研判：新增端点走路由分层，不再写进入口模块。
 # 由 tests/test_architecture_boundaries.py 强制「新端点不得声明在此文件」。
 from api.routers import chat as _chat_router  # noqa: E402
+from api.routers import data_sources as _data_sources_router  # noqa: E402
 from api.routers import signals as _signals_router  # noqa: E402
 
 app.include_router(_signals_router.router)
 app.include_router(_chat_router.router)
+# 数据源探测报告（/data-sources 页面的数据来源）
+app.include_router(_data_sources_router.router)
 
 # MCP 出口：挂载 ASGI 应用，并把它的 session manager 交给主应用 lifespan。
 # FastAPI **不会**运行被挂载子应用的 lifespan，因此必须显式合并——否则
@@ -1350,6 +1433,55 @@ _executor = ThreadPoolExecutor(max_workers=int(os.getenv("TA_MAX_WORKERS", "2"))
 # 登录/健康检查专用线程池，避免被 akshare 等同步任务占满默认 anyio 线程池。
 _light_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="api-light")
 _market_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="market")
+
+
+# --- 执行器自愈 ------------------------------------------------------------
+# `ThreadPoolExecutor.shutdown()` 之后**不能再提交任务**，会抛
+# `RuntimeError: cannot schedule new futures after shutdown`。而这三个执行器是
+# **模块级**的，生命周期长于 FastAPI 的 lifespan，于是有一个稳定可复现的真实故障：
+#
+#     with TestClient(app):        # 进 lifespan → 启动
+#         ...
+#     # 退出 → shutdown()，模块级执行器被永久停机
+#     TestClient(app).post("/v1/auth/request-code")   # 不进 lifespan
+#     # → RuntimeError: cannot schedule new futures after shutdown（HTTP 500）
+#
+# 即：**任何一次「进过 lifespan 再离开」都会让后续请求挂掉**。原代码只在 lifespan
+# 启动时检查一次，所以只有"再次进入 lifespan"才能恢复；而 `TestClient(app)` 不进
+# lifespan 的用法（本仓库测试大量这么写，且生产上热重载也会碰到）永远恢复不了。
+#
+# 这里把"取执行器"变成惰性自愈的动作，在**使用点**兜住，而不是依赖生命周期回调。
+
+
+def _live_executor(executor: ThreadPoolExecutor, **kwargs) -> ThreadPoolExecutor:
+    """返回一个**还活着**的执行器；已被 shutdown 过就重建。"""
+    if getattr(executor, "_shutdown", False):
+        return ThreadPoolExecutor(**kwargs)
+    return executor
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    global _executor
+    _executor = _live_executor(
+        _executor, max_workers=int(os.getenv("TA_MAX_WORKERS", "2"))
+    )
+    return _executor
+
+
+def _get_light_executor() -> ThreadPoolExecutor:
+    global _light_executor
+    _light_executor = _live_executor(
+        _light_executor, max_workers=8, thread_name_prefix="api-light"
+    )
+    return _light_executor
+
+
+def _get_market_executor() -> ThreadPoolExecutor:
+    global _market_executor
+    _market_executor = _live_executor(
+        _market_executor, max_workers=2, thread_name_prefix="market"
+    )
+    return _market_executor
 _jobs_lock = Lock()
 _jobs: Dict[str, Dict[str, Any]] = {}
 _daily_product_runs_lock = Lock()
@@ -4193,7 +4325,10 @@ async def _run_job_inner(
                         if db_updates:
                             await asyncio.to_thread(_horizon_partial_update, db_updates)
                 except Exception as e:
-                    _log(f"Error during horizon streaming ({horizon}): {e}")
+                    # 这里此前只记 message，抛错的节点与行号全部丢失：2026-09-28
+                    # 600699.SH 的 'str' has no attribute 'get' 只能靠人工反推现场。
+                    # 带上 traceback，让下一次同类失败自己交出位置。
+                    _log(f"Error during horizon streaming ({horizon}): {e}\n{traceback.format_exc()}")
                     raise
                 finally:
                     current_tracker_var.reset(_tracker_token)
@@ -4310,8 +4445,8 @@ async def _run_job_inner(
                             decision=decision,
                             result_data=result,
                             user_id=user_id,
-                            risk_items=([r.model_dump() for r in structured.risks] if structured else None),
-                            key_metrics=([m.model_dump() for m in structured.key_metrics] if structured else None),
+                            risk_items=(report_service.dump_structured_items(structured, "risks")),
+                            key_metrics=(report_service.dump_structured_items(structured, "key_metrics")),
                             target_price_override=result["target_price"],
                             stop_loss_override=result["stop_loss_price"],
                             report_id=job_id,
@@ -4339,8 +4474,8 @@ async def _run_job_inner(
                 "job_id": job_id, "decision": decision,
                 "direction": result["direction"],
                 "result": result, "mode": "dual_horizon",
-                "risk_items": [r.model_dump() for r in structured.risks] if structured else [],
-                "key_metrics": [m.model_dump() for m in structured.key_metrics] if structured else [],
+                "risk_items": report_service.dump_structured_items(structured, "risks"),
+                "key_metrics": report_service.dump_structured_items(structured, "key_metrics"),
                 "confidence": result["confidence"],
                 "target_price": result["target_price"],
                 "stop_loss_price": result["stop_loss_price"],
@@ -4568,8 +4703,8 @@ async def _run_job_inner(
                         decision=decision,
                         result_data=result,
                         user_id=user_id,
-                        risk_items=([r.model_dump() for r in structured.risks] if structured else None),
-                        key_metrics=([m.model_dump() for m in structured.key_metrics] if structured else None),
+                        risk_items=(report_service.dump_structured_items(structured, "risks")),
+                        key_metrics=(report_service.dump_structured_items(structured, "key_metrics")),
                         target_price_override=result["target_price"],
                         stop_loss_override=result["stop_loss_price"],
                         report_id=job_id,
@@ -4605,8 +4740,8 @@ async def _run_job_inner(
                 "decision": decision,
                 "direction": result["direction"],
                 "result": result,
-                "risk_items": [r.model_dump() for r in structured.risks] if structured else [],
-                "key_metrics": [m.model_dump() for m in structured.key_metrics] if structured else [],
+                "risk_items": report_service.dump_structured_items(structured, "risks"),
+                "key_metrics": report_service.dump_structured_items(structured, "key_metrics"),
                 "confidence": result["confidence"],
                 "target_price": result["target_price"],
                 "stop_loss_price": result["stop_loss_price"],
@@ -4626,9 +4761,13 @@ async def _run_job_inner(
         
         # ── Persistent failure recording (short-lived session) ──
         try:
+            # format_exc() 必须在**当前线程的 except 作用域内**取；放进 to_thread
+            # 的闭包里会因线程局部异常上下文失效而写出 "NoneType: None"。
+            err_traceback = traceback.format_exc()
+
             def _record_failure():
                 with get_db_ctx() as err_db:
-                    report_service.mark_report_failed(err_db, job_id, f"{err_msg}\n\n{traceback.format_exc()}")
+                    report_service.mark_report_failed(err_db, job_id, f"{err_msg}\n\n{err_traceback}")
             await asyncio.to_thread(_record_failure)
         except Exception as db_exc:
             _log(f"Failed to record failure in DB: {db_exc}")
@@ -5249,7 +5388,9 @@ async def get_mainline_run(
     current_user: UserDB = Depends(_require_api_user),
 ) -> Dict[str, Any]:
     loop = asyncio.get_running_loop()
-    run = await loop.run_in_executor(_light_executor, _get_mainline_run_sync, current_user.id, run_id)
+    run = await loop.run_in_executor(
+        _get_light_executor(), _get_mainline_run_sync, current_user.id, run_id
+    )
     if run is None:
         raise HTTPException(status_code=404, detail="mainline run not found")
     return run
@@ -5265,7 +5406,7 @@ async def mainline_boards_spot(
     collector = get_shared_market_collector()
     loop = asyncio.get_running_loop()
     pool = await loop.run_in_executor(
-        _market_executor,
+        _get_market_executor(),
         lambda: collector.collect(trade_date, "short", include_breadth=False),
     )
     if type == "concept":
@@ -7653,7 +7794,7 @@ async def request_login_code(request: AuthRequestCodeRequest):
     loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
-            loop.run_in_executor(_light_executor, _request_login_code_sync, email),
+            loop.run_in_executor(_get_light_executor(), _request_login_code_sync, email),
             timeout=15,
         )
     except asyncio.TimeoutError:

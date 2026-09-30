@@ -241,9 +241,11 @@ function AgentNodeComponent({ data }: NodeProps<AgentFlowNode>) {
                         <span className={`shrink-0 mt-0.5 text-[11px] font-black px-2 py-0.5 rounded-full leading-none ${VERDICT_COLORS[verdict.direction] ?? VERDICT_COLORS._default}`}>
                             {verdict.direction}
                         </span>
-                        <span className="text-[12px] text-slate-500 dark:text-slate-400 leading-snug line-clamp-2">
-                            {verdict.reason}
-                        </span>
+                        {verdict.reason && (
+                            <span className="text-[12px] text-slate-500 dark:text-slate-400 leading-snug line-clamp-2">
+                                {verdict.reason}
+                            </span>
+                        )}
                     </div>
                     <p className="text-[11px] font-semibold tabular-nums text-slate-400 dark:text-slate-500 pl-0.5">
                         置信度 {verdict.confidence}%

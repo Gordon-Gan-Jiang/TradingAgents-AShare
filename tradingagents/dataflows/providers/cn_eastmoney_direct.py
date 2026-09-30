@@ -15,11 +15,15 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 import pandas as pd
 
 from ._http_utils import HttpRetry, http_get_json
+from .errors import SourceEmpty, SourceUnavailable, SourceUnsupported
+
+logger = logging.getLogger(__name__)
 
 _HOST = "https://push2delay.eastmoney.com"
 _PATH = "/api/qt/clist/get"
@@ -173,15 +177,120 @@ def fetch_em_board_spot_direct(sector_type: str = "concept") -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-def fetch_em_market_breadth_direct() -> dict:
-    """东财全市场宽度直连（push2delay，分页约 56 页/6s，TTL 缓存后无感）。"""
+def fetch_em_market_breadth_direct() -> dict | None:
+    """东财全市场宽度直连（push2delay，分页约 56 页/6s，TTL 缓存后无感）。
+
+    算不出宽度时返回 **None**（而不是一份全零宽度）。
+
+    旧实现无论有没有涨跌幅字段都返回 `{up, down, flat, total}`：一旦 `f3`
+    缺失（东财改字段名/限流返回残缺页），就得到 `up=0 down=0 flat=0` 配
+    `total=5598`——把一个约 5600 只股票的市场报成「零涨零跌」。
+    `0` 是合法观测值，所以这个伪事实不会触发任何降级，还会作为
+    `market_collector._breadth` 的**首选**（且不带 `approximate` 标记）
+    一路进入分析师提示词（审计 §4.11）。
+    """
     rows = _clist_paged(_FS["market"])
+    if not rows:
+        return None
     chgs = [r.get("f3") for r in rows if isinstance(r.get("f3"), (int, float))]
+    if not chgs:
+        # 一行涨跌幅都取不到 → 无法计算宽度。显式降级让上层问下一个源，
+        # 而不是凭空造出「全市场零涨零跌」。
+        logger.warning(
+            "eastmoney breadth: %d rows but no numeric f3; degrading to next source",
+            len(rows),
+        )
+        return None
     total = len(rows)
     up = sum(1 for c in chgs if c > 0)
     down = sum(1 for c in chgs if c < 0)
     flat = sum(1 for c in chgs if c == 0)
     return {"up": up, "down": down, "flat": flat, "total": total, "as_of": None}
+
+
+_LHB_HOST = "https://datacenter-web.eastmoney.com"
+_LHB_PATH = "/api/data/v1/get"
+_LHB_REPORT = "RPT_DAILYBILLBOARD_DETAILSNEW"
+#: `stock_lhb_detail_em` 原始列名（akshare 会重命名成中文，这里保持同一套名字，
+#: 让下游 `_LHB_CODE_COLUMNS` / 展示层的行为与走 akshare 时完全一致）。
+_LHB_COLUMNS = (
+    "SECURITY_CODE", "SECUCODE", "SECURITY_NAME_ABBR", "TRADE_DATE", "EXPLAIN",
+    "CLOSE_PRICE", "CHANGE_RATE", "BILLBOARD_NET_AMT", "BILLBOARD_BUY_AMT",
+    "BILLBOARD_SELL_AMT", "BILLBOARD_DEAL_AMT", "ACCUM_AMOUNT", "DEAL_NET_RATIO",
+    "DEAL_AMOUNT_RATIO", "TURNOVERRATE", "FREE_MARKET_CAP", "EXPLANATION",
+    "D1_CLOSE_ADJCHRATE", "D2_CLOSE_ADJCHRATE", "D5_CLOSE_ADJCHRATE",
+    "D10_CLOSE_ADJCHRATE", "SECURITY_TYPE_CODE",
+)
+#: 东财对「该窗口没有数据」返回的业务码：HTTP **200** + `result: null` +
+#: `message="返回数据为空"`。这**不是**故障，只是一段没有行的窗口。
+_LHB_EMPTY_BUSINESS_CODE = 9201
+
+
+def fetch_em_lhb_detail_direct(
+    start_date: str,
+    end_date: str,
+    *,
+    retry: HttpRetry = HttpRetry(attempts=3, base_sleep_s=0.5, timeout_s=15.0),
+) -> pd.DataFrame:
+    """东财龙虎榜明细直连，**空窗口返回空表而不是抛错**。
+
+    为什么不直接用 `akshare.stock_lhb_detail_em`：它的解析体是
+    ``data_json["result"]["pages"]``，而东财对没有行的窗口返回
+    ``HTTP 200 + result: null + code=9201 "返回数据为空"``，于是
+    ``None["pages"]`` 抛出 ``TypeError: 'NoneType' object is not subscriptable``
+    ——**非异动日（完全正常的情况）被上游当成了解析错误**，再被本模块的
+    ``except Exception`` 兜成「龙虎榜数据获取失败」，用户在报告里看到一个红色的
+    「数据异常」。实测：2026-09-26（周六）与 2020-01-01（元旦）都是 `result: null`。
+
+    实测过的三种形态：
+
+    * `result` 是 dict ⇒ 正常取 `data`（单日窗口 `pages` 通常为 1）；
+    * `result` 为 null 且业务码为 9201 ⇒ **空窗口**，返回空表；
+    * 其余（网络异常、未知业务码） ⇒ 原样抛出，由调用方如实报失败。
+
+    返回的列名与 akshare 一致（中文列名由调用方再重命名，或直接按
+    `_LHB_CODE_COLUMNS` 过滤），因此下游无需区分数据来自哪条路径。
+    """
+    start = str(start_date).replace("-", "").strip()
+    end = str(end_date).replace("-", "").strip()
+    if len(start) != 8 or not start.isdigit() or len(end) != 8 or not end.isdigit():
+        raise ValueError(f"日期须为 YYYYMMDD：{start_date!r}/{end_date!r}")
+    iso = lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]}"  # noqa: E731
+    params = {
+        "sortColumns": "SECURITY_CODE,TRADE_DATE",
+        "sortTypes": "1,-1",
+        # 单日窗口只有一个 page；pageSize 与 akshare 保持一致。
+        "pageSize": "5000",
+        "pageNumber": "1",
+        "reportName": _LHB_REPORT,
+        "columns": ",".join(_LHB_COLUMNS),
+        "source": "WEB",
+        "client": "WEB",
+        "filter": f"(TRADE_DATE<='{iso(end)}')(TRADE_DATE>='{iso(start)}')",
+    }
+    payload = http_get_json(
+        _LHB_HOST + _LHB_PATH, params=params, headers=_HEADERS, retry=retry
+    )
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"龙虎榜端点返回了非对象载荷：{type(payload).__name__}")
+    result = payload.get("result")
+    if result is None:
+        code = payload.get("code")
+        if code == _LHB_EMPTY_BUSINESS_CODE:
+            # 「返回数据为空」= 这段窗口没有龙虎榜行（非异动日）——空表，不是错误。
+            logger.info(
+                "eastmoney lhb: %s..%s has no rows (code=%s); treating as empty window",
+                iso(start), iso(end), code,
+            )
+            return pd.DataFrame(columns=list(_LHB_COLUMNS))
+        # 未知的业务失败：如实抛错，绝不吞成"没有数据"。
+        raise RuntimeError(
+            f"龙虎榜端点业务错误：code={code} message={payload.get('message')!r}"
+        )
+    rows = result.get("data") if isinstance(result, dict) else None
+    if not rows:
+        return pd.DataFrame(columns=list(_LHB_COLUMNS))
+    return pd.DataFrame(rows)
 
 
 def fetch_em_zt_pool_direct() -> pd.DataFrame:
@@ -190,4 +299,4 @@ def fetch_em_zt_pool_direct() -> pd.DataFrame:
     用 clist 全市场 + 涨停判定（f3 >= 9.8 且非 ST 无脑近似不可靠），
     因此涨停池仍优先 akshare stock_zt_pool_em（实测稳定），本函数暂不启用。
     """
-    raise NotImplementedError("涨停池请使用 akshare stock_zt_pool_em（稳定可用）")
+    raise SourceUnsupported("涨停池请使用 akshare stock_zt_pool_em（稳定可用）")

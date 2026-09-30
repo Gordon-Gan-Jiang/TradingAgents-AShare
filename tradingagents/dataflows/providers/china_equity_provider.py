@@ -1,4 +1,5 @@
 from .base import BaseMarketDataProvider
+from .errors import SourceEmpty, SourceUnavailable, SourceUnsupported
 
 
 class CnStubProvider(BaseMarketDataProvider):
@@ -9,7 +10,7 @@ class CnStubProvider(BaseMarketDataProvider):
         return "cn_stub"
 
     def _not_implemented(self) -> str:
-        raise NotImplementedError(
+        raise SourceUnsupported(
             "Provider 'cn_stub' is a placeholder. "
             "Use concrete provider names like 'cn_akshare' or 'cn_tushare'."
         )

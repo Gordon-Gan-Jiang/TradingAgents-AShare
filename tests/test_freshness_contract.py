@@ -425,3 +425,129 @@ def test_board_fund_flow_success_with_snapshot_date_is_fresh():
         analysis_mode="historical",
     )
     assert pool["board_fund_flow"]["status"] == "fresh"
+
+
+# ══ 采集范围 vs. 契约范围：假故障的回归测试 ══════════════════════════════════
+# 事故（2026-09-24 起，每条报告）：`intraday_bars` / `chip_distribution` /
+# `symbol_news` 是**工具/对话路径**的源，报告管线（DataCollector）从不采它们。
+# 但它们一旦进了 contract.yaml，`evaluate_collector_results` 就把"采集结果里没有"
+# 一律当成"该采没采到"→ error +「数据源返回空」→ overall 变「数据异常」→
+# 置信度被压到 40，并被模型写进终审正文（"L0：intraday_bars 未恢复 → 0% 开仓"）。
+# 而那两个源当时实测完全可用。下面几条用例把"没采 ≠ 取数失败"钉住。
+
+
+def test_contract_scope_declares_pipeline_sources():
+    """声明必须存在且非空——缺了它 `report_pipeline_sources()` 会回退到「全部契约源」，
+    假故障会原样回来（回退是保守的，但不该被依赖）。"""
+    from tradingagents.dataflows.freshness.contract import (
+        all_contract_source_keys,
+        report_pipeline_sources,
+    )
+
+    scope = report_pipeline_sources()
+    assert scope, "contract.yaml 必须声明 report_pipeline_sources"
+    assert scope <= set(all_contract_source_keys()), "声明里不能有未知源名"
+
+
+def test_tool_path_sources_are_out_of_report_pipeline_scope():
+    """工具/对话路径的源不该在报告采集范围内。"""
+    from tradingagents.dataflows.freshness.contract import report_pipeline_sources
+
+    scope = report_pipeline_sources()
+    for key in ("intraday_bars", "chip_distribution", "symbol_news"):
+        assert key not in scope, f"{key} 由工具路径消费，报告管线不采它"
+
+
+def test_uncollected_out_of_scope_source_is_not_applicable_not_error():
+    """报告里没采到的**范围外**源 → not_applicable，且不得冒充「数据源返回空」。"""
+    pool = evaluate_collector_results(
+        {"stock_data": "date,close\n2026-06-26,10.0\n"},
+        "2026-06-26",
+        analysis_mode="historical",
+    )
+    for key in ("intraday_bars", "chip_distribution", "symbol_news"):
+        meta = pool[key]
+        assert meta["status"] == "not_applicable", f"{key} 不该被判成故障"
+        assert meta.get("issue_type") is None
+        assert meta.get("error_message") != "数据源返回空"
+        assert "不在本采集管线范围内" in (meta.get("note") or "")
+
+
+def test_out_of_scope_sources_do_not_trigger_data_anomaly_banner():
+    """端到端：整份摘要不得因为这三个源而变「数据异常」，置信度也不得被封到 40。"""
+    bars = "date,close\n2026-06-25,10.0\n2026-06-26,10.5\n"
+    results = {
+        "stock_data": bars,
+        "news": "2026-06-26 10:00 公司公告",
+        "global_news": "2026-06-26 宏观",
+        "fund_flow_board": "板块资金流\n快照日期 2026-06-26",
+        "fund_flow_individual": "600519 数据截止 2026-06-26\n",
+        "lhb": "600519.SH 在 2026-06-26 无龙虎榜数据（非异动日属正常）。",
+        "insider_transactions": "2026-06-20 高管变动",
+        "zt_pool": "涨停池 请求日期 2026-06-26",
+        "hot_stocks": "2026-06-26 09:30 雪球热榜",
+        "fundamentals": "最新披露期：2026-Q2",
+        "balance_sheet": "最新披露期：2026-Q2",
+        "cashflow": "最新披露期：2026-Q2",
+        "income_statement": "最新披露期：2026-Q2",
+    }
+    pool = build_freshness_pool(results, "2026-06-26", analysis_mode="historical")
+    summary = build_freshness_summary(pool, "2026-06-26", analysis_mode="historical")
+
+    assert summary["overall_status"] != "error", (
+        f"范围外未采集的源不该把整份报告判成数据异常：{summary['fetch_errors']}"
+    )
+    assert summary["confidence_cap"] > 40
+    offenders = {"intraday_bars", "chip_distribution", "symbol_news"}
+    assert not offenders & {e["source_key"] for e in summary["fetch_errors"]}
+    assert all(
+        s.get("source_key") not in offenders for s in summary.get("blocking_sources") or []
+    )
+
+
+def test_in_scope_missing_source_still_errors():
+    """守卫不能被我这次改动削弱：**范围内**的源没采到，仍然必须是 error。"""
+    from tradingagents.dataflows.freshness.contract import report_pipeline_sources
+
+    pool = evaluate_collector_results({}, "2026-06-26")
+    for key in ("stock_data", "individual_fund_flow"):
+        assert key in report_pipeline_sources()
+        assert pool[key]["status"] == "error"
+        assert pool[key]["issue_type"] == "fetch_error"
+
+
+def test_scope_parameter_can_be_overridden():
+    """自定义管线可以显式给出自己的采集范围（默认才用报告管线那张表）。"""
+    pool = evaluate_collector_results(
+        {"stock_data": "date,close\n2026-06-26,10.0\n"},
+        "2026-06-26",
+        analysis_mode="historical",
+        scope=("stock_data", "intraday_bars"),
+    )
+    assert "intraday_bars" in pool
+    assert pool["intraday_bars"]["status"] != "not_applicable", "显式声明在范围内就不再是不适用"
+
+
+# ══ 契约的 empty_ok 必须真的生效 ══════════════════════════════════════════════
+
+
+def test_empty_ok_flag_is_honoured_when_source_answers_no_data():
+    """`empty_ok: true` 曾是死配置（只有龙虎榜文案匹配生效），现在真的被读。"""
+    ctx = build_eval_context("2026-06-23", symbol="600519.SH", analysis_mode="historical")
+    meta = evaluate_source("lhb_detail", "无数据", ctx, trade_date="2026-06-23")
+    assert meta.status == "empty_ok"
+    assert meta.empty_ok is True
+
+
+def test_empty_ok_does_not_swallow_a_missing_answer():
+    """收紧条件：没有回包（None）意味着采集方**根本没拿到答案**，不能被 empty_ok 抹平。"""
+    ctx = build_eval_context("2026-06-23", symbol="600519.SH", analysis_mode="historical")
+    assert evaluate_source("lhb_detail", None, ctx, trade_date="2026-06-23").status == "error"
+    assert evaluate_source("lhb_detail", "", ctx, trade_date="2026-06-23").status == "error"
+
+
+def test_empty_ok_does_not_apply_to_sources_without_the_flag():
+    ctx = build_eval_context("2026-06-23", symbol="600519.SH", analysis_mode="historical")
+    meta = evaluate_source("stock_data", "无数据", ctx, trade_date="2026-06-23")
+    assert meta.status == "error", "没声明 empty_ok 的源，空回包仍是故障"
+

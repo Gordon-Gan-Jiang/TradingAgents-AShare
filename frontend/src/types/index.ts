@@ -85,6 +85,11 @@ export interface ConsensusAgentBreakdown {
     label: string
     horizon: string
     verdict: string
+    /**
+     * 方向取自哪个机读块：`verdict`（VERDICT 块）或 `analyst_json`（ANALYST_JSON 块）。
+     * 用于区分「本来就好」与「兜回来的」。
+     */
+    verdict_source?: 'verdict' | 'analyst_json'
     confidence: number
     weight: number
     contribution: number
@@ -105,7 +110,11 @@ export interface ConsensusSummary {
     support_ratio: number
     oppose_ratio: number
     neutral_ratio: number
-    risk_gate?: string
+    /**
+     * 风控闸结论。**没有风控状态时为 null**（风控环节未运行），绝不写 "pass"：
+     * 「风控没有反对」与「风控没有运行」是两件事，前者是经审查后的放行。
+     */
+    risk_gate?: string | null
     execution_preconditions?: string[]
     de_risk_triggers?: string[]
     flip_conditions?: string[]
@@ -115,10 +124,32 @@ export interface ConsensusSummary {
     opposing_agents?: string[]
     agent_breakdown?: ConsensusAgentBreakdown[]
     /**
-     * 解析失败、因而**未计入**加权投票的分析师数量。
-     * 必须展示：否则「7 位分析师一致看多」与「只有 2 份报告解析成功」在界面上完全一样。
+     * 两个机读块（VERDICT / ANALYST_JSON）**都没有**给出方向、因而未计入加权投票的
+     * 分析师数量。注意语义已收紧：旧实现把「VERDICT 块缺失」也算作解析失败，而分析师
+     * 的方向其实写在 ANALYST_JSON 里，于是 43.5% 的正常报告被误报为解析失败。
+     * 必须展示：否则「7 位分析师一致看多」与「只有 2 份报告成功」在界面上完全一样。
      */
     unparsed_analyst_n?: number
+    /**
+     * 方向取自 ANALYST_JSON 块（VERDICT 块缺失或不可用）的分析师数量。
+     * 单独计数=共识可复核：用户能看出有多少票是从 ANALYST_JSON 兜回来的。
+     */
+    recovered_analyst_n?: number
+    /**
+     * 真正投票（计入加权）的分析师数量。与 unparsed_analyst_n 相加等于 expected_n。
+     * 必须与 consensus_strength 同时呈现：只看强度无法区分「7 人一致」（7/7 → 100）
+     * 与「1 人投票、6 人弃权」（1/7 → 也是 100）。
+     */
+    participant_n?: number
+    /** 出报告的分析师数量（投票 + 弃权）。 */
+    expected_n?: number
+    /** participant_n / expected_n，落盘保留 3 位小数。 */
+    participation_ratio?: number
+    /**
+     * 参与度是否低到不足以支撑一个面板结论（比例不足半数，或投票人数少于 3）。
+     * 为真时执行模式不会是 direct，且强度不得以「高确信」绿色呈现。
+     */
+    low_participation?: boolean
     summary?: string
 }
 
@@ -408,14 +439,18 @@ export interface KlineResponse {
 // Structured extraction types
 export interface RiskItem {
     name: string
-    level: 'high' | 'medium' | 'low'
+    // `unknown` = 后端无法把模型给的等级映射到规范值（审计 §4.6）。
+    // 它**不是** medium：修复前那种"认不出就当中等"的兜底已经被移除。
+    // 库里还存在修复前的中文脏数据（"高"/"严重"），展示层用 levelTone 兜底。
+    level: 'high' | 'medium' | 'low' | 'unknown' | (string & {})
     description?: string
 }
 
 export interface KeyMetric {
     name: string
     value: string
-    status: 'good' | 'neutral' | 'bad'
+    // 同 RiskItem.level：`unknown` 是显式的"未识别"，不等于 neutral。
+    status: 'good' | 'neutral' | 'bad' | 'unknown' | (string & {})
 }
 
 export interface FreshnessSummary {
@@ -464,8 +499,10 @@ export interface Report {
     confidence?: number
     target_price?: number
     stop_loss_price?: number
-    risk_items?: RiskItem[]
-    key_metrics?: KeyMetric[]
+    // `null` = 抽取结果里没有该字段（不知道）；`[]` = 模型明确给出空列表（确认没有）。
+    // 两者在界面上必须给不同的话（审计 §4.7）。
+    risk_items?: RiskItem[] | null
+    key_metrics?: KeyMetric[] | null
     created_at?: string
     updated_at?: string
     waiting_ahead_count?: number | null
@@ -2102,4 +2139,124 @@ export interface ConversationDetail {
         weak_verification: boolean
         latency_ms: number
     }>
+}
+
+// Data Source Probe Types（数据源探测报告 /v1/data-sources/*）
+
+/**
+ * 探测状态。已知取值有明确的中文标签与配色；
+ * 后端新增取值（`(string & {})` 保留自动补全的同时允许未知字符串）时按未知处理，前端不会崩溃。
+ * `timeout`（超过硬截止，默认 20s）刻意与 `failed` 分开：慢不等于挂。
+ */
+export type DataSourceProbeStatus =
+    | 'ok'
+    | 'degraded'
+    | 'failed'
+    | 'timeout'
+    | 'unsupported'
+    | 'pending'
+    | 'skipped'
+    | (string & {})
+
+/** 能力矩阵中的单个数据源：谁以什么优先级服务某个维度。 */
+export interface DataSourceMatrixSource {
+    source: string
+    /** 1 = 主源，2 = 兜底，3 = 最后手段 */
+    tier: number
+    batchable: boolean
+    needs_credential: boolean
+    note: string
+}
+
+/** 能力矩阵中的单个维度（tool）。 */
+export interface DataSourceMatrixItem {
+    tool: string
+    label: string
+    category: string
+    note: string
+    sources: DataSourceMatrixSource[]
+}
+
+export interface DataSourceMatrixResponse {
+    generated_at: string
+    items: DataSourceMatrixItem[]
+}
+
+/** 一次探测中「数据源 × 维度」的最新结果。 */
+export interface DataSourceProbeResult {
+    source: string
+    tool: string
+    label: string
+    category: string
+    status: DataSourceProbeStatus
+    latency_ms: number | null
+    row_count: number | null
+    /**
+     * `row_count` 的单位：`rows` = 真实记录数（工具返回了表格）；
+     * `lines` = 预格式化文本的非空行数，只是体量代理、**不是**记录数。
+     * 老版本后端不返回该字段，未知取值同样按缺失处理。
+     */
+    row_unit?: DataSourceProbeRowUnit | null
+    version: string | null
+    error_kind: string | null
+    error_type: string | null
+    error_message: string | null
+    checked_at: string | null
+}
+
+/** `row_count` 的单位；`(string & {})` 让后端新增取值时前端仍能编译。 */
+export type DataSourceProbeRowUnit = 'rows' | 'lines' | (string & {})
+
+/** 一次探测运行（latest_run 与 runs[] 共用；runs[] 可能不带 finished_at）。 */
+export interface DataSourceProbeRunSummary {
+    id: string
+    started_at: string
+    finished_at?: string | null
+    status: DataSourceProbeStatus
+    /** scheduled = 定时，manual = 手动 */
+    trigger: string
+    trading_day: boolean
+    total_count: number
+    ok_count: number
+    degraded_count: number
+    failed_count: number
+    /** 超时单列，**不计入 failed_count**；老版本后端不返回，按 0 处理 */
+    timeout_count?: number
+    unsupported_count: number
+    duration_ms: number | null
+}
+
+export interface DataSourceProbeStatusResponse {
+    /** 从未探测过时为 null */
+    latest_run: DataSourceProbeRunSummary | null
+    results: DataSourceProbeResult[]
+    /** 最近若干次运行摘要，最新的在前 */
+    runs: DataSourceProbeRunSummary[]
+    /**
+     * 是否有探测正在后台跑（一轮探测是 20+ 次真实请求，超时会转后台）。
+     * 该字段与 enabled / scheduled_at 一样是 status / probe 端点的附加信息，
+     * 老版本后端不返回时按 undefined 处理。
+     */
+    running?: boolean
+    /** 是否启用交易日定时探测 */
+    enabled?: boolean
+    /** 定时探测时刻，形如 "09:00" */
+    scheduled_at?: string | null
+}
+
+/** 趋势用的历史点。 */
+export interface DataSourceProbeHistoryPoint {
+    checked_at: string
+    source: string
+    tool: string
+    status: DataSourceProbeStatus
+    latency_ms: number | null
+    row_count: number | null
+    /** 与 DataSourceProbeResult.row_unit 同义；老版本后端不返回 */
+    row_unit?: DataSourceProbeRowUnit | null
+    version: string | null
+}
+
+export interface DataSourceProbeHistoryResponse {
+    points: DataSourceProbeHistoryPoint[]
 }

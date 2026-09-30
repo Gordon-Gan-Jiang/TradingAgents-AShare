@@ -243,6 +243,19 @@ def make_cache_key(ticker: str, trade_date: str) -> str:
     return f"{ticker}_{trade_date}"
 
 
+#: 取数失败的统一标记。
+#:
+#: `_safe` 兜住异常后返回的值会被分析师节点**原样插进提示词**
+#: （`pool.get("news", "无数据")`），而提示词要求 anchor 的 value
+#: 「必须逐字拷贝自上文工具数据/引文中已出现的片段」——于是一段裸错误文本
+#: 会被**合规地**抄成证据锚点。实测 59422 条锚点里 1222 条（2.1%）是失败文案。
+#:
+#: 所以失败值必须**自带显眼标记**：既让模型一眼看出"这项没有数据"，
+#: 也让 `dataflows/vendor_text.py` 的失败判断能识别它（标记已登记在那张表里）。
+#: 诊断信息仍然保留在标记之后——可见即可查，不能因为"怕污染"就把原因藏掉。
+DATA_FETCH_FAILURE_NOTICE = "【取数失败·本项无数据】"
+
+
 def _safe(tool, payload: dict) -> Any:
     start_t = time.time()
     try:
@@ -253,7 +266,10 @@ def _safe(tool, payload: dict) -> Any:
             print(f"  [Timer] {getattr(tool, 'name', str(tool))} took {duration:.2f}s")
         return res
     except Exception as exc:
-        return f"{getattr(tool, 'name', str(tool))} 调用失败：{type(exc).__name__}: {exc}"
+        return (
+            f"{DATA_FETCH_FAILURE_NOTICE} {getattr(tool, 'name', str(tool))} 调用失败："
+            f"{type(exc).__name__}: {exc}"
+        )
 
 
 def _fetch_all(ticker: str, trade_date: str) -> Dict[str, Any]:

@@ -6,6 +6,7 @@ from typing import Any
 
 from ._http_utils import HttpRetry, http_get_json
 from .cn_market_only_base import CnMarketOnlyProvider
+from .errors import SourceEmpty, SourceUnavailable, SourceUnsupported
 from ..trade_calendar import cn_market_phase, cn_today_str, is_cn_trading_day, previous_cn_trading_day
 
 
@@ -38,7 +39,7 @@ class CnEastmoneyHttpProvider(CnMarketOnlyProvider):
 
         m = re.search(r"(\d{6})", (symbol or "").strip())
         if not m:
-            raise NotImplementedError(f"cn_eastmoney_http only supports 6-digit A-share codes, got: {symbol}")
+            raise SourceUnsupported(f"cn_eastmoney_http only supports 6-digit A-share codes, got: {symbol}")
         return m.group(1)
 
     @staticmethod
@@ -48,11 +49,20 @@ class CnEastmoneyHttpProvider(CnMarketOnlyProvider):
         return f"{market}.{code}"
 
     @staticmethod
-    def _safe_float(v: Any) -> float:
+    def _safe_float(v: Any) -> float | None:
+        """数值转换；**取不到时返回 None，不返回 0.0**。
+
+        `0.0` 是合法观测值。用它兜底会让「这个字段读不出来」变成
+        「主力净流入恰好为 0」——一个读起来完全正常、因此永远不会触发降级的
+        伪事实（审计 §4.12）。
+        """
+        if v is None or isinstance(v, bool):
+            return None
         try:
-            return float(v)
-        except Exception:
-            return 0.0
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return None if f != f else f  # NaN 也是"取不到"
 
     def _fetch_klines(self, symbol: str) -> list[str]:
         secid = self._secid(symbol)
@@ -79,7 +89,7 @@ class CnEastmoneyHttpProvider(CnMarketOnlyProvider):
                 data = obj.get("data") if isinstance(obj, dict) else None
                 klines = (data or {}).get("klines") if isinstance(data, dict) else None
                 if not isinstance(klines, list) or not klines:
-                    raise NotImplementedError(f"eastmoney fund flow empty for {symbol} ({secid})")
+                    raise SourceEmpty(f"eastmoney fund flow empty for {symbol} ({secid})")
                 return [str(x) for x in klines]
             except Exception as exc:
                 last_exc = exc
@@ -114,7 +124,7 @@ class CnEastmoneyHttpProvider(CnMarketOnlyProvider):
             )
 
         if not rows:
-            raise NotImplementedError(f"eastmoney fund flow parse failed for {symbol}")
+            raise SourceUnavailable(f"eastmoney fund flow parse failed for {symbol}")
         # Sort by date ascending
         rows = sorted(rows, key=lambda r: r["日期"])
         cutoff = rows[-1]["日期"]

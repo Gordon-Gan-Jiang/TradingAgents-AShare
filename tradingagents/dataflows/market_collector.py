@@ -204,8 +204,12 @@ class MarketCollector:
             # 1) 东财直连（push2delay，最可靠）
             try:
                 b = fetch_em_market_breadth_direct()
-                sources["breadth"] = "em"
-                return b
+                # 该源现在会在**算不出宽度**时返回 None，而不是一份全零宽度
+                # （审计 §4.11）。None 必须当成"这个源没成"继续往下降级：
+                # 否则会把 None 当结果返回，并把 sources 谎报成 "em"。
+                if b is not None:
+                    sources["breadth"] = "em"
+                    return b
             except Exception:
                 pass
             # 2) 新浪全市场

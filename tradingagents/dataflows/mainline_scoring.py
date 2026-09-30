@@ -543,6 +543,14 @@ def _default_fetch_zt(ak_module) -> ZtFetcher:
 
 
 def _default_fetch_benchmark(ak_module) -> IndexFetcher:
+    """取基准指数（沪深300）的日线收盘，用于算相对强弱。
+
+    **为什么加了 BaoStock 兜底**：这条路此前只有 AKShare 一家（东财
+    `stock_zh_index_daily_em` / 新浪 `stock_zh_index_daily`），而实测东财整片不通
+    （见 `docs/data-source-strategy.md`）。基准指数取不到，主线上涨评分就整块失效。
+    顺序仍是 **AKShare 优先**：它字段更全且是既有行为，换序会改变已有数字的含义。
+    """
+
     def _fetch() -> pd.DataFrame:
         last_exc: Exception | None = None
         for api_name in ("stock_zh_index_daily_em", "stock_zh_index_daily"):
@@ -569,11 +577,47 @@ def _default_fetch_benchmark(ak_module) -> IndexFetcher:
             except Exception as exc:
                 last_exc = exc
                 continue
+
+        # AKShare 两条都失败 —— 落到 BaoStock（官方 TCP、不封 IP）。
+        try:
+            fallback = _fetch_benchmark_via_baostock()
+            if not fallback.empty:
+                return fallback
+        except Exception as exc:
+            if last_exc is None:
+                last_exc = exc
+
         if last_exc is not None:
             raise last_exc
-        raise RuntimeError("akshare has no benchmark index API (sh000300)")
+        raise RuntimeError("no benchmark index source available (sh000300)")
 
     return _fetch
+
+
+#: 基准指数回看窗口（自然日）：够覆盖 ~180 个交易日，满足最长均线窗口。
+_BENCHMARK_LOOKBACK_DAYS = 300
+
+
+def _fetch_benchmark_via_baostock() -> pd.DataFrame:
+    """BaoStock 取沪深300日线 → `{date, close}` 帧（与 AKShare 分支**同形**）。
+
+    同形很重要：调用方只认 `close`（有时认 `date`），两条路返回不同的列名
+    会让兜底"看起来成功、实际算错"。
+    """
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    from .providers.cn_baostock_provider import CnBaoStockProvider
+
+    end = _dt.now().strftime("%Y-%m-%d")
+    start = (_dt.now() - _td(days=_BENCHMARK_LOOKBACK_DAYS)).strftime("%Y-%m-%d")
+    frame = CnBaoStockProvider().get_index_daily_bars_df("sh000300", start, end)
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    out = pd.DataFrame()
+    out["close"] = pd.to_numeric(frame["close"], errors="coerce")
+    out["date"] = frame["date"]
+    return out.dropna(subset=["close"]).reset_index(drop=True)
 
 
 def build_mainline_candidates(

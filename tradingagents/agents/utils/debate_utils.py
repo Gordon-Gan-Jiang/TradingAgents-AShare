@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
+
+logger = logging.getLogger(__name__)
 
 
 def extract_tagged_json(text: str, tag: str) -> dict[str, Any]:
@@ -83,12 +86,18 @@ def format_claims_for_prompt(
     focus_set = {str(item) for item in (focus_claim_ids or []) if str(item).strip()}
     lines: list[str] = []
     for claim in claim_list:
+        # state 里的 claims 理论上都是对象，但一旦被污染成字符串，这里会以
+        # `'str' object has no attribute 'get'` 整条 horizon 崩掉。跳过非对象条目
+        # 只损失一条 prompt 渲染，比报废整轮研判便宜得多。
+        if not isinstance(claim, Mapping):
+            logger.warning("[Claims] 跳过非对象 claim 条目: %r", claim)
+            continue
         claim_id = str(claim.get("claim_id", "")).strip()
         status = str(claim.get("status", "open")).strip() or "open"
         speaker = str(claim.get("speaker", "")).strip() or "Unknown"
         summary = str(claim.get("claim", "")).strip() or "未提供 claim 文本"
         evidence = claim.get("evidence") or []
-        evidence_text = "；".join(str(item).strip() for item in evidence if str(item).strip()) or "无明确证据"
+        evidence_text = "；".join(str(item).strip() for item in _as_sequence(evidence) if str(item).strip()) or "无明确证据"
         prefix = "* " if claim_id in focus_set else "- "
         lines.append(
             f"{prefix}{claim_id} [{status}] {speaker}: {summary} | 证据: {evidence_text}"
@@ -104,7 +113,11 @@ def format_claim_subset_for_prompt(
     claim_id_set = {str(item) for item in (claim_ids or []) if str(item).strip()}
     if not claim_id_set:
         return empty_message
-    subset = [claim for claim in (claims or []) if str(claim.get("claim_id", "")) in claim_id_set]
+    subset = [
+        claim
+        for claim in (claims or [])
+        if isinstance(claim, Mapping) and str(claim.get("claim_id", "")) in claim_id_set
+    ]
     return format_claims_for_prompt(subset, focus_claim_ids=claim_id_set, empty_message=empty_message)
 
 
@@ -173,7 +186,7 @@ def update_debate_state_with_payload(
     payload = extract_tagged_json(raw_response, marker)
     cleaned_response = strip_tagged_json(raw_response, marker)
 
-    claims = [dict(item) for item in state.get("claims", [])]
+    claims = _mapping_items(state.get("claims", []))
     claim_map = {
         str(item.get("claim_id", "")).strip(): item
         for item in claims
@@ -207,17 +220,13 @@ def update_debate_state_with_payload(
         unresolved_set.add(claim_id)
         resolved_set.discard(claim_id)
 
-    for claim_payload in payload.get("new_claims", []) or []:
+    for claim_payload in _iter_claim_payloads(payload.get("new_claims")):
         claim_text = str(claim_payload.get("claim", "")).strip()
         if not claim_text:
             continue
         claim_counter += 1
         claim_id = f"{claim_prefix}-{claim_counter}"
-        evidence = [
-            str(item).strip()
-            for item in (claim_payload.get("evidence") or [])[:3]
-            if str(item).strip()
-        ]
+        evidence = _string_list(claim_payload.get("evidence"))[:3]
         confidence = _safe_float(claim_payload.get("confidence"), 0.6)
         target_claim_ids = _filter_known_claim_ids(claim_payload.get("target_claim_ids"), claim_map)
         claim_entry = {
@@ -284,11 +293,60 @@ def _filter_known_claim_ids(values: Any, claim_map: Mapping[str, Any]) -> list[s
     return result
 
 
+def _as_sequence(value: Any) -> list[Any]:
+    """把可能标量化的值折成列表。
+
+    字符串在 Python 里是序列，但语义上是**单个值**：`"证据A"[:3]` 会得到
+    `"证据A"`、逐字符迭代会得到 `["证", "据", "A"]`。这里统一包一层。
+    """
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, Mapping):
+        return [value]
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return []
+
+
+def _mapping_items(values: Any) -> list[dict[str, Any]]:
+    """只保留对象条目，丢弃被污染成字符串/数字的脏数据。
+
+    `dict(item)` 对字符串会抛 `ValueError: dictionary update sequence element
+    #0 has length 1; 2 is required`，跳过脏条目比整轮失败划算。
+    """
+    result: list[dict[str, Any]] = []
+    for item in _as_sequence(values):
+        if isinstance(item, Mapping):
+            result.append(dict(item))
+        else:
+            logger.warning("[Claims] 丢弃非对象 claim 条目: %r", item)
+    return result
+
+
+def _iter_claim_payloads(raw: Any) -> Iterator[Mapping[str, Any]]:
+    """把模型给出的 new_claims 折算成对象序列。
+
+    提示词里写的是"对象数组"，但轻量模型经常写成 `["风险一", "风险二"]`
+    （字符串数组）、单个对象，甚至一个裸字符串。此前这类输出会在
+    `claim_payload.get("claim")` 上抛 `'str' object has no attribute 'get'`，
+    把整条 horizon 连同已完成的研报一起作废 —— 见 2026-09-28 600699.SH 的
+    失败研判（风险辩论阶段崩溃）。这里做**无损**折算：字符串就是 claim 正文。
+    """
+    for item in _as_sequence(raw):
+        if isinstance(item, Mapping):
+            yield item
+        elif isinstance(item, str):
+            text = item.strip()
+            if text:
+                logger.warning("[Claims] new_claims 条目是字符串，按 claim 正文折算: %r", text[:60])
+                yield {"claim": text}
+        else:
+            logger.warning("[Claims] 丢弃无法折算的 new_claims 条目: %r", item)
+
+
 def _string_list(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
     result: list[str] = []
-    for item in values:
+    for item in _as_sequence(values):
         text = str(item).strip()
         if text:
             result.append(text)

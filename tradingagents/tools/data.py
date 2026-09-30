@@ -1024,69 +1024,24 @@ def make_data_tools() -> tuple[ToolSpec, ...]:
 # 工具会一边把错误文本当作数据交给模型，一边声明「该源可用」——这是伪造的
 # 覆盖声明，也正是 D23 里「拿不到 ≠ 没有」要堵的漏洞。
 #
-# 判据取自 provider 的实际输出（`cn_akshare_provider.py` 的 unavailable 文案），
-# 以及 vendor 路由层的统一失败前缀。
-_VENDOR_FAILURE_MARKERS = (
-    "temporarily unavailable",
-    "unavailable for",
-    "all failed",
-    "调用失败",
-    "获取失败",
-    "查询失败",
-    "数据获取异常",
-    # 实测漏网的一次：`get_zt_pool` 在非交易日返回「涨停板情绪池数据暂不可用。」
-    # ——里面还带着日期，看上去像数据。这类"客气话"必须被识别为失败，
-    # 否则一条不可用的返回会被当成有效数据往下走。
-    "暂不可用",
-    "暂时不可用",
-    "暂无数据",
-    "无数据",
-    # 实测（2026-09-22）：`get_global_news` 真实返回
-    #     'Error fetching global news: Too Many Requests. Rate limited. Try after a while.'
-    # 上面所有标记一个都不命中，于是**限流被当成有效数据**：工具一边把这段英文
-    # 错误文本交给模型，一边声明「该源可用」。这是与「拿不到 ≠ 没有」同一条原则
-    # 的直接违反，而且它比缺数据更糟——模型可能拿这句话当新闻内容来解读。
-    #
-    # `Error fetching` 是本仓库自己产生的前缀（`dataflows/yfinance_news.py`），
-    # 不是供应商文案，所以它比任何猜测的关键词都可靠。
-    "error fetching",
-    "too many requests",
-    "rate limited",
-    "try after a while",
-)
+# 标记表与判断逻辑**已整体收敛**到 `tradingagents/dataflows/vendor_text.py`
+# （引擎层的唯一权威处）：原先这里与 `api/services/data_source_probe_service.py`
+# 各存一份，两份各自只认识一半文案，于是
+# `No data found for symbol '600519.SH'` 在探测层被正确识别、在工具层却被当成
+# 有效数据。同一条判断有两份实现，必然漂移；所以这里不再保留副本。
 
 
 def _looks_like_vendor_failure(rendered: Any) -> bool:
-    """判断 vendor 返回的是否为失败说明而非数据。"""
-    if not isinstance(rendered, str) or not rendered.strip():
-        # 空返回同样是「拿不到」——不能声明该源可用
-        return True
-    stripped = rendered.strip()
-    # **结构合法但内容为空**的 JSON 也是「拿不到」。
-    #
-    # 上面那条只挡住了空字符串。实测 `get_realtime_quotes(symbols='600519.SH')`
-    # 返回的是字符串 `'{}'`——`.strip()` 为真，于是穿过所有标记，最终：
-    #     degraded=False            （不是失败）
-    #     available=('core_stock_apis',)   （声称该源**可用**）
-    #     unavailable=()                    （声称**没有**未覆盖项）
-    #     证据 0 条
-    # 用户看到的是"数据源可用、没有未覆盖项、但没有数据"——这正是本文件
-    # `_coverage_for` 注释里明令禁止的形状。`600519.SH` 是有效代码，`{}` 只可能
-    # 意味着"这次没取到"。
-    #
-    # 判据刻意收得很窄：**只有**能解析成 JSON 且是空 dict/list 才算失败。
-    # 不匹配散文（散文解析会抛异常，这里直接放过），所以不存在把正常文案误判的路径。
-    if stripped[0] in "{[" and stripped[-1] in "}]":
-        import json as _json
+    """判断 vendor 返回的是否为失败说明而非数据。
 
-        try:
-            parsed = _json.loads(stripped)
-        except Exception:  # noqa: BLE001 — 不是 JSON 就按散文处理
-            parsed = None
-        if isinstance(parsed, (dict, list)) and not parsed:
-            return True
-    lowered = stripped.lower()
-    return any(marker.lower() in lowered for marker in _VENDOR_FAILURE_MARKERS)
+    **实现已收敛到引擎层唯一权威处** `tradingagents/dataflows/vendor_text.py`。
+    这里保留同名薄封装，是因为本模块内部与既有测试都从 `tradingagents.tools.data`
+    导入它；判断逻辑本身不再在本文件里维护副本——同一语义有两份实现，正是
+    `No data found for symbol '...'` 被漏判的成因（探测层认识它，工具层不认识）。
+    """
+    from tradingagents.dataflows.vendor_text import looks_like_vendor_failure
+
+    return looks_like_vendor_failure(rendered)
 
 
 def _vendor_failure_note(rendered: Any) -> str:

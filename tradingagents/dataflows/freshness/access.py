@@ -120,7 +120,17 @@ def enrich_freshness_summary_for_display(
         created = datetime.fromisoformat(str(created_at_iso).replace("Z", "+00:00"))
         created_date = created.astimezone(timezone.utc).date().strftime("%Y-%m-%d")
         today = cn_today_str()
-        age_days = trading_days_between(created_date, today)
+        try:
+            age_days = trading_days_between(created_date, today)
+        except Exception:
+            # 日历不可用 ⇒ 报告年龄**未知**。旧代码因内层也吞异常而得到 0，
+            # 于是"30 个交易日前的报告"读作"0 天前"，还不会触发任何告警
+            # （审计 §4.13/§4.15）。未知就不写数字，也不谎称新鲜。
+            enriched["report_age_days"] = None
+            enriched["report_age_note"] = (
+                "无法计算报告年龄（交易日历不可用）；请勿据此认为报告是最新的。"
+            )
+            return enriched
         enriched["report_age_days"] = age_days
         if age_days > 3:
             enriched["report_age_note"] = (

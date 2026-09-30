@@ -14,6 +14,7 @@ import {
     Cpu,
     Compass,
     ShieldQuestion,
+    Database,
 } from 'lucide-react'
 
 export interface SidebarNavItem {
@@ -68,6 +69,7 @@ export const navGroups: SidebarNavGroup[] = [
         label: '系统',
         items: [
             { path: '/model-profiles', icon: Cpu, label: '模型管理' },
+            { path: '/data-sources', icon: Database, label: '数据源探测' },
             { path: '/feedback', icon: MessageSquare, label: '反馈留言' },
             { path: '/settings', icon: Settings, label: '设置' },
         ],

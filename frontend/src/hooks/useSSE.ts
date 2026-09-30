@@ -73,8 +73,8 @@ export function useSSE(jobId: string | null) {
                     setIsAnalyzing(false)
                     setReport((data.result || null) as AnalysisReport | null)
                     setStructuredData({
-                        riskItems: (data.risk_items as RiskItem[] | undefined) ?? [],
-                        keyMetrics: (data.key_metrics as KeyMetric[] | undefined) ?? [],
+                        riskItems: (data.risk_items as RiskItem[] | null | undefined) ?? null,
+                        keyMetrics: (data.key_metrics as KeyMetric[] | null | undefined) ?? null,
                         confidence: data.confidence as number | null | undefined,
                         targetPrice: data.target_price as number | null | undefined,
                         stopLoss: data.stop_loss_price as number | null | undefined,

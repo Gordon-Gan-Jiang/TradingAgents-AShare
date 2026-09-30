@@ -100,6 +100,7 @@ def init_db() -> None:
     _ensure_user_schema()
     _ensure_market_scan_t1_schema()
     _ensure_scheduled_prompt_schema()
+    _ensure_data_source_probe_schema()
     _ensure_trade_plan_schema()
     _ensure_t1_daily_stat_schema()
 
@@ -263,6 +264,35 @@ def _ensure_market_scan_t1_schema() -> None:
     _migrate_api_keys_reencrypt()
 
 
+def _ensure_data_source_probe_schema() -> None:
+    """Add timeout/row_unit columns for the data source probe tables (SQLite).
+
+    `create_all` 只建新表、**不给已存在的表加列**。这两张表在本机已经存在并有
+    历史数据，所以新增列必须走 ALTER——否则升级后查询会直接报
+    "no such column: timeout_count"。
+    """
+    try:
+        with engine.begin() as conn:
+            run_columns = {
+                row[1] for row in conn.execute(text("PRAGMA table_info(data_source_probe_runs)"))
+            }
+            if run_columns and "timeout_count" not in run_columns:
+                conn.execute(
+                    text("ALTER TABLE data_source_probe_runs ADD COLUMN timeout_count INTEGER DEFAULT 0")
+                )
+
+            result_columns = {
+                row[1]
+                for row in conn.execute(text("PRAGMA table_info(data_source_probe_results)"))
+            }
+            if result_columns and "row_unit" not in result_columns:
+                conn.execute(
+                    text("ALTER TABLE data_source_probe_results ADD COLUMN row_unit VARCHAR(8)")
+                )
+    except Exception as e:
+        logger.error("Failed to ensure data source probe schema: %s", e)
+
+
 def _ensure_scheduled_prompt_schema() -> None:
     """Add prompt template fields for scheduled_analyses (SQLite)."""
     try:
@@ -413,7 +443,12 @@ class ReportDB(Base):
     # LLM-extracted structured data
     risk_items = Column(JSON, nullable=True)   # [{"name": "...", "level": "high|medium|low", "description": "..."}]
     key_metrics = Column(JSON, nullable=True)  # [{"name": "...", "value": "...", "status": "good|neutral|bad"}]
-    analyst_traces = Column(JSON, nullable=True) # [{"agent": "...", "verdict": "...", "key_finding": "..."}]
+    # [{"agent": "...", "verdict": "...", "key_finding": "...",
+    #   "verdict_parsed": bool,   # 仅表示 VERDICT 块是否解析成功
+    #   "verdict_source": "verdict|analyst_json|none",  # verdict 的值从哪个机读块来
+    #   "structured": {...}}]     # ANALYST_JSON 原文
+    # 方向一律用 analyst_structured.resolve_trace_direction 判定，不要直接读 verdict。
+    analyst_traces = Column(JSON, nullable=True)
 
     # Individual reports (for quick access)
     market_report = Column(Text, nullable=True)
@@ -1464,3 +1499,75 @@ class DailyBarDB(Base):
     __table_args__ = (
         UniqueConstraint("symbol", "date", name="uq_daily_bar_symbol_date"),
     )
+
+
+# --------------------------------------------------------------------------
+# 数据源探测（data-source probe）
+#
+# 为什么落库而不是只打日志：本次事故里"Baostock 从某天起不可用"这件事**没有任何
+# 地方能看出来**——链上的静默降级把故障藏了几个月，直到人工实测才发现上游主机名
+# 早就迁移了。有了这两张表，页面才能回答"这个源是什么时候坏的、坏了几天、期间
+# 用的什么版本"，而不是只能 grep 日志。
+#
+# 两张表分工：`runs` 是一次探测的汇总（画趋势），`results` 是每条 源×维度 的明细
+# （看现状）。分开是因为趋势只关心计数，明细要保留错误类型/版本指纹。
+# --------------------------------------------------------------------------
+
+
+class DataSourceProbeRunDB(Base):
+    """一次数据源探测的汇总。"""
+
+    __tablename__ = "data_source_probe_runs"
+
+    id = Column(String(36), primary_key=True, index=True)
+    started_at = Column(DateTime, index=True)
+    finished_at = Column(DateTime, nullable=True)
+    #: ok / degraded / failed —— 整轮的健康度（有任一 failed 即 failed）
+    status = Column(String(16), index=True)
+    #: scheduled（交易日定时）/ manual（页面上点按钮）
+    trigger = Column(String(16), default="scheduled")
+    #: 探测时刻是否为 A 股交易日。非交易日的"空数据"是正常的，页面要区分显示。
+    trading_day = Column(Boolean, default=True)
+    total_count = Column(Integer, default=0)
+    ok_count = Column(Integer, default=0)
+    degraded_count = Column(Integer, default=0)
+    #: 硬截止超时的条数。**与 failed 分开**：超时可能只是"源很慢"，
+    #: 处置方式（调窗口/加缓存）与"源坏了"（去修）完全不同。
+    timeout_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+    unsupported_count = Column(Integer, default=0)
+    duration_ms = Column(Integer, default=0)
+    #: 本轮被跳过的原因（例如非交易日跳过、全部源被禁用）
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class DataSourceProbeResultDB(Base):
+    """一条「数据源 × 能力维度」的探测明细。"""
+
+    __tablename__ = "data_source_probe_results"
+
+    id = Column(String(36), primary_key=True, index=True)
+    run_id = Column(String(36), index=True, nullable=False)
+    source = Column(String(64), index=True, nullable=False)
+    #: provider 方法名（与能力矩阵的 tool 对齐）
+    tool = Column(String(64), index=True, nullable=False)
+    label = Column(String(128), nullable=True)
+    category = Column(String(64), nullable=True)
+    #: ok / degraded / timeout / failed / unsupported
+    status = Column(String(16), index=True, nullable=False)
+    latency_ms = Column(Integer, nullable=True)
+    #: 返回规模。含义由 `row_unit` 决定（rows=真实记录数；lines=文本非空行数）
+    row_count = Column(Integer, nullable=True)
+    #: `rows` / `lines`——不区分会让"N 行"被误读成"N 条记录"：
+    #: 预格式化文本产物（板块历史、个股行情摘要）的行数并不是记录数。
+    row_unit = Column(String(8), nullable=True)
+    #: **库版本指纹**——本次事故的核心变量就是版本漂移，不记录就永远查不出来
+    version = Column(String(32), nullable=True)
+    #: 错误语义（unavailable / empty / timeout / error），与 error_type 分开：
+    #: 前者是"该做什么"，后者是"哪个异常"
+    error_kind = Column(String(32), nullable=True)
+    error_type = Column(String(64), nullable=True)
+    error_message = Column(Text, nullable=True)
+    checked_at = Column(DateTime, index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

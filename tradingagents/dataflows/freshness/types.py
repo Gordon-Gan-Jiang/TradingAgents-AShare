@@ -23,6 +23,14 @@ OVERALL_LABELS = {
 CONFIDENCE_CAPS = {
     "fresh": 100,
     "warning": 70,
+    # `unknown` = **没有验证过**（时间戳解析不出、category 不认识、状态缺失）。
+    #
+    # 这个键曾经不存在，于是所有 `CONFIDENCE_CAPS.get(overall, 100)` 的默认值
+    # 把"不知道"放行成"完全可信"：未验证的新鲜度拿到上限 100（审计 §4.16）。
+    # 60 的取值理由：它必须**低于** `warning`(70)——warning 至少是"知道有问题、
+    # 且问题有限"，而 unknown 是"连有没有问题都不知道"，证据更弱；
+    # 又必须**高于** `error`(40)——error 是已确证的取数失败，比无知更严重。
+    "unknown": 60,
     "stale": 50,
     "error": 40,
 }

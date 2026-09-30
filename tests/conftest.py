@@ -46,6 +46,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 _ALLOW_REAL_DB = os.getenv("AP_TEST_ALLOW_REAL_DB", "").strip() in {"1", "true", "yes"}
 
 if not _ALLOW_REAL_DB:
@@ -83,3 +85,33 @@ def pytest_sessionstart(session) -> None:
     from api.database import init_db
 
     init_db()
+
+
+@pytest.fixture(autouse=True)
+def _reset_egress_gate():
+    """出口闸门与 baostock 登录冷却是**进程级**状态。
+
+    一个用例若把某个 host（或 baostock 登录）打进冷却，后续用例就会快速失败
+    ——那是**跨用例污染**，不是真实行为。这里前后各清一次。
+    闸门自身的测试（`tests/test_data_stability_hardening.py`）自己用
+    `TA_EGRESS_DISABLED` 开关。
+    """
+    def _reset() -> None:
+        try:
+            from tradingagents.dataflows.providers._http_utils import reset_egress_state
+
+            reset_egress_state()
+        except Exception:
+            pass
+        try:
+            from tradingagents.dataflows.providers.cn_baostock_provider import (
+                reset_login_cooldown,
+            )
+
+            reset_login_cooldown()
+        except Exception:
+            pass
+
+    _reset()
+    yield
+    _reset()

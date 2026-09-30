@@ -1,4 +1,40 @@
 # DataCollector task key -> freshness contract entry
+#
+# --- 报告管线（DataCollector）的采集范围 ------------------------------------
+# 下面这份清单声明的是「报告管线**自己负责取**的源」。它只影响一件事：
+# 某个源**没出现在本轮采集结果里**时，该判成"该采没采到"（error），还是
+# "不归这条管线管"（not_applicable）。
+#
+# 为什么必须显式声明、不能拿「契约里所有源」代替：两者语义不同——契约是
+# "全项目认识的源"，采集范围是"这条管线该有的数"。混用已经造成过真实事故：
+# `intraday_bars` / `chip_distribution` / `symbol_news` 三个源是为**工具/对话
+# 路径**加进契约的，报告管线从不采它们，却被当成"该采没采到"→ 一律判 error
+# +「数据源返回空」→ overall 变「数据异常」→ 置信度被 CONFIDENCE_CAPS['error']
+# 硬压到 40，并被写进终审正文（"当前数据异常，方向置信度受限于 40"、
+# "L0：intraday_bars / chip_distribution 未恢复 → 0% 真实新开仓"）。
+# 而当时那两个源实测完全可用（baostock 分时、新浪日线自算筹码都取到了）。
+#
+# 极性刻意选「正向声明本管线采什么」（默认不在范围内）：本项目的契约增长方向
+# 是工具/对话路径，若反过来默认"在范围内"，下一个为工具新增的源会**再次**静默
+# 变成报告管线的假故障。工具/对话路径本来就用 evaluate_tool_sources 显式声明
+# 自己的源与 unavailable，不需要这张表。
+report_pipeline_sources:
+  - stock_data
+  - indicators
+  - individual_fund_flow
+  - board_fund_flow
+  - zt_pool
+  - lhb_detail
+  - fundamentals
+  - balance_sheet
+  - cashflow
+  - income_statement
+  - news
+  - global_news
+  - hot_stocks_xq
+  - insider_transactions
+  - realtime_quotes
+
 stock_data:
   category: calendar_anchored
   criticality: critical

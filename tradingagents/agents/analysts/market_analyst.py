@@ -14,6 +14,7 @@ from tradingagents.agents.utils.agent_states import (
 from tradingagents.agents.utils.analyst_structured import (
     extract_analyst_structured_json,
     get_analyst_json_instruction,
+    resolve_analyst_direction,
 )
 
 # List of technical indicators to retrieve
@@ -102,18 +103,32 @@ def create_market_analyst(llm, data_collector=None):
             if tracker:
                 tracker._emit_token("Market Analyst", "market_report", content)
         
+        parsed = extract_analyst_structured_json(full_content)
         verdict, confidence, verdict_parsed = extract_verdict_with_flag(full_content)
+        # 方向来自该分析师真正写下的机读块（VERDICT → ANALYST_JSON），判定规则统一在
+        # resolve_analyst_direction，与共识层、研究经理共用，避免三处各判一套。
+        direction = resolve_analyst_direction(
+            verdict=verdict,
+            confidence=confidence,
+            verdict_parsed=verdict_parsed,
+            structured=parsed,
+        )
 
         trace = {
             "agent": "market_analyst",
             "horizon": horizon,
             "data_window": data_window,
-            "key_finding": f"市场技术面结论：{verdict}",
-            "verdict": verdict,
-            "confidence": confidence,
+            "key_finding": f"市场技术面结论：{direction.direction or verdict}",
+            "verdict": direction.direction or verdict,
+            "confidence": (
+                direction.confidence
+                if direction.source == "analyst_json"
+                else confidence
+            ),
+            # VERDICT 块本身是否解析成功；方向可能来自 ANALYST_JSON，故 False ≠ 未计入。
             "verdict_parsed": verdict_parsed,
+            "verdict_source": direction.source,
         }
-        parsed = extract_analyst_structured_json(full_content)
         if parsed:
             trace["structured"] = parsed
         return {

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from .anchor import is_in_grace_window, resolve_expected_anchor
-from .contract import all_contract_source_keys, get_contract_entry, resolve_source_key
+from .contract import (
+    all_contract_source_keys,
+    get_contract_entry,
+    report_pipeline_sources,
+    resolve_source_key,
+)
 from .parser import (
     detect_fetch_error,
     disclosure_period_lag,
@@ -17,6 +22,13 @@ from .parser import (
     trading_days_between,
 )
 from .types import EvalContext, FreshnessMeta
+
+#: 源在契约里存在、但不在本条管线的采集范围内时给出的说明。
+#: 措辞要让人一眼看出"这是设计如此"，而不是"这里漏采了"——否则下一个人
+#: 会把它当 bug "修"回 error，假故障就会回来。
+NOTE_OUT_OF_PIPELINE_SCOPE = (
+    "该源不在本采集管线范围内（由工具/对话路径自行评估），不参与本次新鲜度判定"
+)
 
 
 def _intraday_only_not_collected(entry: dict[str, Any], raw_result: Any, ctx: EvalContext) -> bool:
@@ -76,6 +88,33 @@ def evaluate_source(
             lag_note="非异动日无龙虎榜数据（正常）",
         )
 
+    # 契约里 `empty_ok: true` 的源，"数据源明确答『无数据』"是正常态而非故障。
+    # 此前这个 flag **从未被读过**（真正生效的只有上面 `is_lhb_empty_ok` 的龙虎榜
+    # 文案匹配），契约注释承诺的语义在实现里是空的——"契约与实现漂移"的典型样本，
+    # 也是假故障反复出现的土壤。
+    #
+    # 判定刻意收紧两处，免得它退化成"把采集失败也当正常"：
+    #   ① 必须有**回包**：`raw_result is None` 意味着采集方根本没拿到答案
+    #      （任务没跑 / 被丢弃），那仍然是 error，不能被 empty_ok 抹平；
+    #   ② 回包必须是**非空文案**：空串更像上游静默失败，不像"今天没有"。
+    if (
+        is_err
+        and entry.get("empty_ok")
+        and err_code == "empty_response"
+        and raw_result is not None
+        and str(raw_result).strip()
+    ):
+        return FreshnessMeta(
+            source_key=source_key,
+            category=category,
+            criticality=criticality,
+            status="empty_ok",
+            anchor_expected=ctx.expected_anchor,
+            evaluated_at=now_iso,
+            empty_ok=True,
+            note="数据源明确回答『无数据』，契约声明 empty_ok（不算取数失败）",
+        )
+
     if is_err:
         return FreshnessMeta(
             source_key=source_key,
@@ -96,12 +135,19 @@ def evaluate_source(
         return _eval_disclosure(source_key, raw_result, entry, ctx)
     if category == "event_driven":
         return _eval_event_driven(source_key, raw_result, entry, ctx)
+    # 不认识的 category：**不得**判 fresh。
+    #
+    # 旧实现在这里 `status="fresh"`，于是任何没被上面三个分支接住的 category
+    # 都自动获得"最新"的结论——**信息越少，结论越乐观**。
+    # category 是"该用什么口径判定"的声明；声明不认识就意味着**无法判定**，
+    # 正确取值是 unknown（并由聚合层施加置信度上限，见 CONFIDENCE_CAPS["unknown"]）。
     return FreshnessMeta(
         source_key=source_key,
         category=category,
         criticality=criticality,
-        status="fresh",
+        status="unknown",
         evaluated_at=now_iso,
+        lag_note=f"未知的新鲜度类别 {category!r}，无法判定",
     )
 
 
@@ -137,7 +183,18 @@ def _eval_calendar(
             lag_note="无法解析数据截止日期",
         )
 
-    lag_days = trading_days_between(actual, expected)
+    try:
+        lag_days = trading_days_between(actual, expected)
+    except Exception as _lag_exc:
+        # 日历不可用 ⇒ 滞后天数**未知**。绝不能回退成 0（0 = fresh），
+        # 也不能让异常穿出去打断整条采集链：按 unknown 处理并施加置信度上限
+        # （审计 §4.13/§4.16）。下面 `actual >= expected` 的分支仍可安全判定 fresh，
+        # 因为那是纯粹基于锚点的比较，不依赖交易日历。
+        lag_days = None
+        _lag_note_exc = f"{type(_lag_exc).__name__}: {_lag_exc}"
+    else:
+        _lag_note_exc = None
+
     if actual >= expected:
         status = "fresh"
         lag_note = None
@@ -152,6 +209,12 @@ def _eval_calendar(
         status = "stale"
         lag_note = f"数据截止 {actual}，预期至少 {expected}"
 
+    if _lag_note_exc is not None:
+        # 让"滞后天数算不出来"在结果里可见，而不是静默地当作 0 天。
+        status = "unknown" if status == "fresh" else status
+        extra = f"（交易日历不可用，滞后天数未知：{_lag_note_exc}）"
+        lag_note = f"{lag_note}{extra}" if lag_note else extra.lstrip("（").rstrip("）")
+
     return FreshnessMeta(
         source_key=source_key,
         category=category,
@@ -162,7 +225,9 @@ def _eval_calendar(
         evaluated_at=ctx.now_iso,
         issue_type="lag" if status in ("warning", "stale") else None,
         lag_note=lag_note,
-        lag_trading_days=lag_days if lag_days > 0 else None,
+        # `lag_days is None` = 日历不可用、滞后未知（上面已显式接住），
+        # 不能参与比较，也不能被写成 0。
+        lag_trading_days=lag_days if (lag_days is not None and lag_days > 0) else None,
     )
 
 
@@ -237,13 +302,18 @@ def _eval_event_driven(
         )
     latest = parse_latest_event_timestamp(raw_result)
     if latest is None:
+        # 解析不出事件时间戳 = **无法判定**，不是"新鲜"。
+        #
+        # 旧实现返回 `status="fresh"` 外加一句 lag_note。问题是聚合层只看 status、
+        # 不看 lag_note，于是"未能解析时间戳"被折叠成"最新"，
+        # 上限照给 100。沉默地乐观正是本审计要消除的东西。
         return FreshnessMeta(
             source_key=source_key,
             category=category,
             criticality=criticality,
-            status="fresh",
+            status="unknown",
             evaluated_at=ctx.now_iso,
-            lag_note="未能解析事件时间戳，跳过窗口校验",
+            lag_note="未能解析事件时间戳，无法判定新鲜度",
         )
     from datetime import timezone
 
@@ -298,9 +368,27 @@ def evaluate_collector_results(
     *,
     symbol: str = "600519.SH",
     analysis_mode: str | None = None,
+    scope: Iterable[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Evaluate all collector keys and return freshness_pool keyed by contract source_key."""
+    """Evaluate all collector keys and return freshness_pool keyed by contract source_key.
+
+    `scope` 是本管线**负责采集**的源集合（默认取自 `contract.yaml` 的
+    `report_pipeline_sources`）。区别只在"某源没出现在 `results` 里"这一种情形：
+
+    * **在范围内** → "该采没采到"，判 `error`（守卫，见
+      `test_evaluate_collector_results_marks_missing_critical_as_error`）；
+    * **不在范围内** → `not_applicable`：这条管线本来就不负责取它，报告不据它
+      判新鲜度（由工具/对话路径用 `evaluate_tool_sources` 自行评估）。
+
+    混用这两者是实测过的事故：`intraday_bars` / `chip_distribution` /
+    `symbol_news` 为工具路径加进契约后，被报告管线当成"该采没采到"，每条报告都
+    多出两条 error +「数据源返回空」→ overall 变「数据异常」→ 置信度被
+    `CONFIDENCE_CAPS['error']` 硬压到 40，并被模型写进终审正文
+    （"L0：intraday_bars / chip_distribution 未恢复 → 0% 真实新开仓"）。
+    而当时这两个源实测完全可用——纯粹是假故障。
+    """
     eval_ctx = build_eval_context(trade_date, symbol=symbol, analysis_mode=analysis_mode)
+    in_scope = frozenset(scope) if scope is not None else report_pipeline_sources()
     pool: dict[str, dict[str, Any]] = {}
 
     stock_meta: FreshnessMeta | None = None
@@ -343,6 +431,20 @@ def evaluate_collector_results(
             continue
         entry = get_contract_entry(source_key) or {}
         if entry.get("inherit_from") == "stock_data":
+            continue
+        if source_key not in in_scope:
+            # 不在本管线采集范围内 → "不适用"，**不是**"取数失败"。
+            # 仍留在 pool 里（而不是省掉）是为了可追溯：报告落库后能看出
+            # "这个源报告压根不出，所以不参与新鲜度判定"。
+            pool[source_key] = FreshnessMeta(
+                source_key=source_key,
+                category=entry.get("category", "event_driven"),
+                criticality=entry.get("criticality", "informational"),
+                status="not_applicable",
+                anchor_expected=eval_ctx.expected_anchor,
+                evaluated_at=eval_ctx.now_iso,
+                note=NOTE_OUT_OF_PIPELINE_SCOPE,
+            ).to_dict()
             continue
         meta = evaluate_source(source_key, None, eval_ctx, trade_date=trade_date)
         pool[source_key] = meta.to_dict()

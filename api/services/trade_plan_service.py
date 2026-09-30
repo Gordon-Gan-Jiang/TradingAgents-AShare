@@ -440,6 +440,24 @@ def is_monitorable(plan: Optional[Dict[str, Any]]) -> bool:
     return False
 
 
+def _document_with_trade_plan_block(*documents: Optional[str]) -> Optional[str]:
+    """按优先级返回第一个**真正含有** ``TRADE_PLAN`` 块的文档原文。
+
+    不能写成 ``parse_trade_plan_block(a or b)``：``or`` 只在**字符串为空**时回退，
+    而决定性的条件是「这份文档里到底有没有块」。生产库实测：57 个 TRADE_PLAN 块
+    **全部**写在 ``trader_investment_plan`` 里、**0 个**在 ``final_trade_decision``
+    里，而后者总是非空（它有最终裁决正文）—— 于是块永远读不到，
+    ``trade_plans.source='trade_plan_block'`` 的行数为 0、方向全部为 NULL。
+
+    统一入口的另一层意义：解析与原文留存（``raw_text``）必须用**同一条**选择规则，
+    否则两者又会各自漂移。
+    """
+    for document in documents:
+        if document and _BLOCK_RE.search(str(document)):
+            return str(document)
+    return None
+
+
 def compose_trade_plan(
     *,
     decision_text: str = "",
@@ -471,7 +489,9 @@ def compose_trade_plan(
         plan.update(extracted)
         source = SOURCE_EXTRACTED
 
-    block, block_warnings = parse_trade_plan_block(decision_text or trader_plan_text)
+    block, block_warnings = parse_trade_plan_block(
+        _document_with_trade_plan_block(decision_text, trader_plan_text) or ""
+    )
     warnings.extend(block_warnings)
     if block:
         plan.update(block)
@@ -722,7 +742,7 @@ def persist_plan_from_analysis(
         return None, plan, source, warnings
 
     raw_text = ""
-    match = _BLOCK_RE.search(str(decision_text or trader_plan_text or ""))
+    match = _BLOCK_RE.search(_document_with_trade_plan_block(decision_text, trader_plan_text) or "")
     if match:
         raw_text = match.group(0)[:4000]
 

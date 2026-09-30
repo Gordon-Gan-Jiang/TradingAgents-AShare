@@ -4,6 +4,7 @@ from stockstats import wrap
 from typing import Annotated
 import os
 from .config import get_config
+from .providers.errors import SourceEmpty
 from .trade_calendar import cn_no_data_reason, is_cn_symbol
 
 
@@ -36,10 +37,24 @@ class StockstatsUtils:
             f"{symbol}-YFin-data-{start_date_str}-{end_date_str}.csv",
         )
 
+        data = None
         if os.path.exists(data_file):
-            data = pd.read_csv(data_file)
-            data["Date"] = pd.to_datetime(data["Date"])
-        else:
+            try:
+                cached = pd.read_csv(data_file)
+            except Exception:
+                # 空文件/坏文件——历史上"把一次失败写成了缓存"会留下这种文件
+                cached = pd.DataFrame()
+            if cached.empty:
+                # 空缓存 = 一次失败被**固化成数据**：若不删，这个标的会永久没有指标
+                try:
+                    os.remove(data_file)
+                except OSError:
+                    pass
+            else:
+                cached["Date"] = pd.to_datetime(cached["Date"])
+                data = cached
+
+        if data is None:
             data = yf.download(
                 symbol,
                 start=start_date_str,
@@ -49,6 +64,17 @@ class StockstatsUtils:
                 auto_adjust=True,
             )
             data = data.reset_index()
+            if data is None or data.empty:
+                # 取不到就**报错**，绝不返回一屏 "N/A" 让上层误以为"这天没数据"。
+                # 实测（2026-09-29）：A 股标的走 yfinance 整段区间为空，于是每个交易日
+                # 都被渲染成"N/A：该交易日暂无数据"，而 route_to_vendor 还把它记成
+                # status=hit —— A 股指标由美股源"成功"供给全空值，这是最危险的静默失败。
+                # 抛 SourceEmpty 会让路由器继续找下一个源，而不是在这里假装成功。
+                # 注意：**不写缓存**（缓存空的等于把失败固化）。
+                raise SourceEmpty(
+                    f"yfinance returned no rows for {symbol} "
+                    f"({start_date_str}~{end_date_str})"
+                )
             data.to_csv(data_file, index=False)
 
         df = wrap(data)

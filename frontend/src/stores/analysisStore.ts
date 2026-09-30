@@ -52,8 +52,8 @@ interface AnalysisState {
     report: AnalysisReport | null
 
     // Structured data from job.completed SSE event (LLM-extracted)
-    riskItems: RiskItem[]
-    keyMetrics: KeyMetric[]
+    riskItems: RiskItem[] | null
+    keyMetrics: KeyMetric[] | null
     jobConfidence: number | null
     jobTargetPrice: number | null
     jobStopLoss: number | null
@@ -98,8 +98,8 @@ interface AnalysisState {
     addLog: (log: LogEntry) => void
     setReport: (report: AnalysisReport | null) => void
     setStructuredData: (data: {
-        riskItems?: RiskItem[]
-        keyMetrics?: KeyMetric[]
+        riskItems?: RiskItem[] | null
+        keyMetrics?: KeyMetric[] | null
         confidence?: number | null
         targetPrice?: number | null
         stopLoss?: number | null
@@ -175,8 +175,8 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
     jobStatus: null,
     agents: initialAgents,
     report: null,
-    riskItems: [],
-    keyMetrics: [],
+    riskItems: null,
+    keyMetrics: null,
     jobConfidence: null,
     jobTargetPrice: null,
     jobStopLoss: null,
@@ -389,8 +389,8 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
         jobStatus: null,
         agents: initialAgents.map(a => ({ ...a, status: 'pending' })),
         report: null,
-        riskItems: [],
-        keyMetrics: [],
+        riskItems: null,
+        keyMetrics: null,
         jobConfidence: null,
         jobTargetPrice: null,
         jobStopLoss: null,
@@ -417,8 +417,8 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
     })),
 
     setStructuredData: (data) => set({
-        riskItems: data.riskItems ?? [],
-        keyMetrics: data.keyMetrics ?? [],
+        riskItems: data.riskItems ?? null,
+        keyMetrics: data.keyMetrics ?? null,
         jobConfidence: data.confidence ?? null,
         jobTargetPrice: data.targetPrice ?? null,
         jobStopLoss: data.stopLoss ?? null,
@@ -441,8 +441,8 @@ export const useAnalysisStore = create<AnalysisState>()(persist((set) => ({
         jobStatus: null,
         agents: initialAgents.map(a => ({ ...a, status: 'pending' })),
         report: null,
-        riskItems: [],
-        keyMetrics: [],
+        riskItems: null,
+        keyMetrics: null,
         jobConfidence: null,
         jobTargetPrice: null,
         jobStopLoss: null,

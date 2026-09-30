@@ -29,3 +29,14 @@ describe('judgement nav entry', () => {
         expect(research?.items.some(i => i.path === '/judgement')).toBe(true)
     })
 })
+
+describe('data sources nav entry', () => {
+    it('exposes 数据源探测 under the system group', () => {
+        const item = navItems.find(i => i.path === '/data-sources')
+        expect(item).toBeDefined()
+        expect(item?.label).toBe('数据源探测')
+
+        const system = navGroups.find(g => g.id === 'system')
+        expect(system?.items.some(i => i.path === '/data-sources')).toBe(true)
+    })
+})

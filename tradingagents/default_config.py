@@ -60,15 +60,37 @@ DEFAULT_CONFIG = {
     "provider_trace": os.getenv("TA_TRACE", "1").lower() in ("1", "true", "yes", "on"),
     
     # Data vendor configuration
+    #
+    # 这段配置有**可执行的校验**：`providers/capability_matrix.py` 声明每个维度的
+    # 分层源，`tests/test_provider_capability_matrix.py` 强制两件事——
+    #   R4 链上不许有"死成员"（列在这条链上却对该类别的 tool 一个都实现不了）
+    #   R6 有效链里第一个能服务该 tool 的 provider 必须等于矩阵声明的 tier 1
+    # 这两条规则来自一次真实事故：`cn_baostock` 曾被列进 3 条它 0 可服务的链，
+    # 于是"链上三源覆盖"是假象，而它的真实故障（上游主机名迁移）被
+    # NotImplementedError 吞掉。改这里的链之前，请先改矩阵，让测试告诉你是否自洽。
     "data_vendors": {
         "core_stock_apis": "cn_akshare,cn_baostock,yfinance",
         "technical_indicators": "cn_akshare,cn_baostock,yfinance",
+        # Baostock 在这里是**兜底**而非主源：AKShare 的同花顺/新浪口径字段更丰富，
+        # 且既有分析提示词与历史报告都按该口径写；Baostock 提供的是季频财务**指标**
+        # （roeAvg / currentRatio / CFOToNP 之类），同名方法含义并不相同。
+        # 把它排在第二，既拿到"上游改版时还有稳定退路"，又不静默改变已有数字的含义。
         "fundamental_data": "cn_akshare,cn_baostock,yfinance",
-        "news_data": "cn_akshare,cn_baostock,yfinance",
+        # cn_baostock 曾在这条链上，但它没有新闻能力（可服务 0/3）——链上死成员
+        # 让"三源覆盖"变成假象，且取数失败会被记成"这个 provider 没实现"。
+        "news_data": "cn_akshare,yfinance",
         "realtime_data": "cn_akshare",
+        # 研究类数据（日线/分时/筹码/资金流/板块基准/换手/个股新闻）。
+        # 这一类曾经**整类漏配**：`get_vendor` 落到默认值 "yfinance"，再被
+        # `_resolve_vendor_chain` 追加全部注册 provider——实际效果是
+        # **A 股日线的第一顺位变成 yfinance**，一个没人有意做过的决定。
+        # 现在显式配置：Baostock 是历史日线/分钟线的地基（官方协议、可批量、不封 IP），
+        # 其余维度 Baostock 结构上没有，交给 AKShare 系。
+        "cn_research_data": "cn_baostock,cn_akshare",
         # CN market microstructure data (fund flow, billboards, sentiment)
         # Prefer direct Eastmoney HTTP (free) to reduce AkShare wrapper breakages.
-        "cn_market_data": "cn_sina_moneyflow,cn_eastmoney_http,cn_akshare,cn_baostock",
+        # cn_baostock 已移除此链：它对该类别的 5 个 tool 可服务数为 0/5。
+        "cn_market_data": "cn_sina_moneyflow,cn_eastmoney_http,cn_akshare",
         # CN sector/board data (mainline analysis).
         # 实测（2026-09-23）东财那条路在本机不通（走系统代理 ProxyError、强制直连
         # RemoteDisconnected），而单源的代价不是"慢一点"，而是**整个板块维度一起

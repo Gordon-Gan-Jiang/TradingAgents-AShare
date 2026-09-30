@@ -7,7 +7,7 @@ name = "alphapilot-ashare"
 version = "0.2.0"
 description = "AlphaPilot A-Share: Multi-agent A-share research and trading decision platform"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "langchain-core>=0.3.81",
     "langchain-anthropic>=0.3.15",
@@ -23,8 +23,17 @@ dependencies = [
     "stockstats>=0.6.5",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
-    "akshare>=1.16.80",
-    "baostock>=0.8.9",
+    # 数据源依赖：下界是**已验证可用的最低版本**，不是随便写的宽松约束。
+    #   * baostock 0.8.x 拨的是 `www.baostock.com:10030`，而上游已把服务迁到
+    #     `public-api.baostock.com:10030`（旧主机 443 仍通、10030 黑洞）。0.8.9 实测
+    #     登录挂死 **75 秒**后报 `10002007 网络接收错误`，且该版本 socket 不设 timeout。
+    #     0.9.4 匿名登录 0.1s 成功；同时新增 API Key 体系（`bs-` 前缀 33 位，默认
+    #     `'0'` 表示匿名，仍可登录）。
+    #   * akshare 1.18.31+ 修了本项目正在使用的多个接口（腾讯日线 `stock_zh_a_hist_tx`
+    #     的成交量/换手率/成交额字段语义、雪球接口缺 token 时的报错、新浪 spot 分页
+    #     超时参数为 0 时进程阻塞）。钉在旧版会让这些故障表现为"看不懂的错误"。
+    "akshare>=1.18.97",
+    "baostock>=0.9.4",
     "fastapi>=0.116.1",
     "python-multipart>=0.0.18",
     "uvicorn>=0.35.0",

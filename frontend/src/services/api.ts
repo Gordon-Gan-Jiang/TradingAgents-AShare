@@ -1,4 +1,4 @@
-import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, RecommendationRequest, RecommendationResponse, DailyProductRunRequest, DailyProductRunResponse, RecommendationHistoryItem, RecommendationStrategyStat, RecommendationEvalRun, InsightsT1RecommendationPoint, InsightsT1ReportAccuracyPoint, InsightsT1ReportAccuracySummary, InsightsT1MultiModelConsensusPoint, InsightsT1MultiModelConsensusDetail, InsightsT1RecommendationDetail, InsightsT1ReportDetail, ModelArenaLeaderboardResponse, ModelArenaSymbolCompareResponse, ModelArenaPromoteRequest, ModelArenaRunRequest, ModelArenaRunResponse, ModelArenaDriftAlertResponse, ModelArenaModelDetailResponse, ModelArenaModelTrendResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, WpsWarmupRequest, WpsWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse, PaperPortfolioSnapshot, PaperPortfolioBootstrapRequest, PaperTradeRequest as PaperTradePayload, DailyOperationRequest as DailyOperationPayload, DailyOperationResult, PaperDailyReviewSummary, PromptTemplate, ModelProfile, ModelProfileCreateRequest, ModelProfileUpdateRequest, ModelProfileWarmupResponse, TradePlan, ExitAdviceResponse, WashoutVerdict, VerdictHistoryItem, CalibrationReport, ConversationSummary, ConversationDetail } from '@/types'
+import type { AnalysisRequest, AnalysisResponse, Announcement, AuthUser, AuthVerifyResponse, JobStatus, AnalysisReport, KlineResponse, LatestAnnouncementResponse, PortfolioImportState, PortfolioOverviewResponse, PortfolioPositionInput, RecommendationRequest, RecommendationResponse, DailyProductRunRequest, DailyProductRunResponse, RecommendationHistoryItem, RecommendationStrategyStat, RecommendationEvalRun, InsightsT1RecommendationPoint, InsightsT1ReportAccuracyPoint, InsightsT1ReportAccuracySummary, InsightsT1MultiModelConsensusPoint, InsightsT1MultiModelConsensusDetail, InsightsT1RecommendationDetail, InsightsT1ReportDetail, ModelArenaLeaderboardResponse, ModelArenaSymbolCompareResponse, ModelArenaPromoteRequest, ModelArenaRunRequest, ModelArenaRunResponse, ModelArenaDriftAlertResponse, ModelArenaModelDetailResponse, ModelArenaModelTrendResponse, Report, ReportDetail, ReportListResponse, RuntimeConfig, RuntimeConfigUpdate, RuntimeConfigUpdateResponse, RuntimeWarmupRequest, RuntimeWarmupResponse, WatchlistItem, WatchlistBatchResponse, ScheduledAnalysis, ScheduledBatchTriggerResponse, StockSearchResult, TrackingBoardResponse, UserToken, UserTokenCreateRequest, WecomWarmupRequest, WecomWarmupResponse, WpsWarmupRequest, WpsWarmupResponse, FeedbackItem, FeedbackListResponse, FeedbackUnreadResponse, PaperPortfolioSnapshot, PaperPortfolioBootstrapRequest, PaperTradeRequest as PaperTradePayload, DailyOperationRequest as DailyOperationPayload, DailyOperationResult, PaperDailyReviewSummary, PromptTemplate, ModelProfile, ModelProfileCreateRequest, ModelProfileUpdateRequest, ModelProfileWarmupResponse, TradePlan, ExitAdviceResponse, WashoutVerdict, VerdictHistoryItem, CalibrationReport, ConversationSummary, ConversationDetail, DataSourceMatrixResponse, DataSourceProbeHistoryResponse, DataSourceProbeStatusResponse } from '@/types'
 import { describeChatHttpError } from '@/services/chatStream'
 
 export function getBaseUrl(): string {
@@ -1095,6 +1095,35 @@ class ApiService {
 
     async getConversation(conversationId: string, limit = 100): Promise<ConversationDetail> {
         return this.request(`/v1/conversations/${encodeURIComponent(conversationId)}?limit=${limit}`)
+    }
+
+    /** 数据源探测：期望的能力矩阵（谁以什么优先级服务哪个维度）。 */
+    async getDataSourceMatrix(): Promise<DataSourceMatrixResponse> {
+        return this.request<DataSourceMatrixResponse>('/v1/data-sources/matrix')
+    }
+
+    /** 数据源探测：最近一次探测 + 每个「数据源 × 维度」的最新结果 + 近几次运行摘要。 */
+    async getDataSourceStatus(): Promise<DataSourceProbeStatusResponse> {
+        return this.request<DataSourceProbeStatusResponse>('/v1/data-sources/status')
+    }
+
+    /** 数据源探测：历史时间序列，用于趋势展示。 */
+    async getDataSourceHistory(
+        options: { days?: number; source?: string; tool?: string } = {},
+    ): Promise<DataSourceProbeHistoryResponse> {
+        const params = new URLSearchParams()
+        params.set('days', String(options.days ?? 30))
+        if (options.source) params.set('source', options.source)
+        if (options.tool) params.set('tool', options.tool)
+        return this.request<DataSourceProbeHistoryResponse>(`/v1/data-sources/history?${params.toString()}`)
+    }
+
+    /**
+     * 数据源探测：立即跑一次真实最小请求探测。
+     * 探测会逐个打真实源，耗时可达数十秒，因此单独放宽超时。
+     */
+    async runDataSourceProbe(): Promise<DataSourceProbeStatusResponse> {
+        return this.request<DataSourceProbeStatusResponse>('/v1/data-sources/probe', { method: 'POST' }, 120000)
     }
 
     /**

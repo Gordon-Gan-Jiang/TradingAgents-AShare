@@ -62,8 +62,19 @@ def evaluate_tool_sources(
     pool: dict[str, dict] = {}
     for key in source_keys:
         entry = get_contract_entry(key) or {}
-        category = entry.get("category", "calendar_anchored")
-        criticality = entry.get("criticality", "informational")
+        # 契约里查不到这个键时，**不得**兜底成最弱的 `informational`：那会让该源的
+        # 故障在 `_aggregate_overall` 里被直接忽略（`error` 只在 critical/important
+        # 时才记入汇总量）——探针结论正是「任一工具故障 → overall_status='fresh'、
+        # cap 100」（审计 §4.18）。
+        # 我们**不知道**它重不重要，那就必须让它可见，而不是让它消失。
+        if entry:
+            category = entry.get("category", "unknown")
+            criticality = entry.get("criticality", "unknown")
+        else:
+            # 不伪造成具体类别（`calendar_anchored` 是在声称一个我们并没有的知识）；
+            # 关键度取 `unknown`，由 aggregator 按"未知且不可忽略"处理。
+            category = "unknown"
+            criticality = "unknown"
 
         if key in unavailable_set:
             meta = FreshnessMeta(

@@ -83,24 +83,67 @@ def _reports_text_search_clause(search: str):
 
 from pydantic import field_validator
 
+# ─── 「良性兜底」的教训（审计 §4.6） ─────────────────────────────────────────
+#
+# 旧实现对 `level`/`status` 只认三个英文小写词，**其余一律返回 medium/neutral**：
+#
+#     level="高"  → "medium"      status="优" → "neutral"
+#     level 缺失   → "medium"      status=None → "neutral"
+#
+# 落库实测：**风险 73% 是 medium、指标 97.4% 是 neutral**。这不是"市场以中等风险
+# 为主"，而是兜底把真实取值抹平了。最致命的是——**"真·中等风险"与"没识别出来"
+# 逐字节相同**，读报告的人无从分辨，统计也无从纠正。
+#
+# 现在：
+#   * 认识真实词表（中文 + 常见英文同义），映射到规范值；
+#   * 认不出来就落到**显式的 `unknown`**，绝不冒充 medium/neutral；
+#   * 每次兜底都留一条 warning 日志（否则"识别失败率"永远无法统计）。
+_LEVEL_SYNONYMS = {
+    "high": {"high", "高风险", "高", "较高", "偏高", "严重", "重大", "critical", "severe", "major"},
+    "medium": {"medium", "中风险", "中", "中等", "一般", "moderate", "normal"},
+    "low": {"low", "低风险", "低", "较低", "偏低", "轻微", "minor", "slight"},
+}
+
+_STATUS_SYNONYMS = {
+    "good": {"good", "优", "优秀", "好", "良好", "正面", "偏高", "excellent", "strong", "positive"},
+    "neutral": {"neutral", "中", "中性", "一般", "持平", "normal", "average", "fair"},
+    "bad": {"bad", "差", "较差", "劣", "负面", "偏低", "poor", "weak", "negative"},
+}
+
+_UNKNOWN_LABEL = "unknown"
+
+
+def _coerce_synonym(field: str, raw: Any, table: Dict[str, set]) -> str:
+    """把 `raw` 映射到规范值；认不出来则返回 ``unknown`` 并留痕。"""
+    if isinstance(raw, str):
+        key = raw.strip().lower()
+        for canonical, synonyms in table.items():
+            if key in synonyms:
+                return canonical
+    logger.warning(
+        "structured extraction: unrecognised %s=%r → %r (fallback, not a real value)",
+        field,
+        raw,
+        _UNKNOWN_LABEL,
+    )
+    return _UNKNOWN_LABEL
+
 
 class RiskItemSchema(BaseModel):
     name: str = Field(..., description="风险名称，15字以内")
-    level: str = Field("medium", description="风险等级")
+    level: str = Field(_UNKNOWN_LABEL, description="风险等级：high/medium/low/unknown")
     description: str = Field("", description="一句话说明，30字以内")
 
     @field_validator("level", mode="before")
     @classmethod
     def _coerce_level(cls, v):
-        if isinstance(v, str) and v.lower() in ("high", "medium", "low"):
-            return v.lower()
-        return "medium"
+        return _coerce_synonym("level", v, _LEVEL_SYNONYMS)
 
 
 class KeyMetricSchema(BaseModel):
     name: str = Field(..., description="指标名称，如 PE、ROE、营收增速")
     value: str = Field(..., description="指标值，包含单位，如 28.5x、15.2%")
-    status: str = Field("neutral", description="优劣判断")
+    status: str = Field(_UNKNOWN_LABEL, description="优劣判断：good/neutral/bad/unknown")
 
     @field_validator("value", mode="before")
     @classmethod
@@ -111,9 +154,7 @@ class KeyMetricSchema(BaseModel):
     @field_validator("status", mode="before")
     @classmethod
     def _coerce_status(cls, v):
-        if isinstance(v, str) and v.lower() in ("good", "neutral", "bad"):
-            return v.lower()
-        return "neutral"
+        return _coerce_synonym("status", v, _STATUS_SYNONYMS)
 
 
 class StructuredReport(BaseModel):
@@ -121,8 +162,10 @@ class StructuredReport(BaseModel):
     confidence: Optional[int] = Field(None, description="整体置信度 0-100")
     target_price: Optional[float] = Field(None, description="目标价（数字，无单位）")
     stop_loss_price: Optional[float] = Field(None, description="止损价（数字，无单位）")
-    risks: List[RiskItemSchema] = Field(default_factory=list, description="主要风险，最多5条")
-    key_metrics: List[KeyMetricSchema] = Field(default_factory=list, description="关键指标，最多6条")
+    # `None` = 抽取结果里**没有这个字段**（不知道）；`[]` = 模型明确给出空列表
+    # （确认没有风险）。两者落库、回传、渲染都必须可区分（审计 §4.7）。
+    risks: Optional[List[RiskItemSchema]] = Field(None, description="主要风险，最多5条")
+    key_metrics: Optional[List[KeyMetricSchema]] = Field(None, description="关键指标，最多6条")
 
     @field_validator("target_price", "stop_loss_price", mode="before")
     @classmethod
@@ -131,6 +174,26 @@ class StructuredReport(BaseModel):
         if isinstance(v, list):
             return v[0] if v else None
         return v
+
+
+def dump_structured_items(
+    structured: Optional["StructuredReport"], attr: str
+) -> Optional[List[Dict[str, Any]]]:
+    """把抽取结果里的 `risks`/`key_metrics` 转成可落库的 dict 列表。
+
+    单独抽出来是因为这个转换在 `api/main.py` 里有 4 处，而**每一处都必须保留
+    `None` 与 `[]` 的区别**：`None` 是"没抽到"，`[]` 是"确认没有"。
+    旧写法 `[r.model_dump() for r in structured.risks] if structured else None`
+    在半可解析（有 StructuredReport 但没有 risks 键）时会退化成 `[]`，
+    与"分析确认没有风险"逐字节相同。
+    """
+    if structured is None:
+        return None
+    items = getattr(structured, attr, None)
+    if items is None:
+        return None
+    return [item.model_dump() for item in items]
+
 
 
 def extract_structured_data(
@@ -491,7 +554,7 @@ def _apply_freshness_from_result(
     summary = result_data.get("freshness_summary")
     if not isinstance(summary, dict):
         return result_data, confidence, result_data.get("freshness_status")
-    overall = str(summary.get("overall_status") or "fresh")
+    overall = _overall_status_or_unknown(summary)
     try:
         from tradingagents.dataflows.freshness import clamp_confidence
 
@@ -500,6 +563,19 @@ def _apply_freshness_from_result(
     except Exception:
         pass
     return result_data, confidence, overall
+
+
+def _overall_status_or_unknown(summary: Dict[str, Any]) -> str:
+    """从 `freshness_summary` 取整体状态；**缺失即 unknown，绝不是 fresh**。
+
+    旧写法是 `str(summary.get("overall_status") or "fresh")`：只要 summary 里
+    没有这个键（半可解析的载荷、老数据、上游只写了部分字段），就得到 `"fresh"`。
+    而 `CONFIDENCE_CAPS["fresh"] = 100`，于是**置信度上限被整个跳过**——
+    "新鲜度未知"不仅被显示成"最新"，还因此拿到最高可信度（审计 §4.16）。
+    """
+    raw = summary.get("overall_status")
+    status = str(raw).strip().lower() if raw is not None else ""
+    return status or "unknown"
 
 
 def resolve_report_horizon(result_data: Optional[Dict[str, Any]]) -> Optional[str]:

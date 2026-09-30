@@ -17,6 +17,7 @@ import Login from './pages/Login'
 import Feedback from './pages/Feedback'
 import ModelProfiles from './pages/ModelProfiles'
 import Mainline from './pages/Mainline'
+import DataSources from './pages/DataSources'
 import { useAuthStore } from './stores/authStore'
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -60,6 +61,7 @@ function App() {
                   <Route path="/recommendation-insights" element={<RecommendationInsights />} />
                   <Route path="/quality-insights" element={<QualityInsights />} />
                   <Route path="/paper-trading" element={<PaperTrading />} />
+                  <Route path="/data-sources" element={<DataSources />} />
                   <Route path="/settings" element={<Settings />} />
                   <Route path="/feedback" element={<Feedback />} />
                 </Routes>

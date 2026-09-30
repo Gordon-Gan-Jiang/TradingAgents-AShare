@@ -8,8 +8,8 @@ langgraph
 langgraph-checkpoint-sqlite
 pandas
 yfinance
-akshare
-baostock
+akshare>=1.18.97
+baostock>=0.9.4
 stockstats
 rank-bm25
 requests
@@ -28,5 +28,8 @@ PyYAML
 #     接口）在运行时需要它，缺了会在**收到上传请求时**才报错。
 #   * mcp —— MCP 出口把平台能力暴露给外部 Agent（Claude / Cursor / DSH）时用；
 #     传输中立核心不依赖它，但 streamable-http 挂载需要。
+# akshare / baostock 的下界是"已验证可用的最低版本"，理由见 pyproject.toml 同处注释：
+# baostock<0.9.4 拨的是已废弃主机名（登录挂死 75s），akshare<1.18.31 缺项目在用的
+# 若干接口修复。按老版本部署出来的环境，数据源会静默不可用。
 python-multipart
 mcp

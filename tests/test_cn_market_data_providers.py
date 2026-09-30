@@ -4,13 +4,26 @@ import types
 import pandas as pd
 
 
-def test_akshare_lhb_uses_positional_args(monkeypatch):
-    # Arrange: fake akshare module with strict signature
+def test_akshare_lhb_uses_a_single_day_date_window(monkeypatch):
+    """REPLACED — the previous version of this test asserted the bug.
+
+    It gave akshare an invented three-argument signature
+    (``def stock_lhb_detail_em(code, start_date, end_date)``) and asserted
+    ``("600176", "2026-06-16", "2026-06-16")``, i.e. that the stock code is passed as
+    ``start_date``. The real akshare is ``stock_lhb_detail_em(start_date, end_date)``
+    with no symbol parameter, so binding the code to ``start_date`` made akshare's
+    date filter match nearly all history: a 402-page whole-market crawl that usually
+    died with ``ChunkedEncodingError``, and that returned other companies' rows under
+    this symbol's heading.
+
+    The correct contract now lives in ``tests/test_lhb_detail_fetch.py``, which also
+    pins the real installed signature. This copy is kept as the shape check.
+    """
     calls = {}
 
-    def stock_lhb_detail_em(code, start_date, end_date):
-        calls["args"] = (code, start_date, end_date)
-        return pd.DataFrame([{"x": 1}])
+    def stock_lhb_detail_em(start_date="20230403", end_date="20230417"):
+        calls["args"] = (start_date, end_date)
+        return pd.DataFrame([{"代码": "600176", "名称": "测试", "上榜日": "2026-06-16"}])
 
     fake = types.SimpleNamespace(stock_lhb_detail_em=stock_lhb_detail_em)
     monkeypatch.setitem(sys.modules, "akshare", fake)
@@ -20,7 +33,7 @@ def test_akshare_lhb_uses_positional_args(monkeypatch):
     provider = CnAkshareProvider()
     out = provider.get_lhb_detail("600176.SH", "2026-06-16")
 
-    assert calls["args"] == ("600176", "2026-06-16", "2026-06-16")
+    assert calls["args"] == ("20260616", "20260616"), "必须是单日日期窗口，且不含股票代码"
     assert "龙虎榜明细" in out
 
 

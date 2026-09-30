@@ -7,9 +7,16 @@
 共识强度、分歧度、稳定度、执行模式、风险闸、以及**谁支持谁反对**。
 
 模型读到的正文是散文，凭它总结"分析师们一致看多"极易出错——尤其是当部分
-分析师的结论**解析失败**时：服务层刻意记录 `unparsed_analyst_n` 并拒绝把
-解析失败当"中性票"。因此本工具把它作为一条独立证据说出来：
-「7 位一致看多」与「只有 2 份解析成功、其余 5 份坏了」在界面上必须不一样。
+分析师的结论**没有解析出来**时：服务层刻意记录 `unparsed_analyst_n` 并拒绝把
+"没有方向"当"中性票"。因此本工具把它作为一条独立证据说出来：
+「7 位一致看多」与「只有 2 份计票、其余 5 份没给出方向」在界面上必须不一样。
+
+但"没解析出来"曾被误当成"报告坏了"：旧代码只认 `VERDICT` 块，而分析师的方向
+经常写在 `ANALYST_JSON` 块里（实测 114 份判为失败的报告中 103 份方向完好）。
+现在方向由 `resolve_trace_direction` 判定（VERDICT → ANALYST_JSON → 无方向），
+只有两个块都没有方向才计入 `unparsed_analyst_n`；方向取自 ANALYST_JSON 的单独
+记为 `recovered_analyst_n` 并同样作为证据说出，以免"本来就解析成功"与"从
+ANALYST_JSON 兜回来的"无法区分，提示词回归就查不出来。
 
 ## 弃权：三种"没有"要分开
 
@@ -137,7 +144,18 @@ def make_consensus_tools(consensus: ReportConsensusPort) -> tuple[ToolSpec, ...]
         score = _fmt(summary.get("consensus_score"), digits=3)
         if score:
             head.append(f"共识得分 {score}")
-        strength = str(summary.get("consensus_strength") or "").strip()
+        # 强度 0 必须照实说出：那是「多空完全对冲」这一最需要谨慎的情形。
+        # 旧写法 `str(summary.get("consensus_strength") or "")` 会把 0 当成缺省而把
+        # 整句省略掉 —— 越是需要谨慎的结论，反而越看不到强度。
+        raw_strength = summary.get("consensus_strength")
+        if isinstance(raw_strength, str):
+            strength = raw_strength.strip()
+        elif raw_strength is None or isinstance(raw_strength, bool):
+            strength = ""
+        elif isinstance(raw_strength, (int, float)):
+            strength = str(int(raw_strength))
+        else:
+            strength = str(raw_strength).strip()
         if strength:
             head.append(f"强度 {strength}")
         support = _ratio(summary.get("support_ratio"))
@@ -226,14 +244,37 @@ def make_consensus_tools(consensus: ReportConsensusPort) -> tuple[ToolSpec, ...]
 
         unparsed = summary.get("unparsed_analyst_n")
         if isinstance(unparsed, (int, float)) and int(unparsed) > 0:
-            # 解析失败必须可见：否则「一致看多」与「只有两份解析成功」长得一样
+            # 未计入必须可见：否则「一致看多」与「只有两份计票」长得一样。
+            #
+            # 注意措辞：这里只统计**两个机读块都没有给出方向**的分析师。旧实现只认
+            # VERDICT 块，而分析师的方向常写在 ANALYST_JSON 里，于是把正常报告说成
+            # 「解析失败」，读的人会以为报告坏了。
             evidence.append(
                 EvidenceItem(
                     id=f"E{len(evidence) + 1}",
                     field="未计入的分析师",
                     value=(
-                        f"{int(unparsed)} 位分析师的结论解析失败，**未计入加权投票**"
+                        f"{int(unparsed)} 位分析师未给出可解析的方向"
+                        "（VERDICT / ANALYST_JSON 两个机读块都没有），**未计入加权投票**"
                         "（它们既不是支持也不是中性）"
+                    ),
+                    unit="",
+                    source_key=_SOURCE_KEY,
+                    as_of=trade_date or as_of,
+                )
+            )
+
+        recovered = summary.get("recovered_analyst_n")
+        if isinstance(recovered, (int, float)) and int(recovered) > 0:
+            # 兜回来的票也必须可见：否则「本来就解析成功」与「从 ANALYST_JSON 取到
+            # 方向」无法区分，提示词回归就查不出来。
+            evidence.append(
+                EvidenceItem(
+                    id=f"E{len(evidence) + 1}",
+                    field="方向取自 ANALYST_JSON 的分析师",
+                    value=(
+                        f"{int(recovered)} 位分析师没有 VERDICT 块，方向取自 "
+                        "ANALYST_JSON 块，**已计入加权投票**"
                     ),
                     unit="",
                     source_key=_SOURCE_KEY,

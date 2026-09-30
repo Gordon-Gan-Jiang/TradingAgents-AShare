@@ -66,15 +66,19 @@ def extract_verdict(text: str) -> Tuple[str, int]:
 def extract_verdict_with_flag(text: str) -> Tuple[str, int, bool]:
     """Same as :func:`extract_verdict`, but also reports whether it *parsed*.
 
-    The third element is the whole point. ``extract_verdict`` must always render
+    The third element is why this exists. ``extract_verdict`` must always render
     something for the trace UI, so an unparseable report yields 中性. But
-    ``consensus_service`` reads ``analyst_traces[*].verdict`` and feeds it into the
-    weighted direction score — so without this flag a **parse failure is
-    indistinguishable from a genuine neutral opinion**, and a broken analyst report
-    silently votes "中性" with full weight.
+    ``consensus_service`` feeds the direction into the weighted score — so without
+    this flag a **parse failure is indistinguishable from a genuine neutral
+    opinion**, and a broken analyst report silently votes "中性" with full weight.
 
-    ``False`` means no verdict was parsed: the caller must treat the analyst as
-    having said nothing, not as having said 中性.
+    ``False`` means **the ``VERDICT`` block did not parse** — not that the analyst
+    said nothing. The analyst prompts also mandate an ``ANALYST_JSON`` block, which
+    carries the same direction, and the model frequently emits only that one; so a
+    reader must not treat ``False`` as "no opinion". Resolve direction through
+    :func:`tradingagents.agents.utils.analyst_structured.resolve_trace_direction`,
+    which tries ``VERDICT`` first and then ``ANALYST_JSON``, and only reports "no
+    direction" when both are silent.
     """
     result = extract_direction_result(text, allow_labelled_lines=False)
     if result.direction is None:
@@ -99,8 +103,18 @@ class TraceItem(TypedDict, total=False):
     horizon: str
     data_window: str
     key_finding: str
+    # ``verdict`` is the **resolved** direction (VERDICT block, else the
+    # ANALYST_JSON block, else the neutral display fallback). Read it through
+    # ``resolve_trace_direction``, never directly.
     verdict: str
     confidence: Union[int, float, str]
+    # Did the ``VERDICT`` block itself parse? Deliberately narrower than "does this
+    # analyst have a direction": a report whose direction came from ANALYST_JSON
+    # has ``verdict_parsed=False`` and is still a valid vote. Only
+    # ``verdict_source == "none"`` means "this analyst stated nothing".
+    verdict_parsed: bool
+    # "verdict" | "analyst_json" | "none" — where ``verdict`` came from.
+    verdict_source: str
     structured: dict[str, Any]
 
 

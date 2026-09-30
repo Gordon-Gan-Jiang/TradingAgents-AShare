@@ -7,4 +7,4 @@
 
 from __future__ import annotations
 
-__all__ = ["chat", "signals"]
+__all__ = ["chat", "data_sources", "signals"]

@@ -3,13 +3,14 @@ import time
 import threading
 import contextvars
 from datetime import datetime, timedelta
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
 from stockstats import wrap
 
 from .base import BaseMarketDataProvider
+from .errors import SourceEmpty, SourceUnavailable, SourceUnsupported
 from ..trade_calendar import cn_market_phase, cn_no_data_reason, cn_today_str, is_cn_trading_day
 
 
@@ -35,6 +36,7 @@ def set_scheduled_task_context(value: bool = True) -> contextvars.Token:
 import logging as _logging
 
 _lock_logger = _logging.getLogger(__name__)
+logger = _logging.getLogger(__name__)
 
 
 class _AkshareLock:
@@ -121,6 +123,22 @@ class _AkshareLock:
 
 AKSHARE_CALL_LOCK = _AkshareLock(total=5, scheduled_max=3)
 
+#: `ak.stock_news_em` 的**结构性**上限：源码为 `pageSize: 10` 且**没有分页循环**，
+#: 即该端点单次最多只会返回最近 10 条。它无法按日期区间回溯翻页。
+#:
+#: 这个数字必须显式写在这里，因为调用方请求的是 **90 天**窗口
+#: （`graph/data_collector.py` 的 `LONG_DAYS`）。源上限 < 请求窗口时，
+#: "过滤后为空"**不能**被表述为"窗口内没有新闻"。
+_NEWS_SOURCE_ITEM_LIMIT = 10
+
+#: 「窗口覆盖不足」的统一标记。
+#:
+#: 必须是**可被识别**的文案：`dataflows/vendor_text.py` 的标记表里登记了它，
+#: 因此 `_looks_like_vendor_failure` 会把它认成"拿不到"，工具层据此降级、
+#: 不产出证据。否则一句"无法判断"会被下游当成有效数据，
+#: 甚至被抄成证据锚点（审计 §3.1）。
+_NEWS_WINDOW_INSUFFICIENT = "【窗口覆盖不足】"
+
 
 def _is_transient_network_error(exc: BaseException) -> bool:
     name = type(exc).__name__
@@ -143,6 +161,80 @@ def _is_transient_network_error(exc: BaseException) -> bool:
             "timed out",
             "Connection reset",
         )
+    )
+
+
+_LHB_CODE_COLUMNS = ("代码", "SECURITY_CODE", "secu_code", "symbol")
+
+
+def _is_em_parse_crash(exc: BaseException) -> bool:
+    """akshare 是否因上游**返回形态不符**而崩（而不是网络/能力问题）。
+
+    只有这一种错误才值得回退直连去核实窗口：`stock_lhb_detail_em` 的解析体是
+    ``data_json["result"]["pages"]``，东财对没有行的窗口返回
+    ``HTTP 200 + result: null``，于是 ``None["pages"]`` 抛
+    ``TypeError: 'NoneType' object is not subscriptable``——
+    **非异动日（完全正常）被上游当成了解析错误**。
+
+    网络异常、缺函数等**不在此列**：它们该如实报错，不该被回退掩盖。
+    """
+    if isinstance(exc, TypeError) and "not subscriptable" in str(exc):
+        return True
+    if isinstance(exc, KeyError) and "result" in str(exc):
+        return True
+    return False
+
+
+def _recover_lhb_via_direct(
+    symbol: str, code: str, day: str, date: str
+) -> Optional[str]:
+    """akshare 解析崩溃后，用直连端点核实该窗口，返回应给用户的那句话。
+
+    返回 `None` 表示「直连也说不清」——调用方据此保留原始的失败文案（不掩盖故障）。
+
+    * 直连拿到空窗口（东财 `code=9201 / result:null` = 这段窗口没有龙虎榜行）
+      ⇒ 中性「无龙虎榜数据（非异动日属正常）」，**不再是**一红色的「数据异常」；
+    * 直连拿到行 ⇒ 数据是被上游解析器丢的，还给用户；
+    * 直连自己失败 / 未知业务码 ⇒ `None`（如实报失败）。
+    """
+    try:
+        from .cn_eastmoney_direct import fetch_em_lhb_detail_direct
+
+        df = fetch_em_lhb_detail_direct(day, day)
+        if df is None or df.empty:
+            return f"{symbol} 在 {date} 无龙虎榜数据（非异动日属正常）。"
+        hit = _filter_lhb_rows(df, code)
+        if hit is None or hit.empty:
+            return f"{symbol} 在 {date} 无龙虎榜数据（非异动日属正常）。"
+        return f"{symbol} 龙虎榜明细（{date}）：\n{hit.head(20).to_string(index=False)}"
+    except Exception as recovery_exc:  # noqa: BLE001 — 回退失败不掩盖原始故障
+        logger.warning(
+            "lhb direct recovery failed for %s @ %s: %s: %s",
+            symbol, date, type(recovery_exc).__name__, recovery_exc,
+        )
+        return None
+
+
+def _filter_lhb_rows(df: pd.DataFrame, code: str) -> pd.DataFrame:
+    """从全市场龙虎榜明细里挑出本标的的行。
+
+    akshare 返回的是**全市场**当日明细（中文列名，代码列叫「代码」）。调用方必须自己
+    过滤：旧实现把整个 frame 的 `head(20)` 直接挂到 "<symbol> 龙虎榜明细" 标题下，
+    于是报告里出现的是别的公司的数据。这里也兼容英文列名，防止上游改名后静默漏掉。
+    代码统一按 6 位补零比较，避免 "1" 与 "000001" 不相等。
+    """
+    if df is None or getattr(df, "empty", True):
+        return df
+    target = str(code).strip().upper().split(".")[0].zfill(6)
+    for col in _LHB_CODE_COLUMNS:
+        if col in df.columns:
+            codes = (
+                df[col].astype(str).str.strip().str.upper().str.split(".").str[0].str.zfill(6)
+            )
+            return df[codes == target]
+    # 列名不认识时**不要**退化成返回全表：那正是这个 bug 的形态。
+    raise SourceUnsupported(
+        f"龙虎榜明细缺少代码列（现有列：{list(df.columns)[:8]}），无法确认归属"
     )
 
 
@@ -401,7 +493,7 @@ def fetch_board_spot_df(ak_module, sector_type: str = "industry") -> pd.DataFram
         raise ValueError(f"Unknown sector_type={sector_type!r}, expected 'industry' or 'concept'")
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
     raw = _call_akshare_retry(func, api_name=api_name)
     return _normalize_board_spot_df(raw)
 
@@ -423,7 +515,7 @@ def fetch_board_hist_df(
         raise ValueError(f"Unknown sector_type={sector_type!r}")
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
     end = (end_date or cn_today_str()).replace("-", "")
     if start_date:
         start = start_date.replace("-", "")
@@ -450,7 +542,7 @@ def fetch_board_cons_df(ak_module, board_name: str, sector_type: str = "industry
         raise ValueError(f"Unknown sector_type={sector_type!r}")
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
 
     def _call():
         try:
@@ -472,7 +564,7 @@ def fetch_sector_fund_flow_rank_df(
     api_name = "stock_sector_fund_flow_rank"
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError("akshare has no supported API: stock_sector_fund_flow_rank")
+        raise SourceUnsupported("akshare has no supported API: stock_sector_fund_flow_rank")
     indicator = {"1d": "今日", "3d": "3日", "5d": "5日", "10d": "10日"}.get(period, "今日")
     sector_label = _BOARD_FUND_FLOW_SECTOR_TYPE.get(sector_type)
     if sector_label is None:
@@ -496,7 +588,7 @@ def fetch_ths_industry_summary_df(ak_module) -> pd.DataFrame:
     api_name = "stock_board_industry_summary_ths"
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
     raw = _call_akshare_retry(func, api_name=api_name)
     return _normalize_board_spot_df(raw)
 
@@ -506,7 +598,7 @@ def fetch_sina_sector_spot_df(ak_module) -> pd.DataFrame:
     api_name = "stock_sector_spot"
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
 
     def _call():
         return func(indicator="新浪行业")
@@ -567,7 +659,7 @@ def fetch_ths_board_index_df(
         raise ValueError(f"Unknown sector_type={sector_type!r}")
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
 
     def _call():
         try:
@@ -588,7 +680,7 @@ def fetch_market_breadth_df(ak_module) -> dict:
     api_name = "stock_zh_a_spot"
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
     raw = _call_akshare_retry(func, api_name=api_name)
     if raw is None or raw.empty:
         return {"up": 0, "down": 0, "flat": 0, "total": 0, "as_of": None}
@@ -617,7 +709,7 @@ def fetch_zt_industry_heat_df(ak_module, date: str) -> pd.DataFrame:
     api_name = "stock_zt_pool_em"
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
     raw = _call_akshare_retry(
         lambda: func(date=date.replace("-", "")), api_name=api_name
     )
@@ -656,7 +748,7 @@ def fetch_zt_pool_rows_df(ak_module, date: str) -> pd.DataFrame:
     api_name = "stock_zt_pool_em"
     func = getattr(ak_module, api_name, None)
     if func is None:
-        raise NotImplementedError(f"akshare has no supported API: {api_name}")
+        raise SourceUnsupported(f"akshare has no supported API: {api_name}")
     raw = _call_akshare_retry(
         lambda: func(date=date.replace("-", "")), api_name=api_name
     )
@@ -775,39 +867,12 @@ def format_board_cons_table(
     return f"{label}板块「{board_name}」成分股 Top{top_n}（按当日涨幅）：\n{sub.to_string(index=False)}"
 
 
-# 结构化日线的列契约：与平台通用 OHLCV 约定一致（见 `graph/data_collector.py`）
-_SIGNAL_BAR_COLUMNS = ("date", "open", "high", "low", "close", "volume")
-
-
-def to_signal_bars(frame: pd.DataFrame) -> pd.DataFrame:
-    """把内部大写帧转成**信号层契约**的小写 OHLCV。
-
-    事故记录：`get_daily_bars_df` 曾经直接把 `_fetch_hist_df` 的输出交出去，
-    而那是给提示词表格用的**大写**列（`Date`/`Close`…）。纯信号层
-    （`signals/context.py::_normalize_daily`）要求小写 `date`/`close`，于是每次
-    真实取数都变成 `InsufficientHistory: daily bars missing required columns`——
-    **洗盘判定因此从未在真实数据上跑通过**，只在测试里通过（测试桩恰好造小写列）。
-
-    两条路的消费者不同，所以在这里转换，而不是改任何一边去迁就另一边：
-    `_normalize_hist_df` 保持大写（提示词表格用），信号层保持小写（数值计算用）。
-    """
-    if frame is None or len(frame) == 0:
-        return pd.DataFrame(columns=list(_SIGNAL_BAR_COLUMNS))
-
-    out = frame.copy()
-    out.columns = [str(c).strip().lower() for c in out.columns]
-    # 只保留契约列，其余（outstanding_share / turnover 之类）不往下传：
-    # 信号层按列名取值，多带列不会更安全，只会让上游改动无声穿透。
-    keep = [c for c in _SIGNAL_BAR_COLUMNS if c in out.columns]
-    out = out[keep]
-
-    for column in ("date",):
-        if column in out.columns:
-            out[column] = pd.to_datetime(out[column], errors="coerce").dt.strftime("%Y-%m-%d")
-    for column in ("open", "high", "low", "close", "volume"):
-        if column in out.columns:
-            out[column] = pd.to_numeric(out[column], errors="coerce")
-    return out.reset_index(drop=True)
+# 结构化日线的列契约已抽到 `providers/bars.py`：现在 AKShare 与 BaoStock 都要产出
+# 同一种帧，契约留在一处才不会各自漂移。这里 re-export 旧名，既有的
+# `from ...cn_akshare_provider import to_signal_bars` 与 `_SIGNAL_BAR_COLUMNS`
+# 导入路径保持不变（见 tests/test_daily_bars_contract.py）。
+from .bars import SIGNAL_BAR_COLUMNS as _SIGNAL_BAR_COLUMNS  # noqa: E402
+from .bars import to_signal_bars  # noqa: E402,F401
 
 
 class CnAkshareProvider(BaseMarketDataProvider):
@@ -846,7 +911,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
         try:
             import akshare as ak  # type: ignore
         except ImportError as exc:
-            raise NotImplementedError(
+            raise SourceUnavailable(
                 "cn_akshare requires 'akshare'. Install it with: pip install akshare"
             ) from exc
         return ak
@@ -859,7 +924,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
         s = symbol.strip().lower()
         m = re.search(r"(\d{6})", s)
         if not m:
-            raise NotImplementedError(
+            raise SourceUnsupported(
                 f"cn_akshare only supports A-share 6-digit symbols, got: {symbol}"
             )
         return m.group(1)
@@ -904,12 +969,36 @@ class CnAkshareProvider(BaseMarketDataProvider):
             "成交量": "Volume",
             "volume": "Volume",
             "Volume": "Volume",
-            "amount": "Volume",
-            "Amount": "Volume",
+            # 刻意**不把** amount / 成交额 映射到 Volume：
+            # 新浪 stock_zh_a_daily 与腾讯 stock_zh_a_hist_tx 会**同时**返回 volume 与 amount，
+            # 两者都映射到 "Volume" 后 rename 产生**重名列**，于是 out["Volume"] 是 DataFrame
+            # 而不是 Series，pd.to_numeric 抛
+            #   TypeError: arg must be a list, tuple, 1-d array, or Series
+            # 该异常又被下面的兜底分支吞掉，最终报成"eastmoney/sina/tencent all failed"——
+            # 实测新浪与腾讯各返回 19 行**真实数据**却全被丢弃，这条兜底链从来没生效过。
+            # 另外 amount(成交额,元) 与 volume(成交量,手) 语义本就不同，不该互相冒充。
         }
         df = raw_df.rename(columns=col_map).copy()
+
+        # 撞列防护：重名列会让 df[col] 退化成 DataFrame（即上面那个事故的机制）。
+        # 只保留第一列并**显式记一条 warning**，绝不把 DataFrame 当 Series 往下传。
+        if df.columns.duplicated().any():
+            dupes = sorted({str(c) for c in df.columns[df.columns.duplicated()]})
+            _lock_logger.warning(
+                "hist dataframe 出现重名列（rename 后），保留第一列：%s", dupes
+            )
+            df = df.loc[:, ~df.columns.duplicated()]
+
         required = ["Date", "Open", "High", "Low", "Close", "Volume"]
         missing = [c for c in required if c not in df.columns]
+        if "Volume" in missing:
+            # 少数端点只给成交额、不给成交量：退而用它，也不要让整条链判失败。
+            # 语义不同（元 vs 手），但"有量无额"总好过"没有数据"。
+            for alt in ("amount", "Amount", "成交额", "turnover", "换手率"):
+                if alt in df.columns:
+                    df["Volume"] = df[alt]
+                    missing = [c for c in missing if c != "Volume"]
+                    break
         if missing:
             raise ValueError(f"hist dataframe missing columns: {missing}")
 
@@ -928,8 +1017,11 @@ class CnAkshareProvider(BaseMarketDataProvider):
         if df is None or df.empty:
             return f"No data found for symbol '{symbol}' between {start} and {end}"
         out = self._normalize_hist_df(df)
-        out["Dividends"] = 0.0
-        out["Stock Splits"] = 0.0
+        # 同 cn_baostock_provider：日线源不提供分红/拆股，填 NaN（未知）而不是
+        # 0.0（那等于断言"从未分红、从未拆股"，审计 §4.14）。cn_akshare 是
+        # A 股价格的 tier 1 主路径，这个伪事实会直接进分析师提示词。
+        out["Dividends"] = float("nan")
+        out["Stock Splits"] = float("nan")
         out["Date"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
 
         header = f"# Stock data for {symbol} from {start} to {end}\n"
@@ -1031,6 +1123,10 @@ class CnAkshareProvider(BaseMarketDataProvider):
                         time.sleep(0.6 * (i + 1))
 
             # Source 2: Sina
+            # 兜底分支**不再静默**：原来这里是 `except Exception: pass`，于是新浪/腾讯
+            # 到底为什么失败完全丢失，最终只报一句"eastmoney/sina/tencent all failed"，
+            # 让人无从判断是源坏了、被限流了，还是我们自己的解析炸了（实测是后者）。
+            fallback_errors: list[str] = []
             try:
                 df = ak.stock_zh_a_daily(
                     symbol=symbol_with_market,
@@ -1040,8 +1136,8 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 )
                 out = self._normalize_hist_df(df)
                 return self._maybe_append_realtime_row(symbol, out, end_date, assume_locked=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                fallback_errors.append(f"sina={type(exc).__name__}: {exc}")
 
             # Source 3: Tencent
             try:
@@ -1053,11 +1149,13 @@ class CnAkshareProvider(BaseMarketDataProvider):
                 )
                 out = self._normalize_hist_df(df)
                 return self._maybe_append_realtime_row(symbol, out, end_date, assume_locked=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                fallback_errors.append(f"tencent={type(exc).__name__}: {exc}")
 
-            raise NotImplementedError(
-                f"cn_akshare is temporarily unavailable for price history (eastmoney/sina/tencent all failed): {em_last_exc}"
+            raise SourceUnavailable(
+                "cn_akshare is temporarily unavailable for price history "
+                f"(eastmoney/sina/tencent all failed): em={em_last_exc}; "
+                + "; ".join(fallback_errors)
             ) from em_last_exc
 
     def _fetch_realtime_row_unlocked(self, symbol: str) -> pd.DataFrame:
@@ -1285,7 +1383,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
             if len(parts) > 1:
                 return "\n\n".join(parts)
 
-            raise NotImplementedError(
+            raise SourceUnavailable(
                 "cn_akshare is temporarily unavailable for fundamentals: "
                 + "; ".join(errors)
             )
@@ -1316,7 +1414,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
             except Exception as exc:
                 errors.append(f"stock_financial_abstract_new_ths: {type(exc).__name__}")
 
-            raise NotImplementedError(
+            raise SourceUnavailable(
                 f"cn_akshare is temporarily unavailable for {report_name}: {'; '.join(errors)}"
             )
 
@@ -1345,17 +1443,61 @@ class CnAkshareProvider(BaseMarketDataProvider):
             try:
                 df = ak.stock_news_em(symbol=code)
                 if df is None or df.empty:
-                    return f"No news found for {ticker}"
+                    # 源**一条都没给**：只能说"这个源没给到"，不能说"窗口内没有新闻"。
+                    # 两者的差别是这个模块的核心：前者是关于**源**的陈述，后者是关于
+                    # **世界**的断言，而后者会让分析师得出"无催化剂/无负面报道"。
+                    return (
+                        f"{_NEWS_WINDOW_INSUFFICIENT} cn_akshare 未返回任何新闻条目"
+                        f"（{ticker}，请求窗口 {start_date} 至 {end_date}）"
+                    )
 
                 date_col = "发布时间" if "发布时间" in df.columns else None
+                fetched_n = int(len(df))
+                oldest_dt = None
+                start_dt = None
                 if date_col is not None:
                     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
                     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
                     end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+                    oldest_dt = df[date_col].min()
                     df = df[(df[date_col] >= start_dt) & (df[date_col] < end_dt)]
 
                 if df.empty:
-                    return f"No news found for {ticker} between {start_date} and {end_date}"
+                    # ── 关键区分：源的覆盖范围**够不够到窗口起点** ──────────────
+                    #
+                    # `stock_news_em` 只有 `pageSize: 10` 且无分页，即结构上最多返回
+                    # **最近 10 条**。窗口过滤后为空有两种截然不同的含义：
+                    #
+                    #   (a) 源最早的一条**早于**窗口起点 → 源的视野覆盖了窗口，
+                    #       所以"窗口内没有新闻"是一个**有证据支撑**的断言，
+                    #       但仍须限定在"返回的 N 条里"，不能冒充完整扫描。
+                    #   (b) 源最早的一条**晚于**窗口起点 → 源根本看不到那么早，
+                    #       此时说"窗口内没有新闻"就是把**能力不足**说成**事实**。
+                    #       实测后果：任何历史日期的分析都会让新闻分析师读到
+                    #       「该公司在此期间没有新闻」。真相应是**不知道**。
+                    covers_window_start = (
+                        oldest_dt is not None
+                        and start_dt is not None
+                        and not pd.isna(oldest_dt)
+                        and oldest_dt.to_pydatetime() <= start_dt
+                    )
+                    if covers_window_start:
+                        return (
+                            f"在 cn_akshare 返回的最近 {fetched_n} 条新闻中，"
+                            f"{start_date} 至 {end_date} 窗口内无新闻"
+                            f"（该源单次上限 {_NEWS_SOURCE_ITEM_LIMIT} 条，非全量扫描）。"
+                        )
+                    oldest_txt = (
+                        oldest_dt.strftime("%Y-%m-%d")
+                        if oldest_dt is not None and not pd.isna(oldest_dt)
+                        else "未知"
+                    )
+                    return (
+                        f"{_NEWS_WINDOW_INSUFFICIENT} cn_akshare 单次仅返回最近 "
+                        f"{_NEWS_SOURCE_ITEM_LIMIT} 条（本次 {fetched_n} 条，最早 {oldest_txt}），"
+                        f"无法判断 {start_date} 至 {end_date} 是否有新闻"
+                        f"（{ticker}）。请勿据此推断该期间无新闻或无催化剂。"
+                    )
 
                 rows = []
                 for _, row in df.head(20).iterrows():
@@ -1370,9 +1512,16 @@ class CnAkshareProvider(BaseMarketDataProvider):
                         rows.append(f"Link: {link}")
                     rows.append("")
 
-                return f"## {ticker} 新闻（{start_date} 至 {end_date}）：\n\n" + "\n".join(rows)
+                # 标题必须披露**源的能力边界**：只有最近 N 条被看过。否则读者会把
+                # 「返回了 3 条」理解成「这个窗口里只有 3 条新闻」。
+                return (
+                    f"## {ticker} 新闻（{start_date} 至 {end_date}；"
+                    f"cn_akshare 单次仅返回最近 {_NEWS_SOURCE_ITEM_LIMIT} 条，"
+                    f"本次抓取 {fetched_n} 条、窗口内命中 {int(len(df))} 条）：\n\n"
+                    + "\n".join(rows)
+                )
             except Exception as exc:
-                raise NotImplementedError(
+                raise SourceUnavailable(
                     f"cn_akshare is temporarily unavailable for news: {exc}"
                 ) from exc
 
@@ -1409,15 +1558,25 @@ class CnAkshareProvider(BaseMarketDataProvider):
                     start = (
                         datetime.strptime(curr_date, "%Y-%m-%d") - timedelta(days=look_back_days)
                     ).strftime("%Y-%m-%d")
+                    # 标题必须写**实际内容的日期跨度**，不能写请求窗口。
+                    #
+                    # 旧写法 `## 全球市场新闻（{start} 至 {curr_date}）` 里 start 是
+                    # `curr_date - look_back_days`（调用方传 90），而内容其实只有
+                    # `used_date` **一天**的新闻联播。宏观分析师会把 1 天的头条
+                    # 当成 90 天的宏观扫描——标题凭空放大了 90 倍的覆盖面。
+                    coverage = (
+                        f"实际内容仅 {used_date} 一天（请求窗口 {start} 至 {curr_date}，"
+                        f"该端点按日取数、不支持区间回溯）"
+                    )
                     if used_date != curr_date:
                         return (
-                            f"## 全球市场新闻（{start} 至 {curr_date}，当日为空，回退至 {used_date}）：\n\n"
+                            f"## 全球市场新闻（{coverage}；当日为空，已回退至 {used_date}）：\n\n"
                             + "\n".join(rows)
                         )
-                    return f"## 全球市场新闻（{start} 至 {curr_date}）：\n\n" + "\n".join(rows)
+                    return f"## 全球市场新闻（{coverage}）：\n\n" + "\n".join(rows)
                 return "当前 cn_akshare 实现暂不支持全球新闻接口。"
             except Exception as exc:
-                raise NotImplementedError(
+                raise SourceUnavailable(
                     f"cn_akshare is temporarily unavailable for global news: {exc}"
                 ) from exc
 
@@ -1450,7 +1609,7 @@ class CnAkshareProvider(BaseMarketDataProvider):
         except Exception as exc:
             errors.append(f"news_fallback: {type(exc).__name__}")
 
-        raise NotImplementedError(
+        raise SourceUnavailable(
             f"cn_akshare is temporarily unavailable for insider transactions: {'; '.join(errors)}"
         )
 
@@ -1681,44 +1840,51 @@ class CnAkshareProvider(BaseMarketDataProvider):
             return f"个股资金流向数据获取失败：{type(exc).__name__}: {exc}"
 
     def get_lhb_detail(self, symbol: str, date: str) -> str:
-        """获取龙虎榜数据，非异动日返回空提示（属正常）。"""
+        """获取龙虎榜数据，非异动日返回空提示（属正常）。
+
+        akshare 的 `stock_lhb_detail_em` 是**按日期区间取全市场明细**的接口，没有
+        symbol 形参：`stock_lhb_detail_em(start_date, end_date)`。所以这里必须请求
+        「当天」这个单日窗口，再按代码过滤出本标的。
+
+        历史 bug（曾让每次深度分析都报 ChunkedEncodingError）：旧实现按「签名随版本
+        变化」的假设逐个试调用，第一项 `func(code, date, date)` 因参数个数不符抛
+        TypeError，于是落到第二项 `func(code, date)` —— akshare 接受并把 code 绑到
+        `start_date`，再切片拼成 "6005-19-.SH"。该字符串排在所有 ISO 日期之前，
+        filter 因而命中几乎全部历史：一次调用爬了全市场 402 页 × 5000 行，多在中途
+        断连（ChunkedEncodingError / ProxyError）；即便侥幸成功，返回的也是**别的
+        股票**的行，却挂在 "<symbol> 龙虎榜明细" 标题下。
+
+        现在只有一条正确调用路径；签名若变化由
+        `tests/test_lhb_detail_fetch.py::test_real_akshare_lhb_signature_is_a_pure_date_window`
+        直接报红，而不是靠运行时瞎试。
+        """
         try:
             ak = self._ak()
             code = self._normalize_symbol(symbol)
+            # akshare 要 YYYYMMDD（内部会切成 YYYY-MM-DD），必须去掉连字符。
+            day = str(date).replace("-", "").strip()
+            if len(day) != 8 or not day.isdigit():
+                return f"龙虎榜数据获取失败：日期无法识别（{date}）"
             with AKSHARE_CALL_LOCK:
                 func = getattr(ak, "stock_lhb_detail_em", None)
                 if func is None:
-                    raise NotImplementedError("akshare.stock_lhb_detail_em not found")
-
-                # akshare 该函数在不同版本间签名变化较多：
-                # - 有的版本使用 (symbol, start_date, end_date)
-                # - 有的版本使用 (symbol, date)
-                # - 有的版本仅接受关键字 (stock=..., start_date=..., end_date=...)
-                # 这里按兼容优先级尝试多种调用方式，避免 TypeError 直接导致数据缺口。
-                last_type_error: TypeError | None = None
-                call_variants = [
-                    lambda: func(code, date, date),
-                    lambda: func(code, date),
-                    lambda: func(symbol=code, start_date=date, end_date=date),
-                    lambda: func(stock=code, start_date=date, end_date=date),
-                    lambda: func(stock=code, date=date),
-                    lambda: func(code),
-                ]
-                df = None
-                for call in call_variants:
-                    try:
-                        df = call()
-                        break
-                    except TypeError as exc:
-                        last_type_error = exc
-                        continue
-
-                if df is None and last_type_error is not None:
-                    raise last_type_error
-            if df is None or df.empty:
+                    raise SourceUnsupported("akshare.stock_lhb_detail_em not found")
+                # 单日窗口：start_date == end_date，这是让这次调用保持廉价的关键。
+                df = func(start_date=day, end_date=day)
+            if df is None or getattr(df, "empty", True):
                 return f"{symbol} 在 {date} 无龙虎榜数据（非异动日属正常）。"
-            return f"{symbol} 龙虎榜明细（{date}）：\n{df.head(20).to_string(index=False)}"
+            hit = _filter_lhb_rows(df, code)
+            if hit is None or hit.empty:
+                return f"{symbol} 在 {date} 无龙虎榜数据（非异动日属正常）。"
+            return f"{symbol} 龙虎榜明细（{date}）：\n{hit.head(20).to_string(index=False)}"
         except Exception as exc:
+            # 上游解析崩溃（`result: null` ⇒ None["pages"]）时，回退直连**核实**这个
+            # 窗口究竟是真的空、还是有数据被上游解析器丢了。不改主路径：akshare
+            # 正常时仍由它供数（单日窗口的调用形状有测试钉着）。
+            if _is_em_parse_crash(exc):
+                recovered = _recover_lhb_via_direct(symbol, code, day, date)
+                if recovered is not None:
+                    return recovered
             return f"龙虎榜数据获取失败：{type(exc).__name__}: {exc}"
 
     def get_zt_pool(self, date: str) -> str:

@@ -185,19 +185,24 @@ def is_lhb_empty_ok(raw: Any, trade_date: str) -> bool:
 
 
 def trading_days_between(anchor_actual: str, anchor_expected: str) -> int:
-    try:
-        from tradingagents.dataflows.trade_calendar import _load_cn_trade_dates
+    """两个日期之间相隔多少个**交易日**。
 
-        dates, dates_set = _load_cn_trade_dates()
-        if not dates:
-            a = datetime.strptime(anchor_actual, "%Y-%m-%d").date()
-            e = datetime.strptime(anchor_expected, "%Y-%m-%d").date()
-            return max(0, (e - a).days)
-        a = datetime.strptime(anchor_actual, "%Y-%m-%d").date()
-        e = datetime.strptime(anchor_expected, "%Y-%m-%d").date()
-        if a >= e:
-            return 0
-        between = [d for d in dates if a < d <= e]
-        return len(between)
-    except Exception:
+    旧实现有两个"读不出即 fresh"的出口（审计 §4.13/§4.16）：
+
+    * `except Exception: return 0` —— 日历不可用时滞后被报成 **0 个交易日**，
+      而 0 滞后正是 "fresh" 的判据。于是"算不出来"变成了"最新"。
+    * `max(0, (e - a).days)` —— 用**自然日**冒充交易日，30 个自然日会被当成
+      30 个交易日，把滞后凭空放大。
+
+    现在：日历取不到就抛 `TradingCalendarUnavailable`，由调用方按"未知"处理
+    （未知必须施加置信度上限，而不是当作 fresh）。日期格式非法仍抛 ValueError，
+    与 `strptime` 的既有语义一致。
+    """
+    from tradingagents.dataflows.trade_calendar import _load_cn_trade_dates
+
+    dates, _dates_set = _load_cn_trade_dates()
+    a = datetime.strptime(anchor_actual, "%Y-%m-%d").date()
+    e = datetime.strptime(anchor_expected, "%Y-%m-%d").date()
+    if a >= e:
         return 0
+    return sum(1 for d in dates if a < d <= e)

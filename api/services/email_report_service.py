@@ -337,8 +337,16 @@ def render_report_html(report: "ReportDB", frontend_url: str = "", stock_name: s
             '<td style="padding:10px 14px;font-size:12px;font-weight:600;color:#64748b;">状态</td>'
             '</tr>'
         )
-        status_labels = {"good": "良好", "neutral": "中性", "bad": "不佳"}
-        status_emoji = {"good": "&#9989;", "neutral": "&#9898;", "bad": "&#10060;"}
+        # `unknown` 是后端新增的显式取值（审计 §4.6）：模型给的等级/优劣无法映射到
+        # 规范值时**不再冒充** medium/neutral。这里必须给它中文标签，
+        # 否则邮件里会直接印出英文 "unknown"。
+        status_labels = {"good": "良好", "neutral": "中性", "bad": "不佳", "unknown": "未识别"}
+        status_emoji = {
+            "good": "&#9989;",
+            "neutral": "&#9898;",
+            "bad": "&#10060;",
+            "unknown": "&#10067;",
+        }
         for i, item in enumerate(key_metrics):
             name = _escape(item.get("name", ""))
             value = _escape(item.get("value", ""))
@@ -365,8 +373,15 @@ def render_report_html(report: "ReportDB", frontend_url: str = "", stock_name: s
             name = _escape(item.get("name", ""))
             level = item.get("level", "")
             level_color = _RISK_LEVEL_COLORS.get(level, "#6b7280")
-            level_bg = {"high": "#fef2f2", "medium": "#fffbeb", "low": "#f0fdf4"}.get(level, "#f8fafc")
-            level_label = {"high": "高", "medium": "中", "low": "低"}.get(level, level)
+            level_bg = {
+                "high": "#fef2f2",
+                "medium": "#fffbeb",
+                "low": "#f0fdf4",
+                "unknown": "#f8fafc",
+            }.get(level, "#f8fafc")
+            level_label = {"high": "高", "medium": "中", "low": "低", "unknown": "未识别"}.get(
+                level, level
+            )
             desc = _escape(item.get("description", ""))
             parts.append(
                 f'<table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;background:{level_bg};border-radius:10px;border:1px solid #e2e8f0;">'
