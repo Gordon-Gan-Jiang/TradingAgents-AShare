@@ -2284,8 +2284,12 @@ class MainlineBoardSpotResponse(BaseModel):
     warnings: List[str]
 
 
+# 推荐「数量」上限：top_k 与 auto_top_n 共用，避免自动分析支数被单独写死。
+_MAX_RECOMMEND_TOP_K = 20
+
+
 class RecommendationRequest(BaseModel):
-    top_k: int = Field(5, ge=1, le=20, description="返回推荐数量")
+    top_k: int = Field(5, ge=1, le=_MAX_RECOMMEND_TOP_K, description="返回推荐数量")
     candidate_limit: int = Field(80, ge=10, le=300, description="候选池上限")
     source_mode: Literal["user_pool", "market_scan"] = Field("user_pool", description="推荐来源：用户池 / 全市场扫描")
     scan_limit: Optional[int] = Field(None, ge=50, le=5000, description="全市场扫描时的股票数量上限")
@@ -2307,7 +2311,7 @@ class RecommendationRequest(BaseModel):
     activity_weight: Optional[float] = Field(None, ge=0.0, le=10.0, description="活跃度权重（可选）")
     near_high_weight: Optional[float] = Field(None, ge=0.0, le=10.0, description="逼近日高权重（可选）")
     auto_start_analysis: bool = Field(False, description="是否自动对推荐标的启动分析任务")
-    auto_top_n: int = Field(0, ge=0, le=10, description="自动启动分析的数量（0 表示等于 top_k）")
+    auto_top_n: int = Field(0, ge=0, le=_MAX_RECOMMEND_TOP_K, description="自动启动分析的数量（0 表示等于 top_k）")
     horizons: List[str] = Field(default_factory=lambda: ["short"], description="自动分析周期")
     selected_analysts: List[str] = Field(
         default_factory=lambda: ["market", "social", "news", "fundamentals", "macro", "smart_money"]
@@ -5838,7 +5842,7 @@ async def recommend_symbols(
         selected_syms: set[str] = set()
         if request.auto_start_analysis:
             run_n = request.auto_top_n or request.top_k
-            run_n = max(1, min(int(run_n), 10))
+            run_n = max(1, min(int(run_n), _MAX_RECOMMEND_TOP_K))
             for it in (rec.get("items") or [])[:run_n]:
                 sym = str(it.get("symbol") or "").strip().upper()
                 if sym:
@@ -5859,7 +5863,7 @@ async def recommend_symbols(
     analysis_jobs: list[RecommendationAnalyzeJob] = []
     if request.auto_start_analysis and rec.get("items"):
         run_n = request.auto_top_n or request.top_k
-        run_n = max(1, min(int(run_n), 10))
+        run_n = max(1, min(int(run_n), _MAX_RECOMMEND_TOP_K))
         picks = rec["items"][:run_n]
         # Launch in small batches to keep burst load stable: at most 5 symbols per batch.
         batch_size = 5

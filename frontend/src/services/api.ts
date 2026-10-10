@@ -19,8 +19,13 @@ function getAuthToken(): string | null {
     }
 }
 
+// 默认 30s；全市场扫描这类同步重接口冷缓存时可能跑 1-2 分钟，需单独放宽，
+// 否则浏览器先超时断开、而后端其实已成功返回（排查时极易误判成后端挂了）。
+const DEFAULT_TIMEOUT_MS = 30000
+const HEAVY_SCAN_TIMEOUT_MS = 180000
+
 class ApiService {
-    private async request<T>(endpoint: string, options?: RequestInit, timeoutMs = 30000): Promise<T> {
+    private async request<T>(endpoint: string, options?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
         const url = `${getBaseUrl()}${endpoint}`
         const token = getAuthToken()
         const controller = new AbortController()
@@ -37,11 +42,14 @@ class ApiService {
                 },
             })
         } catch (err) {
-            // 把 "Failed to fetch" 等网络错误转成可读中文（后端未启动/负载高/超时）
-            const reason = err instanceof Error && err.name === 'AbortError'
-                ? `请求超时（${Math.round(timeoutMs / 1000)}s）`
-                : '无法连接后端服务器'
-            throw new Error(`${reason}：${endpoint}。请确认后端已启动（./scripts/dev.sh start 或单独启动 uvicorn）后重试`)
+            // 区分「超时」与「连不上后端」：原因和处置完全不同，不能共用一句提示。
+            if (err instanceof Error && err.name === 'AbortError') {
+                throw new Error(
+                    `请求超时（${Math.round(timeoutMs / 1000)}s）：${endpoint}。` +
+                    '服务端可能仍在后台执行，请稍后刷新查看结果；若为全市场扫描，可降低「扫描上限」后重试',
+                )
+            }
+            throw new Error(`无法连接后端服务器：${endpoint}。请确认后端已启动（./scripts/dev.sh start 或单独启动 uvicorn）后重试`)
         } finally {
             window.clearTimeout(timer)
         }
@@ -459,17 +467,20 @@ class ApiService {
     }
 
     async getRecommendations(payload: RecommendationRequest): Promise<RecommendationResponse> {
+        // 全市场扫描是同步重活（板块资金流 + 全市场现货），冷缓存时远超 30s；
+        // 用户池来源仍是轻量查询，保持默认超时以便真正异常时快速失败。
         return this.request<RecommendationResponse>('/v1/recommendations', {
             method: 'POST',
             body: JSON.stringify(payload),
-        })
+        }, payload.source_mode === 'market_scan' ? HEAVY_SCAN_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
     }
 
     async runDailyProduct(payload: DailyProductRunRequest): Promise<DailyProductRunResponse> {
+        // mode=recommended 且来源为全市场扫描时，服务端会先跑同一套扫描再建任务。
         return this.request<DailyProductRunResponse>('/v1/daily-product/run', {
             method: 'POST',
             body: JSON.stringify(payload),
-        })
+        }, payload.recommendation_source === 'market_scan' ? HEAVY_SCAN_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
     }
 
     async listDailyProductRuns(limit = 20): Promise<{ runs: DailyProductRunResponse[]; total: number }> {

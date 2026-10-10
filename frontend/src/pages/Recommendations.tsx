@@ -150,11 +150,12 @@ export default function Recommendations() {
         setError(null)
         setSuccessMsg(null)
         try {
+            // 「数量」（topK）同时决定推荐条数与自动启动分析的支数，不再固定 10 支。
             setResult(await api.getRecommendations({
                 ...buildPayload(),
-                top_k: Math.max(10, topK),
+                top_k: topK,
                 auto_start_analysis: true,
-                auto_top_n: 10,
+                auto_top_n: topK,
                 horizons: ['short'],
             }))
             setSelectedSymbols([])
@@ -356,9 +357,10 @@ export default function Recommendations() {
                         刷新推荐
                     </button>
                     <button type="button" onClick={autoAnalyzeTop} disabled={loading}
-                        className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-sm text-white hover:bg-slate-700">
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-sm text-white hover:bg-slate-700"
+                        title={`按「数量」对前 ${topK} 只推荐标的自动启动分析`}>
                         {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
-                        推荐并分析（10支）
+                        推荐并分析（{topK}支）
                     </button>
                     <button
                         type="button"
